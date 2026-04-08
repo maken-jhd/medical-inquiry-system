@@ -1,0 +1,4 @@
+min_top1_margin: 0.25
+min_top1_score: 1.0
+max_fail_count: 2
+min_candidate_count: 1

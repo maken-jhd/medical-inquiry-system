@@ -1,0 +1,23 @@
+{
+  "merge_groups": [
+    {
+      "canonical_name": "肺孢子菌肺炎预防 (PCP预防)",
+      "aliases": [
+        "PCP预防",
+        "PCP预防用药",
+        "肺孢子菌预防性治疗"
+      ],
+      "confidence": "high",
+      "reason": "同一种机会性感染（肺孢子菌肺炎/PCP）的预防措施的中英文缩写及预防用药习惯表述变体"
+    },
+    {
+      "canonical_name": "弓形虫预防性治疗",
+      "aliases": [
+        "弓形虫脑病预防",
+        "弓形虫预防性治疗"
+      ],
+      "confidence": "high",
+      "reason": "针对同一种机会性靶器官感染（弓形虫脑病）预防性干预策略的等价表述"
+    }
+  ]
+}

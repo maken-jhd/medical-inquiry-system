@@ -1,0 +1,1934 @@
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import os
+import re
+import sys
+import traceback
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+
+from openai import AsyncOpenAI
+
+KG_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = KG_ROOT.parent
+
+ALLOWED_EDGE_TYPES = [
+    "HAS_SECTION",
+    "HAS_EVIDENCE",
+    "SUBJECT",
+    "OBJECT",
+    "SUPPORTED_BY",
+    "RECOMMENDS",
+    "CAUSED_BY",
+    "HAS_PHASE",
+    "MANIFESTS_AS",
+    "HAS_LAB_FINDING",
+    "DIAGNOSED_BY",
+    "COMPLICATED_BY",
+    "TREATED_WITH",
+    "CONSISTS_OF",
+    "BELONGS_TO_CLASS",
+    "PREVENTED_BY",
+    "MONITORED_BY",
+    "SCREENED_BY",
+    "APPLIES_TO",
+    "RISK_FACTOR_FOR",
+    "TRANSMITTED_VIA",
+    "INTERACTS_WITH",
+    "INITIATED_AFTER",
+    "CONTRAINDICATED_IN",
+    "NOT_RECOMMENDED_FOR",
+    "REQUIRES_DETAIL",
+]
+
+DETAIL_LEVELS = {"minimal", "standard", "full"}
+NON_SEMANTIC_EDGE_TYPES = {"HAS_SECTION", "HAS_EVIDENCE", "SUPPORTED_BY", "SUBJECT", "OBJECT"}
+FOCUS_LABELS = {
+    "Assertion",
+    "ClinicalAttribute",
+    "Comorbidity",
+    "DiagnosticCriterion",
+    "Disease",
+    "DiseasePhase",
+    "DrugClass",
+    "ExposureScenario",
+    "LabFinding",
+    "LabTest",
+    "ManagementAction",
+    "Medication",
+    "OpportunisticInfection",
+    "Pathogen",
+    "PopulationGroup",
+    "PreventionStrategy",
+    "Recommendation",
+    "RiskFactor",
+    "Sign",
+    "Symptom",
+    "SyndromeOrComplication",
+    "TransmissionRoute",
+    "TreatmentRegimen",
+    "Tumor",
+}
+NON_DROPPABLE_LABELS = {"GuidelineDocument", "GuidelineSection", "EvidenceSpan"}
+SOURCE_LABEL_TARGET_LABELS: Dict[str, set[str]] = {
+    "Recommendation": {
+        "Medication",
+        "TreatmentRegimen",
+        "ManagementAction",
+        "DiagnosticCriterion",
+        "PreventionStrategy",
+        "PopulationGroup",
+        "LabTest",
+        "LabFinding",
+        "ClinicalAttribute",
+        "Disease",
+        "DiseasePhase",
+        "OpportunisticInfection",
+        "Comorbidity",
+        "SyndromeOrComplication",
+    },
+    "Disease": {
+        "Medication",
+        "TreatmentRegimen",
+        "ManagementAction",
+        "LabTest",
+        "LabFinding",
+        "DiagnosticCriterion",
+        "Symptom",
+        "Sign",
+        "ClinicalAttribute",
+        "OpportunisticInfection",
+        "Comorbidity",
+        "Tumor",
+        "SyndromeOrComplication",
+        "PopulationGroup",
+        "PreventionStrategy",
+    },
+    "DiseasePhase": {
+        "Medication",
+        "TreatmentRegimen",
+        "ManagementAction",
+        "LabTest",
+        "LabFinding",
+        "DiagnosticCriterion",
+        "Symptom",
+        "Sign",
+        "ClinicalAttribute",
+        "OpportunisticInfection",
+        "Comorbidity",
+        "Tumor",
+        "SyndromeOrComplication",
+    },
+    "OpportunisticInfection": {
+        "Medication",
+        "TreatmentRegimen",
+        "ManagementAction",
+        "LabTest",
+        "LabFinding",
+        "DiagnosticCriterion",
+        "Symptom",
+        "Sign",
+        "ClinicalAttribute",
+        "PopulationGroup",
+        "PreventionStrategy",
+    },
+    "Comorbidity": {
+        "Medication",
+        "TreatmentRegimen",
+        "ManagementAction",
+        "LabTest",
+        "LabFinding",
+        "DiagnosticCriterion",
+        "Symptom",
+        "Sign",
+        "ClinicalAttribute",
+    },
+    "SyndromeOrComplication": {
+        "Medication",
+        "TreatmentRegimen",
+        "ManagementAction",
+        "LabTest",
+        "LabFinding",
+        "DiagnosticCriterion",
+        "Symptom",
+        "Sign",
+        "ClinicalAttribute",
+    },
+    "Medication": {
+        "Disease",
+        "DiseasePhase",
+        "OpportunisticInfection",
+        "Comorbidity",
+        "SyndromeOrComplication",
+        "Tumor",
+        "DrugClass",
+        "RiskFactor",
+        "PopulationGroup",
+        "LabFinding",
+        "ClinicalAttribute",
+        "Recommendation",
+    },
+    "LabTest": {
+        "Disease",
+        "DiseasePhase",
+        "OpportunisticInfection",
+        "Comorbidity",
+        "SyndromeOrComplication",
+        "PopulationGroup",
+        "LabFinding",
+        "DiagnosticCriterion",
+        "Recommendation",
+    },
+    "LabFinding": {
+        "Disease",
+        "DiseasePhase",
+        "OpportunisticInfection",
+        "Comorbidity",
+        "SyndromeOrComplication",
+        "PopulationGroup",
+        "Medication",
+        "Recommendation",
+    },
+    "ClinicalAttribute": {
+        "Recommendation",
+        "DiagnosticCriterion",
+        "LabTest",
+        "Symptom",
+        "Sign",
+        "ManagementAction",
+        "PopulationGroup",
+        "Disease",
+        "Medication",
+    },
+    "ManagementAction": {
+        "Disease",
+        "Recommendation",
+        "PopulationGroup",
+        "ClinicalAttribute",
+        "TreatmentRegimen",
+    },
+}
+
+def build_repair_output_schema(max_add_edges: int) -> Dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["add_edges", "drop_node_ids", "notes"],
+        "properties": {
+            "add_edges": {
+                "type": "array",
+                "maxItems": max_add_edges,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "source_id",
+                        "type",
+                        "target_id",
+                        "weight",
+                        "detail_required",
+                        "evidence_text",
+                        "confidence",
+                    ],
+                    "properties": {
+                        "source_id": {"type": "string"},
+                        "type": {"type": "string", "enum": ALLOWED_EDGE_TYPES},
+                        "target_id": {"type": "string"},
+                        "weight": {"type": "number", "minimum": 0, "maximum": 1},
+                        "detail_required": {"type": "string", "enum": sorted(DETAIL_LEVELS)},
+                        "evidence_text": {"type": "string", "maxLength": 220},
+                        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                        "attributes": {
+                            "type": "object",
+                            "additionalProperties": True,
+                        },
+                    },
+                },
+            },
+            "drop_node_ids": {
+                "type": "array",
+                "maxItems": max_add_edges,
+                "items": {"type": "string"},
+            },
+            "notes": {
+                "type": "array",
+                "maxItems": 3,
+                "items": {"type": "string", "maxLength": 160},
+            },
+        },
+    }
+
+REPAIR_SYSTEM_PROMPT = f"""
+你正在执行知识图谱“关系修补”任务，而不是重新抽取整张图。
+
+你的目标：
+1. 只针对给定 chunk 中的可疑节点补充缺失关系。
+2. 如果某个可疑节点在当前 chunk 文本中没有足够依据、也无法与当前 chunk 里的其他节点建立可信关系，可以建议删除它。
+3. 你绝对不能新建节点，也绝对不能引用当前 chunk 之外的节点 id。
+
+严格规则：
+1. 只能返回严格 JSON，顶层字段只能是：
+   - add_edges
+   - drop_node_ids
+   - notes
+2. add_edges 里的 source_id 和 target_id 必须来自输入中给定的 existing_nodes。
+3. 你只能使用以下关系类型：
+   {", ".join(ALLOWED_EDGE_TYPES)}
+4. 不要重复已有边。
+5. 只有在文本中有明确证据时才补边，evidence_text 必须摘自当前提供的上下文。
+6. 优先补“业务语义边”，例如：
+   - Recommendation -> RECOMMENDS -> Medication/TreatmentRegimen/ManagementAction/DiagnosticCriterion/PreventionStrategy
+   - Disease -> TREATED_WITH -> Medication/TreatmentRegimen
+   - Disease -> DIAGNOSED_BY / HAS_LAB_FINDING / MANIFESTS_AS -> target
+   - Symptom / DiagnosticCriterion -> REQUIRES_DETAIL -> ClinicalAttribute
+7. 对 Recommendation：
+   - 优先让 Recommendation 指向被推荐的对象
+   - 不要再创建 Section -> RECOMMENDS -> Recommendation 这种关系，因为那不是本次修补目标
+8. 如果你拿不准，不要补边。
+9. 允许删除的仅限当前标记为 suspicious 的节点；不要删除其他节点。
+10. 不要输出任何解释性文字。
+11. 默认保持 drop_node_ids 为空数组，除非文本中明确看不到该节点且你非常确定它应被丢弃。
+12. 最多只补少量最关键的边，宁可少补，也不要为了“补全”输出很多边。
+""".strip()
+
+
+@dataclass
+class RepairConfig:
+    input_file: Path
+    output_file: Path
+    report_file: Path
+    retry_report_file: Optional[Path]
+    baseline_output_file: Optional[Path]
+    retry_chunk_ids: List[str]
+    source_root_dir: Path
+    api_key: str
+    base_url: str
+    model: str
+    request_timeout_seconds: float
+    sdk_max_retries: int
+    concurrency: int
+    retry_count: int
+    retry_delay_ms: int
+    min_confidence: float
+    apply_drop_node_ids: bool
+    max_context_nodes: int
+    max_context_edges: int
+    max_chunk_text_chars: int
+    max_add_edges: int
+
+
+@dataclass
+class SuspiciousNode:
+    node_id: str
+    label: str
+    name: str
+    reasons: List[str]
+
+
+@dataclass
+class ChunkContext:
+    chunk_id: str
+    relative_path: str
+    heading_path: List[str]
+    line_start: int
+    line_end: int
+    chunk_text: str
+
+
+class RepairValidationError(RuntimeError):
+    pass
+
+
+def summarize_text_for_prompt(value: str, limit: int = 500) -> str:
+    normalized = re.sub(r"\s+", " ", value).strip()
+
+    if len(normalized) <= limit:
+        return normalized
+
+    return normalized[:limit].rstrip() + " ..."
+
+
+def parse_positive_int(value: Optional[str], fallback: int) -> int:
+    if value is None:
+        return fallback
+
+    try:
+        parsed = int(value)
+    except ValueError:
+        return fallback
+
+    if parsed > 0:
+        return parsed
+
+    return fallback
+
+
+def parse_positive_float(value: Optional[str], fallback: float) -> float:
+    if value is None:
+        return fallback
+
+    try:
+        parsed = float(value)
+    except ValueError:
+        return fallback
+
+    if parsed > 0:
+        return parsed
+
+    return fallback
+
+
+def parse_csv_strings(value: Optional[str]) -> List[str]:
+    if value is None:
+        return []
+
+    parts = [item.strip() for item in value.split(",")]
+    return [item for item in parts if len(item) > 0]
+
+
+def clean_text(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+
+    cleaned = re.sub(r"\s+", " ", value).strip()
+
+    if len(cleaned) == 0:
+        return None
+
+    return cleaned
+
+
+def flatten_attributes(item: Dict[str, Any]) -> None:
+    attributes = item.get("attributes")
+
+    if not isinstance(attributes, dict):
+        return
+
+    for key, value in attributes.items():
+        if key not in item:
+            item[key] = value
+
+
+def read_env_config() -> RepairConfig:
+    output_root = Path(
+        os.getenv("REPAIR_OUTPUT_ROOT", str(PROJECT_ROOT / "test_outputs" / "relation_repair"))
+    ).resolve()
+    input_file = Path(
+        os.getenv("REPAIR_INPUT_FILE", str(PROJECT_ROOT / "output_graph_test.jsonl"))
+    ).resolve()
+    output_file = Path(
+        os.getenv("REPAIR_OUTPUT_FILE", str(output_root / "output_graph_test_repaired.jsonl"))
+    ).resolve()
+    report_file = Path(
+        os.getenv("REPAIR_REPORT_FILE", str(output_root / "output_graph_test_repaired_report.json"))
+    ).resolve()
+    retry_report_env = os.getenv("REPAIR_RETRY_REPORT_FILE")
+    baseline_output_env = os.getenv("REPAIR_BASELINE_OUTPUT_FILE")
+    source_root_dir = Path(
+        os.getenv(
+            "REPAIR_SOURCE_ROOT_DIR",
+            str(
+                (PROJECT_ROOT / "HIV_cleaned")
+                if (PROJECT_ROOT / "HIV_cleaned").exists()
+                else (PROJECT_ROOT / "HIV")
+            ),
+        )
+    ).resolve()
+    api_key = (
+        os.getenv("REPAIR_API_KEY")
+        or os.getenv("OPENAI_API_KEY")
+        or os.getenv("DASHSCOPE_API_KEY")
+        or os.getenv("LLM_API_KEY")
+        or ""
+    )
+    base_url = (
+        os.getenv("REPAIR_BASE_URL")
+        or os.getenv("OPENAI_BASE_URL")
+        or "https://api.openai.com/v1"
+    )
+    model = os.getenv("REPAIR_MODEL") or os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL") or "gpt-4.1"
+    request_timeout_seconds = parse_positive_float(
+        os.getenv("REPAIR_REQUEST_TIMEOUT_SECONDS"),
+        180.0,
+    )
+    sdk_max_retries = parse_positive_int(os.getenv("REPAIR_SDK_MAX_RETRIES"), 0)
+    concurrency = parse_positive_int(os.getenv("REPAIR_CONCURRENCY"), 4)
+    retry_count = parse_positive_int(os.getenv("REPAIR_RETRY_COUNT"), 3)
+    retry_delay_ms = parse_positive_int(os.getenv("REPAIR_RETRY_DELAY_MS"), 1500)
+    min_confidence = parse_positive_float(os.getenv("REPAIR_MIN_CONFIDENCE"), 0.6)
+    apply_drop_node_ids = (os.getenv("REPAIR_APPLY_DROP_NODE_IDS") or "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    retry_chunk_ids = parse_csv_strings(os.getenv("REPAIR_RETRY_CHUNK_IDS"))
+    max_context_nodes = parse_positive_int(os.getenv("REPAIR_MAX_CONTEXT_NODES"), 40)
+    max_context_edges = parse_positive_int(os.getenv("REPAIR_MAX_CONTEXT_EDGES"), 80)
+    max_chunk_text_chars = parse_positive_int(os.getenv("REPAIR_MAX_CHUNK_TEXT_CHARS"), 6000)
+    max_add_edges = parse_positive_int(os.getenv("REPAIR_MAX_ADD_EDGES"), 8)
+    return RepairConfig(
+        input_file=input_file,
+        output_file=output_file,
+        report_file=report_file,
+        retry_report_file=Path(retry_report_env).resolve() if retry_report_env else None,
+        baseline_output_file=Path(baseline_output_env).resolve() if baseline_output_env else None,
+        retry_chunk_ids=retry_chunk_ids,
+        source_root_dir=source_root_dir,
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        request_timeout_seconds=request_timeout_seconds,
+        sdk_max_retries=sdk_max_retries,
+        concurrency=concurrency,
+        retry_count=retry_count,
+        retry_delay_ms=retry_delay_ms,
+        min_confidence=min_confidence,
+        apply_drop_node_ids=apply_drop_node_ids,
+        max_context_nodes=max_context_nodes,
+        max_context_edges=max_context_edges,
+        max_chunk_text_chars=max_chunk_text_chars,
+        max_add_edges=max_add_edges,
+    )
+
+
+def load_jsonl_records(path: Path) -> List[Dict[str, Any]]:
+    records: List[Dict[str, Any]] = []
+
+    with path.open("r", encoding="utf-8") as handle:
+        for line_number, raw_line in enumerate(handle, start=1):
+            line = raw_line.strip()
+
+            if len(line) == 0:
+                continue
+
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"Invalid JSON at line {line_number} in {path}: {exc}") from exc
+
+    return records
+
+
+def load_retry_chunk_ids_from_report(path: Path) -> List[str]:
+    report = json.loads(path.read_text(encoding="utf-8"))
+    chunk_ids: List[str] = []
+
+    for item in report.get("chunk_summaries", []):
+        if not isinstance(item, dict):
+            continue
+
+        if item.get("status") != "repair_failed":
+            continue
+
+        chunk_id = clean_text(item.get("chunk_id"))
+
+        if chunk_id is not None:
+            chunk_ids.append(chunk_id)
+
+    return chunk_ids
+
+
+def determine_retry_chunk_ids(config: RepairConfig) -> List[str]:
+    ordered_chunk_ids: List[str] = []
+    seen: set[str] = set()
+
+    for chunk_id in config.retry_chunk_ids:
+        if chunk_id in seen:
+            continue
+
+        ordered_chunk_ids.append(chunk_id)
+        seen.add(chunk_id)
+
+    if config.retry_report_file is not None and config.retry_report_file.exists():
+        for chunk_id in load_retry_chunk_ids_from_report(config.retry_report_file):
+            if chunk_id in seen:
+                continue
+
+            ordered_chunk_ids.append(chunk_id)
+            seen.add(chunk_id)
+
+    return ordered_chunk_ids
+
+
+def filter_records_for_retry(records: Sequence[Dict[str, Any]], retry_chunk_ids: set[str]) -> List[Dict[str, Any]]:
+    filtered_records: List[Dict[str, Any]] = []
+
+    for record in records:
+        if record.get("record_type") != "chunk_result":
+            continue
+
+        chunk_id = clean_text(record.get("chunk_id"))
+
+        if chunk_id is None or chunk_id not in retry_chunk_ids:
+            continue
+
+        filtered_records.append(record)
+
+    return filtered_records
+
+
+def merge_retry_results_into_baseline(
+    baseline_records: Sequence[Dict[str, Any]],
+    retried_records: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    replacement_map: Dict[str, Dict[str, Any]] = {}
+
+    for record in retried_records:
+        if record.get("record_type") != "chunk_result":
+            continue
+
+        chunk_id = clean_text(record.get("chunk_id"))
+
+        if chunk_id is None:
+            continue
+
+        replacement_map[chunk_id] = record
+
+    merged_records: List[Dict[str, Any]] = []
+
+    for record in baseline_records:
+        if record.get("record_type") != "chunk_result":
+            merged_records.append(record)
+            continue
+
+        chunk_id = clean_text(record.get("chunk_id"))
+
+        if chunk_id is None or chunk_id not in replacement_map:
+            merged_records.append(record)
+            continue
+
+        merged_records.append(replacement_map[chunk_id])
+
+    return merged_records
+
+
+def resolve_source_file_path(relative_path: str, config: RepairConfig) -> Optional[Path]:
+    candidates = [
+        config.source_root_dir / relative_path,
+        PROJECT_ROOT / relative_path,
+        PROJECT_ROOT / "HIV_cleaned" / relative_path,
+        PROJECT_ROOT / "HIV" / relative_path,
+    ]
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    return None
+
+
+def load_chunk_text_from_source(record: Dict[str, Any], config: RepairConfig) -> str:
+    relative_path = clean_text(record.get("relative_path"))
+    line_start = int(record.get("line_start", 0) or 0)
+    line_end = int(record.get("line_end", 0) or 0)
+
+    if relative_path is None or line_start <= 0 or line_end <= 0 or line_end < line_start:
+        return ""
+
+    source_path = resolve_source_file_path(relative_path, config)
+
+    if source_path is None:
+        return ""
+
+    lines = source_path.read_text(encoding="utf-8").splitlines()
+    start_index = max(line_start - 1, 0)
+    end_index = min(line_end, len(lines))
+
+    if start_index >= end_index:
+        return ""
+
+    return "\n".join(lines[start_index:end_index])
+
+
+def build_chunk_context(record: Dict[str, Any], config: RepairConfig) -> ChunkContext:
+    chunk_text = str(record.get("chunk_text", ""))
+
+    if len(chunk_text.strip()) == 0:
+        chunk_text = load_chunk_text_from_source(record, config)
+
+    if len(chunk_text) > config.max_chunk_text_chars:
+        chunk_text = chunk_text[: config.max_chunk_text_chars].rstrip() + "\n...[TRUNCATED]"
+
+    return ChunkContext(
+        chunk_id=str(record.get("chunk_id", "")),
+        relative_path=str(record.get("relative_path", "")),
+        heading_path=list(record.get("heading_path", [])) if isinstance(record.get("heading_path"), list) else [],
+        line_start=int(record.get("line_start", 0) or 0),
+        line_end=int(record.get("line_end", 0) or 0),
+        chunk_text=chunk_text,
+    )
+
+
+def compute_edge_maps(edges: Sequence[Dict[str, Any]]) -> Tuple[Dict[str, int], Dict[str, int], Dict[str, int]]:
+    incident_count: Dict[str, int] = {}
+    outgoing_total_count: Dict[str, int] = {}
+    outgoing_semantic_count: Dict[str, int] = {}
+
+    for raw_edge in edges:
+        if not isinstance(raw_edge, dict):
+            continue
+
+        edge = dict(raw_edge)
+        flatten_attributes(edge)
+        source_id = clean_text(edge.get("source_id"))
+        target_id = clean_text(edge.get("target_id"))
+        edge_type = clean_text(edge.get("type"))
+
+        if source_id is None or target_id is None or edge_type is None:
+            continue
+
+        incident_count[source_id] = incident_count.get(source_id, 0) + 1
+        incident_count[target_id] = incident_count.get(target_id, 0) + 1
+        outgoing_total_count[source_id] = outgoing_total_count.get(source_id, 0) + 1
+
+        if edge_type not in NON_SEMANTIC_EDGE_TYPES:
+            outgoing_semantic_count[source_id] = outgoing_semantic_count.get(source_id, 0) + 1
+
+    return incident_count, outgoing_total_count, outgoing_semantic_count
+
+
+def identify_suspicious_nodes(record: Dict[str, Any]) -> List[SuspiciousNode]:
+    extraction = record.get("extraction")
+
+    if not isinstance(extraction, dict):
+        return []
+
+    nodes = extraction.get("nodes")
+    edges = extraction.get("edges")
+
+    if not isinstance(nodes, list) or not isinstance(edges, list):
+        return []
+
+    incident_count, outgoing_total_count, outgoing_semantic_count = compute_edge_maps(edges)
+    suspicious_nodes: List[SuspiciousNode] = []
+
+    for raw_node in nodes:
+        if not isinstance(raw_node, dict):
+            continue
+
+        node = dict(raw_node)
+        flatten_attributes(node)
+        node_id = clean_text(node.get("id"))
+        label = clean_text(node.get("label"))
+        name = clean_text(node.get("name"))
+
+        if node_id is None or label is None or name is None:
+            continue
+
+        if label not in FOCUS_LABELS:
+            continue
+
+        reasons: List[str] = []
+
+        if incident_count.get(node_id, 0) == 0:
+            reasons.append("isolated_node")
+
+        if label == "Recommendation" and outgoing_semantic_count.get(node_id, 0) == 0:
+            reasons.append("recommendation_without_semantic_out_edges")
+
+        if len(reasons) == 0:
+            continue
+
+        suspicious_nodes.append(
+            SuspiciousNode(
+                node_id=node_id,
+                label=label,
+                name=name,
+                reasons=reasons,
+            )
+        )
+
+    return suspicious_nodes
+
+
+def compact_node(node: Dict[str, Any]) -> Dict[str, Any]:
+    result: Dict[str, Any] = {
+        "id": node.get("id"),
+        "label": node.get("label"),
+        "name": node.get("name"),
+    }
+
+    for key in ["canonical_name", "definition", "test_id", "operator", "value", "value_text", "unit", "recommendation_text"]:
+        if key in node and node.get(key) not in [None, "", [], {}]:
+            result[key] = node.get(key)
+
+    return result
+
+
+def compact_edge(edge: Dict[str, Any]) -> Dict[str, Any]:
+    result: Dict[str, Any] = {
+        "id": edge.get("id"),
+        "type": edge.get("type"),
+        "source_id": edge.get("source_id"),
+        "target_id": edge.get("target_id"),
+    }
+
+    condition_text = clean_text(edge.get("condition_text"))
+
+    if condition_text is not None:
+        result["condition_text"] = condition_text
+
+    return result
+
+
+def build_node_map(nodes: Sequence[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    node_map: Dict[str, Dict[str, Any]] = {}
+
+    for raw_node in nodes:
+        if not isinstance(raw_node, dict):
+            continue
+
+        node = dict(raw_node)
+        flatten_attributes(node)
+        node_id = clean_text(node.get("id"))
+
+        if node_id is None:
+            continue
+
+        node_map[node_id] = node
+
+    return node_map
+
+
+def build_edge_index(edges: Sequence[Dict[str, Any]]) -> Tuple[Dict[str, List[Dict[str, Any]]], Dict[str, List[Dict[str, Any]]]]:
+    outgoing: Dict[str, List[Dict[str, Any]]] = {}
+    incoming: Dict[str, List[Dict[str, Any]]] = {}
+
+    for raw_edge in edges:
+        if not isinstance(raw_edge, dict):
+            continue
+
+        edge = dict(raw_edge)
+        flatten_attributes(edge)
+        source_id = clean_text(edge.get("source_id"))
+        target_id = clean_text(edge.get("target_id"))
+
+        if source_id is None or target_id is None:
+            continue
+
+        outgoing.setdefault(source_id, []).append(edge)
+        incoming.setdefault(target_id, []).append(edge)
+
+    return outgoing, incoming
+
+
+def score_candidate_node(
+    node: Dict[str, Any],
+    suspicious_nodes: Sequence[SuspiciousNode],
+    suspicious_node_ids: set[str],
+    anchor_neighbor_ids: set[str],
+) -> int:
+    node_id = clean_text(node.get("id")) or ""
+    label = clean_text(node.get("label")) or ""
+    score = 0
+
+    if node_id in suspicious_node_ids:
+        score += 1000
+
+    if node_id in anchor_neighbor_ids:
+        score += 250
+
+    for suspicious_node in suspicious_nodes:
+        target_labels = SOURCE_LABEL_TARGET_LABELS.get(suspicious_node.label, set())
+
+        if label in target_labels:
+            score += 40
+
+    if label == "Recommendation":
+        score += 15
+
+    if label in {"Medication", "LabTest", "LabFinding", "ClinicalAttribute", "ManagementAction"}:
+        score += 10
+
+    name = clean_text(node.get("name")) or ""
+    score += min(len(name), 20)
+    return score
+
+
+def select_context_subgraph(
+    record: Dict[str, Any],
+    suspicious_nodes: Sequence[SuspiciousNode],
+    config: RepairConfig,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    extraction = record["extraction"]
+    raw_nodes = extraction["nodes"]
+    raw_edges = extraction["edges"]
+    node_map = build_node_map(raw_nodes)
+    outgoing_edges, incoming_edges = build_edge_index(raw_edges)
+    suspicious_node_ids = {node.node_id for node in suspicious_nodes}
+    anchor_neighbor_ids: set[str] = set()
+
+    for suspicious_node_id in suspicious_node_ids:
+        for edge in outgoing_edges.get(suspicious_node_id, []):
+            target_id = clean_text(edge.get("target_id"))
+
+            if target_id is not None:
+                anchor_neighbor_ids.add(target_id)
+
+        for edge in incoming_edges.get(suspicious_node_id, []):
+            source_id = clean_text(edge.get("source_id"))
+
+            if source_id is not None:
+                anchor_neighbor_ids.add(source_id)
+
+    ranked_nodes = sorted(
+        node_map.values(),
+        key=lambda node: (
+            -score_candidate_node(node, suspicious_nodes, suspicious_node_ids, anchor_neighbor_ids),
+            clean_text(node.get("label")) or "",
+            clean_text(node.get("name")) or "",
+        ),
+    )
+
+    selected_nodes: List[Dict[str, Any]] = []
+    selected_node_ids: set[str] = set()
+
+    for node in ranked_nodes:
+        node_id = clean_text(node.get("id"))
+
+        if node_id is None or node_id in selected_node_ids:
+            continue
+
+        if len(selected_nodes) >= config.max_context_nodes and node_id not in suspicious_node_ids:
+            continue
+
+        selected_nodes.append(node)
+        selected_node_ids.add(node_id)
+
+    selected_edges: List[Dict[str, Any]] = []
+
+    for raw_edge in raw_edges:
+        if not isinstance(raw_edge, dict):
+            continue
+
+        edge = dict(raw_edge)
+        flatten_attributes(edge)
+        source_id = clean_text(edge.get("source_id"))
+        target_id = clean_text(edge.get("target_id"))
+
+        if source_id is None or target_id is None:
+            continue
+
+        if source_id not in selected_node_ids or target_id not in selected_node_ids:
+            continue
+
+        selected_edges.append(edge)
+
+    selected_edges = sorted(
+        selected_edges,
+        key=lambda edge: (
+            0 if clean_text(edge.get("type")) in NON_SEMANTIC_EDGE_TYPES else -1,
+            clean_text(edge.get("type")) or "",
+            clean_text(edge.get("source_id")) or "",
+            clean_text(edge.get("target_id")) or "",
+        ),
+    )[: config.max_context_edges]
+
+    return selected_nodes, selected_edges
+
+
+def build_retry_feedback_block(retry_feedback: Optional[str]) -> List[str]:
+    if retry_feedback is None:
+        return []
+
+    return [
+        "",
+        "[Previous Attempt Error]",
+        retry_feedback,
+        "请显式修正以上问题，不要重复同样的输出错误。",
+    ]
+
+
+def build_messages(
+    record: Dict[str, Any],
+    suspicious_nodes: Sequence[SuspiciousNode],
+    config: RepairConfig,
+    retry_feedback: Optional[str] = None,
+) -> List[Dict[str, str]]:
+    chunk = build_chunk_context(record, config)
+    heading_text = " > ".join(chunk.heading_path) if len(chunk.heading_path) > 0 else chunk.relative_path
+    suspicious_lines = [
+        f"- {node.node_id} | {node.label} | {node.name} | reasons={','.join(node.reasons)}"
+        for node in suspicious_nodes
+    ]
+    selected_nodes, selected_edges = select_context_subgraph(record, suspicious_nodes, config)
+    existing_nodes = [compact_node(node) for node in selected_nodes]
+    existing_edges = [compact_edge(edge) for edge in selected_edges]
+
+    user_prompt = "\n".join(
+        [
+            "请只修补当前 chunk 内可疑节点的缺失关系，不要重新抽取整张图。",
+            "若某个可疑节点在当前文本中缺乏足够依据，也无法与当前 chunk 的其他节点形成可靠关系，可以建议删除它。",
+            "你只能使用 existing_nodes 中已经存在的节点 id。",
+            f"最多补 {config.max_add_edges} 条最关键的新边；如果拿不准，宁可少补。",
+            "notes 最多写 3 条极短说明；如果没有补充说明，返回空数组。",
+            "drop_node_ids 默认返回空数组。",
+            *build_retry_feedback_block(retry_feedback),
+            "",
+            "[Chunk Metadata]",
+            f"Chunk ID: {chunk.chunk_id}",
+            f"Document: {chunk.relative_path}",
+            f"Heading Path: {heading_text}",
+            f"Line Range: {chunk.line_start}-{chunk.line_end}",
+            f"Selected Node Count: {len(existing_nodes)}",
+            f"Selected Edge Count: {len(existing_edges)}",
+            "",
+            "[Suspicious Nodes]",
+            "\n".join(suspicious_lines),
+            "",
+            "[Existing Nodes JSON]",
+            json.dumps(existing_nodes, ensure_ascii=False, indent=2),
+            "",
+            "[Existing Edges JSON]",
+            json.dumps(existing_edges, ensure_ascii=False, indent=2),
+            "",
+            "[Chunk Text]",
+            chunk.chunk_text,
+        ]
+    )
+
+    return [
+        {"role": "system", "content": REPAIR_SYSTEM_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
+
+
+def extract_assistant_content(response: Any) -> str:
+    choices = getattr(response, "choices", None)
+
+    if not choices:
+        raise RuntimeError("Model response does not contain choices.")
+
+    message = choices[0].message
+    content = getattr(message, "content", None)
+
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        text_parts: List[str] = []
+
+        for item in content:
+            text_value = getattr(item, "text", None)
+
+            if isinstance(text_value, str):
+                text_parts.append(text_value)
+
+        if len(text_parts) > 0:
+            return "\n".join(text_parts)
+
+    refusal = getattr(message, "refusal", None)
+
+    if isinstance(refusal, str) and len(refusal) > 0:
+        raise RuntimeError(f"Model refused the request: {refusal}")
+
+    raise RuntimeError("Unable to extract text content from the model response.")
+
+
+def strip_code_fences(text: str) -> str:
+    stripped = text.strip()
+    stripped = re.sub(r"^```json\s*", "", stripped, flags=re.IGNORECASE)
+    stripped = re.sub(r"^```\s*", "", stripped, flags=re.IGNORECASE)
+    stripped = re.sub(r"\s*```$", "", stripped)
+    return stripped.strip()
+
+
+def extract_balanced_array_segment(text: str, key: str) -> Optional[str]:
+    key_index = text.find(f'"{key}"')
+
+    if key_index < 0:
+        return None
+
+    start_index = text.find("[", key_index)
+
+    if start_index < 0:
+        return None
+
+    depth = 0
+    in_string = False
+    escaped = False
+
+    for index in range(start_index, len(text)):
+        char = text[index]
+
+        if escaped:
+            escaped = False
+            continue
+
+        if char == "\\":
+            escaped = True
+            continue
+
+        if char == '"':
+            in_string = not in_string
+            continue
+
+        if in_string:
+            continue
+
+        if char == "[":
+            depth += 1
+            continue
+
+        if char == "]":
+            depth -= 1
+
+            if depth == 0:
+                return text[start_index : index + 1]
+
+    return None
+
+
+def extract_complete_object_items_from_array(array_text: str) -> List[Dict[str, Any]]:
+    if not array_text.startswith("["):
+        return []
+
+    items: List[Dict[str, Any]] = []
+    depth = 0
+    in_string = False
+    escaped = False
+    current_start: Optional[int] = None
+
+    for index, char in enumerate(array_text):
+        if escaped:
+            escaped = False
+            continue
+
+        if char == "\\":
+            escaped = True
+            continue
+
+        if char == '"':
+            in_string = not in_string
+            continue
+
+        if in_string:
+            continue
+
+        if char == "{":
+            if depth == 0:
+                current_start = index
+
+            depth += 1
+            continue
+
+        if char == "}":
+            depth -= 1
+
+            if depth == 0 and current_start is not None:
+                candidate = array_text[current_start : index + 1]
+
+                try:
+                    parsed = json.loads(candidate)
+                except json.JSONDecodeError:
+                    current_start = None
+                    continue
+
+                if isinstance(parsed, dict):
+                    items.append(parsed)
+
+                current_start = None
+
+    return items
+
+
+def salvage_partial_payload(content: str) -> Optional[Dict[str, Any]]:
+    cleaned = strip_code_fences(content)
+    salvaged_payload: Dict[str, Any] = {
+        "add_edges": [],
+        "drop_node_ids": [],
+        "notes": [],
+        "_salvaged_partial_json": True,
+    }
+    found_anything = False
+    add_edges_segment = extract_balanced_array_segment(cleaned, "add_edges")
+
+    if add_edges_segment is not None:
+        try:
+            parsed_add_edges = json.loads(add_edges_segment)
+        except json.JSONDecodeError:
+            parsed_add_edges = extract_complete_object_items_from_array(add_edges_segment)
+
+        if isinstance(parsed_add_edges, list):
+            salvaged_payload["add_edges"] = [item for item in parsed_add_edges if isinstance(item, dict)]
+            found_anything = True
+    else:
+        add_edges_key_index = cleaned.find('"add_edges"')
+
+        if add_edges_key_index >= 0:
+            array_start = cleaned.find("[", add_edges_key_index)
+
+            if array_start >= 0:
+                partial_array = cleaned[array_start:]
+                parsed_add_edges = extract_complete_object_items_from_array(partial_array)
+
+                if len(parsed_add_edges) > 0:
+                    salvaged_payload["add_edges"] = parsed_add_edges
+                    found_anything = True
+
+    for key in ["drop_node_ids", "notes"]:
+        segment = extract_balanced_array_segment(cleaned, key)
+
+        if segment is None:
+            continue
+
+        try:
+            parsed_value = json.loads(segment)
+        except json.JSONDecodeError:
+            continue
+
+        if isinstance(parsed_value, list):
+            salvaged_payload[key] = parsed_value
+            found_anything = True
+
+    if found_anything:
+        return salvaged_payload
+
+    return None
+
+
+def parse_json_content(content: str) -> Dict[str, Any]:
+    trimmed = content.strip()
+
+    try:
+        return json.loads(trimmed)
+    except json.JSONDecodeError:
+        fenced = strip_code_fences(trimmed)
+
+        try:
+            return json.loads(fenced)
+        except json.JSONDecodeError as exc:
+            salvaged_payload = salvage_partial_payload(trimmed)
+
+            if salvaged_payload is not None:
+                return salvaged_payload
+
+            excerpt = summarize_text_for_prompt(trimmed, limit=700)
+            raise RuntimeError(f"Failed to parse model JSON output. Excerpt: {excerpt}") from exc
+
+
+def sanitize_repair_payload(
+    payload: Dict[str, Any],
+    node_ids: set[str],
+    suspicious_node_ids: set[str],
+    max_add_edges: int,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    if not isinstance(payload, dict):
+        raise RepairValidationError("Repair payload must be an object.")
+
+    add_edges = payload.get("add_edges", [])
+    drop_node_ids = payload.get("drop_node_ids", [])
+    notes = payload.get("notes", [])
+    sanitized_payload: Dict[str, Any] = {
+        "add_edges": [],
+        "drop_node_ids": [],
+        "notes": [],
+    }
+    dropped_edge_reasons: Dict[str, int] = {}
+
+    if not isinstance(add_edges, list):
+        add_edges = []
+
+    if not isinstance(drop_node_ids, list):
+        drop_node_ids = []
+
+    if not isinstance(notes, list):
+        notes = []
+
+    for raw_note in notes:
+        note = clean_text(raw_note)
+
+        if note is not None:
+            sanitized_payload["notes"].append(note)
+
+    for raw_drop_node_id in drop_node_ids:
+        if not isinstance(raw_drop_node_id, str):
+            continue
+
+        if raw_drop_node_id not in suspicious_node_ids:
+            continue
+
+        sanitized_payload["drop_node_ids"].append(raw_drop_node_id)
+
+    for raw_edge in add_edges:
+        if not isinstance(raw_edge, dict):
+            dropped_edge_reasons["invalid_edge_shape"] = dropped_edge_reasons.get("invalid_edge_shape", 0) + 1
+            continue
+
+        source_id = clean_text(raw_edge.get("source_id"))
+        target_id = clean_text(raw_edge.get("target_id"))
+        edge_type = clean_text(raw_edge.get("type"))
+        evidence_text = clean_text(raw_edge.get("evidence_text"))
+
+        if source_id is None or target_id is None:
+            dropped_edge_reasons["missing_endpoint_id"] = dropped_edge_reasons.get("missing_endpoint_id", 0) + 1
+            continue
+
+        if source_id not in node_ids or target_id not in node_ids:
+            dropped_edge_reasons["unknown_node_id"] = dropped_edge_reasons.get("unknown_node_id", 0) + 1
+            continue
+
+        if edge_type not in ALLOWED_EDGE_TYPES:
+            dropped_edge_reasons["invalid_edge_type"] = dropped_edge_reasons.get("invalid_edge_type", 0) + 1
+            continue
+
+        if evidence_text is None:
+            dropped_edge_reasons["missing_evidence_text"] = dropped_edge_reasons.get("missing_evidence_text", 0) + 1
+            continue
+
+        detail_required = clean_text(raw_edge.get("detail_required")) or "standard"
+
+        if detail_required not in DETAIL_LEVELS:
+            detail_required = "standard"
+
+        try:
+            weight = float(raw_edge.get("weight", 0.7))
+        except (TypeError, ValueError):
+            weight = 0.7
+
+        try:
+            confidence = float(raw_edge.get("confidence", 0.7))
+        except (TypeError, ValueError):
+            confidence = 0.7
+
+        weight = max(0.0, min(weight, 1.0))
+        confidence = max(0.0, min(confidence, 1.0))
+        attributes = raw_edge.get("attributes")
+
+        if not isinstance(attributes, dict):
+            attributes = {}
+
+        sanitized_payload["add_edges"].append(
+            {
+                "source_id": source_id,
+                "type": edge_type,
+                "target_id": target_id,
+                "weight": weight,
+                "detail_required": detail_required,
+                "evidence_text": evidence_text,
+                "confidence": confidence,
+                "attributes": attributes,
+            }
+        )
+
+        if len(sanitized_payload["add_edges"]) >= max_add_edges:
+            break
+
+    sanitization_summary = {
+        "salvaged_partial_json": bool(payload.get("_salvaged_partial_json")),
+        "raw_add_edge_count": len(add_edges),
+        "kept_add_edge_count": len(sanitized_payload["add_edges"]),
+        "dropped_edge_reasons": dropped_edge_reasons,
+    }
+    return sanitized_payload, sanitization_summary
+
+
+async def call_model_for_record(
+    client: AsyncOpenAI,
+    record: Dict[str, Any],
+    suspicious_nodes: Sequence[SuspiciousNode],
+    config: RepairConfig,
+    retry_feedback: Optional[str] = None,
+) -> Dict[str, Any]:
+    request_kwargs: Dict[str, Any] = {
+        "model": config.model,
+        "messages": build_messages(record, suspicious_nodes, config, retry_feedback),
+        "temperature": 0,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "relation_repair",
+                "strict": True,
+                "schema": build_repair_output_schema(config.max_add_edges),
+            },
+        },
+    }
+    response = await client.chat.completions.create(**request_kwargs)
+    content = extract_assistant_content(response)
+    return parse_json_content(content)
+
+
+def build_added_edge_id(
+    chunk_id: str,
+    source_id: str,
+    edge_type: str,
+    target_id: str,
+    condition_text: str,
+    evidence_text: str,
+) -> str:
+    digest = hashlib.sha1(
+        f"{chunk_id}|{source_id}|{edge_type}|{target_id}|{condition_text}|{evidence_text}".encode("utf-8")
+    ).hexdigest()[:12]
+    return f"repair_edge_{digest}"
+
+
+def edge_signature(edge: Dict[str, Any]) -> Tuple[str, str, str, str]:
+    source_id = clean_text(edge.get("source_id")) or ""
+    edge_type = clean_text(edge.get("type")) or ""
+    target_id = clean_text(edge.get("target_id")) or ""
+    condition_text = clean_text(edge.get("condition_text")) or ""
+    return source_id, edge_type, target_id, condition_text
+
+
+def is_edge_direction_plausible(edge_type: str, source_label: Optional[str], target_label: Optional[str]) -> bool:
+    if source_label is None or target_label is None:
+        return False
+
+    if edge_type == "RECOMMENDS":
+        return source_label == "Recommendation" and target_label != "Recommendation"
+
+    if edge_type == "COMPLICATED_BY":
+        return (
+            source_label in {"Disease", "DiseasePhase"}
+            and target_label in {"OpportunisticInfection", "Comorbidity", "Tumor", "SyndromeOrComplication"}
+        )
+
+    if edge_type == "HAS_LAB_FINDING":
+        return (
+            source_label in {
+                "Disease",
+                "DiseasePhase",
+                "OpportunisticInfection",
+                "Comorbidity",
+                "Tumor",
+                "SyndromeOrComplication",
+                "PopulationGroup",
+                "ExposureScenario",
+            }
+            and target_label == "LabFinding"
+        )
+
+    if edge_type == "DIAGNOSED_BY":
+        return (
+            source_label in {
+                "Disease",
+                "DiseasePhase",
+                "OpportunisticInfection",
+                "Comorbidity",
+                "Tumor",
+                "SyndromeOrComplication",
+            }
+            and target_label in {"LabTest", "DiagnosticCriterion"}
+        )
+
+    if edge_type == "TREATED_WITH":
+        return (
+            source_label in {
+                "Disease",
+                "DiseasePhase",
+                "OpportunisticInfection",
+                "Comorbidity",
+                "Tumor",
+                "SyndromeOrComplication",
+                "Recommendation",
+            }
+            and target_label in {"Medication", "TreatmentRegimen", "ManagementAction"}
+        )
+
+    if edge_type == "MANIFESTS_AS":
+        return (
+            source_label in {
+                "Disease",
+                "DiseasePhase",
+                "OpportunisticInfection",
+                "Comorbidity",
+                "Tumor",
+                "SyndromeOrComplication",
+            }
+            and target_label in {"Symptom", "Sign"}
+        )
+
+    if edge_type == "REQUIRES_DETAIL":
+        return (
+            source_label in {"Symptom", "Sign", "DiagnosticCriterion", "ManagementAction", "LabTest"}
+            and target_label == "ClinicalAttribute"
+        )
+
+    return True
+
+
+def apply_repair_to_record(
+    record: Dict[str, Any],
+    payload: Dict[str, Any],
+    suspicious_nodes: Sequence[SuspiciousNode],
+    min_confidence: float,
+    apply_drop_node_ids: bool,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    repaired_record = json.loads(json.dumps(record, ensure_ascii=False))
+    extraction = repaired_record["extraction"]
+    nodes = extraction["nodes"]
+    edges = extraction["edges"]
+    suspicious_node_ids = {node.node_id for node in suspicious_nodes}
+    chunk_id = str(repaired_record.get("chunk_id", "unknown_chunk"))
+    original_node_map: Dict[str, Dict[str, Any]] = {}
+
+    for raw_node in nodes:
+        if not isinstance(raw_node, dict):
+            continue
+
+        node_id = clean_text(raw_node.get("id"))
+
+        if node_id is None:
+            continue
+
+        original_node_map[node_id] = raw_node
+
+    surviving_nodes: List[Dict[str, Any]] = []
+    dropped_node_ids: set[str] = set()
+    suggested_drop_node_ids: List[str] = []
+
+    for drop_node_id in payload["drop_node_ids"]:
+        if drop_node_id not in suspicious_node_ids:
+            continue
+
+        suggested_drop_node_ids.append(drop_node_id)
+
+        if not apply_drop_node_ids:
+            continue
+
+        dropped_node_ids.add(drop_node_id)
+
+    for raw_node in nodes:
+        if not isinstance(raw_node, dict):
+            continue
+
+        node_id = clean_text(raw_node.get("id"))
+
+        if node_id is None:
+            continue
+
+        if node_id in dropped_node_ids:
+            continue
+
+        surviving_nodes.append(raw_node)
+
+    surviving_node_ids = {
+        clean_text(node.get("id"))
+        for node in surviving_nodes
+        if isinstance(node, dict) and clean_text(node.get("id")) is not None
+    }
+    surviving_node_ids = {node_id for node_id in surviving_node_ids if node_id is not None}
+
+    surviving_edges: List[Dict[str, Any]] = []
+
+    for raw_edge in edges:
+        if not isinstance(raw_edge, dict):
+            continue
+
+        source_id = clean_text(raw_edge.get("source_id"))
+        target_id = clean_text(raw_edge.get("target_id"))
+
+        if source_id is None or target_id is None:
+            continue
+
+        if source_id in dropped_node_ids or target_id in dropped_node_ids:
+            continue
+
+        surviving_edges.append(raw_edge)
+
+    existing_signatures = {edge_signature(edge) for edge in surviving_edges if isinstance(edge, dict)}
+    added_edges: List[Dict[str, Any]] = []
+
+    for candidate_edge in payload["add_edges"]:
+        if not isinstance(candidate_edge, dict):
+            continue
+
+        confidence = float(candidate_edge.get("confidence", 0))
+
+        if confidence < min_confidence:
+            continue
+
+        source_id = clean_text(candidate_edge.get("source_id"))
+        target_id = clean_text(candidate_edge.get("target_id"))
+        edge_type = clean_text(candidate_edge.get("type"))
+
+        if source_id is None or target_id is None or edge_type is None:
+            continue
+
+        if source_id not in surviving_node_ids or target_id not in surviving_node_ids:
+            continue
+
+        if source_id == target_id:
+            continue
+
+        source_label = clean_text(original_node_map.get(source_id, {}).get("label"))
+        target_label = clean_text(original_node_map.get(target_id, {}).get("label"))
+
+        if not is_edge_direction_plausible(edge_type, source_label, target_label):
+            continue
+
+        attributes = candidate_edge.get("attributes")
+
+        if not isinstance(attributes, dict):
+            attributes = {}
+
+        condition_text = clean_text(attributes.get("condition_text")) or ""
+        signature = (source_id, edge_type, target_id, condition_text)
+
+        if signature in existing_signatures:
+            continue
+
+        attributes["evidence_text"] = clean_text(candidate_edge.get("evidence_text")) or ""
+        attributes["repair_confidence"] = confidence
+
+        added_edge = {
+            "id": build_added_edge_id(
+                chunk_id=chunk_id,
+                source_id=source_id,
+                edge_type=edge_type,
+                target_id=target_id,
+                condition_text=condition_text,
+                evidence_text=attributes["evidence_text"],
+            ),
+            "type": edge_type,
+            "source_id": source_id,
+            "target_id": target_id,
+            "weight": float(candidate_edge.get("weight", 0.7)),
+            "detail_required": clean_text(candidate_edge.get("detail_required")) or "standard",
+            "attributes": attributes,
+        }
+        flatten_attributes(added_edge)
+        existing_signatures.add(signature)
+        added_edges.append(added_edge)
+
+    extraction["nodes"] = surviving_nodes
+    extraction["edges"] = surviving_edges + added_edges
+    repaired_record["relation_repair"] = {
+        "candidate_node_ids": [node.node_id for node in suspicious_nodes],
+        "candidate_reasons": {node.node_id: node.reasons for node in suspicious_nodes},
+        "apply_drop_node_ids": apply_drop_node_ids,
+        "suggested_drop_node_ids": suggested_drop_node_ids,
+        "suggested_drop_node_count": len(suggested_drop_node_ids),
+        "dropped_node_ids": sorted(dropped_node_ids),
+        "added_edge_ids": [edge["id"] for edge in added_edges],
+        "added_edge_count": len(added_edges),
+        "dropped_node_count": len(dropped_node_ids),
+        "notes": payload["notes"],
+        "status": "repaired" if len(added_edges) > 0 or len(dropped_node_ids) > 0 else "reviewed_no_change",
+    }
+
+    repair_summary = {
+        "chunk_id": chunk_id,
+        "relative_path": repaired_record.get("relative_path"),
+        "candidate_node_count": len(suspicious_nodes),
+        "added_edge_count": len(added_edges),
+        "suggested_drop_node_count": len(suggested_drop_node_ids),
+        "dropped_node_count": len(dropped_node_ids),
+        "status": repaired_record["relation_repair"]["status"],
+    }
+    return repaired_record, repair_summary
+
+
+def summarize_exception_for_retry(exc: BaseException) -> str:
+    error_type = exc.__class__.__name__
+    message = clean_text(str(exc)) or error_type
+
+    if "Failed to parse model JSON output" in message:
+        return (
+            "上一轮失败原因：输出不是合法 JSON，或 JSON 在末尾被截断。"
+            "请只输出一个严格 JSON 对象，确保所有大括号和方括号都正确闭合，"
+            "不要输出 JSON 之外的解释文字。"
+            f" 上一轮错误摘要：{summarize_text_for_prompt(message, limit=520)}"
+        )
+
+    if "timed out" in message.lower():
+        return (
+            "上一轮失败原因：请求超时。请减少输出量，只返回最关键的少量边，"
+            "避免冗长 notes，保持 JSON 简洁。"
+            f" 上一轮错误摘要：{summarize_text_for_prompt(message, limit=300)}"
+        )
+
+    if isinstance(exc, RepairValidationError):
+        return (
+            "上一轮失败原因：输出虽然是 JSON，但不符合本地校验规则。"
+            "请严格使用 existing_nodes 中已有的节点 id，确保 evidence_text 非空，"
+            "并遵守允许的关系类型。"
+            f" 上一轮错误摘要：{summarize_text_for_prompt(message, limit=420)}"
+        )
+
+    return (
+        "上一轮失败原因：输出未通过本地处理。请在保持严格 JSON 的前提下，"
+        "更保守地补边，只输出有明确依据且字段完整的边。"
+        f" 上一轮错误摘要：{summarize_text_for_prompt(message, limit=360)}"
+    )
+
+
+async def with_retry(
+    coro_factory: Callable[[int, Optional[str]], Any],
+    retry_count: int,
+    retry_delay_ms: int,
+    context_label: str,
+) -> Any:
+    attempt = 0
+    last_error: Optional[BaseException] = None
+    retry_feedback: Optional[str] = None
+
+    while attempt < retry_count:
+        attempt += 1
+
+        try:
+            return await coro_factory(attempt, retry_feedback)
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            retry_feedback = summarize_exception_for_retry(exc)
+
+            if attempt >= retry_count:
+                break
+
+            delay_seconds = (retry_delay_ms * attempt) / 1000
+            print(
+                f"[repair:retry] {context_label} failed on attempt {attempt}. "
+                f"error={exc!r}. Retrying in {delay_seconds:.2f}s."
+            )
+            await asyncio.sleep(delay_seconds)
+
+    raise last_error if last_error is not None else RuntimeError("Unknown relation repair failure.")
+
+
+async def process_record(
+    client: AsyncOpenAI,
+    semaphore: asyncio.Semaphore,
+    record: Dict[str, Any],
+    config: RepairConfig,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    if record.get("record_type") != "chunk_result":
+        return record, {"status": "passthrough"}
+
+    extraction = record.get("extraction")
+
+    if not isinstance(extraction, dict):
+        return record, {"status": "passthrough"}
+
+    if not isinstance(extraction.get("nodes"), list) or not isinstance(extraction.get("edges"), list):
+        return record, {"status": "passthrough"}
+
+    suspicious_nodes = identify_suspicious_nodes(record)
+
+    if len(suspicious_nodes) == 0:
+        passthrough_record = json.loads(json.dumps(record, ensure_ascii=False))
+        passthrough_record["relation_repair"] = {
+            "candidate_node_ids": [],
+            "candidate_reasons": {},
+            "dropped_node_ids": [],
+            "added_edge_ids": [],
+            "added_edge_count": 0,
+            "dropped_node_count": 0,
+            "notes": [],
+            "status": "skipped_no_candidates",
+        }
+        return passthrough_record, {"status": "skipped_no_candidates"}
+
+    chunk_id = str(record.get("chunk_id", "unknown_chunk"))
+    node_ids = {
+        clean_text(node.get("id"))
+        for node in extraction["nodes"]
+        if isinstance(node, dict) and clean_text(node.get("id")) is not None
+    }
+    node_ids = {node_id for node_id in node_ids if node_id is not None}
+    suspicious_node_ids = {node.node_id for node in suspicious_nodes}
+
+    async with semaphore:
+        print(
+            f"[repair:start] {chunk_id} {record.get('relative_path')} "
+            f"candidates={len(suspicious_nodes)}"
+        )
+        try:
+            raw_payload = await with_retry(
+                lambda attempt, retry_feedback: call_model_for_record(
+                    client,
+                    record,
+                    suspicious_nodes,
+                    config,
+                    retry_feedback=retry_feedback,
+                ),
+                config.retry_count,
+                config.retry_delay_ms,
+                chunk_id,
+            )
+            payload, sanitization_summary = sanitize_repair_payload(
+                raw_payload,
+                node_ids,
+                suspicious_node_ids,
+                config.max_add_edges,
+            )
+            repaired_record, summary = apply_repair_to_record(
+                record,
+                payload,
+                suspicious_nodes,
+                config.min_confidence,
+                config.apply_drop_node_ids,
+            )
+            repaired_record["relation_repair"]["sanitization"] = sanitization_summary
+            summary["sanitization"] = sanitization_summary
+            print(
+                f"[repair:done] {chunk_id} added_edges={summary['added_edge_count']} "
+                f"dropped_nodes={summary['dropped_node_count']} status={summary['status']}"
+            )
+            return repaired_record, summary
+        except Exception as exc:  # noqa: BLE001
+            failure_record = json.loads(json.dumps(record, ensure_ascii=False))
+            failure_record["relation_repair"] = {
+                "candidate_node_ids": [node.node_id for node in suspicious_nodes],
+                "candidate_reasons": {node.node_id: node.reasons for node in suspicious_nodes},
+                "dropped_node_ids": [],
+                "added_edge_ids": [],
+                "added_edge_count": 0,
+                "dropped_node_count": 0,
+                "notes": [],
+                "status": "repair_failed",
+                "error": str(exc),
+                "traceback": traceback.format_exc(),
+            }
+            print(f"[repair:error] {chunk_id} {exc}", file=sys.stderr)
+            return failure_record, {
+                "status": "repair_failed",
+                "chunk_id": chunk_id,
+                "relative_path": record.get("relative_path"),
+                "candidate_node_count": len(suspicious_nodes),
+                "error": str(exc),
+            }
+
+
+async def run_async(config: RepairConfig) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    all_input_records = load_jsonl_records(config.input_file)
+    retry_chunk_ids = determine_retry_chunk_ids(config)
+    retry_chunk_id_set = set(retry_chunk_ids)
+    processing_records = all_input_records
+
+    if len(retry_chunk_id_set) > 0:
+        processing_records = filter_records_for_retry(all_input_records, retry_chunk_id_set)
+
+    semaphore = asyncio.Semaphore(config.concurrency)
+    client = AsyncOpenAI(
+        api_key=config.api_key,
+        base_url=config.base_url,
+        timeout=config.request_timeout_seconds,
+        max_retries=config.sdk_max_retries,
+    )
+
+    try:
+        tasks = [process_record(client, semaphore, record, config) for record in processing_records]
+        results = await asyncio.gather(*tasks)
+    finally:
+        await client.close()
+
+    processed_records = [result[0] for result in results]
+    summaries = [result[1] for result in results]
+
+    if len(retry_chunk_id_set) > 0 and config.baseline_output_file is not None and config.baseline_output_file.exists():
+        baseline_records = load_jsonl_records(config.baseline_output_file)
+        output_records = merge_retry_results_into_baseline(baseline_records, processed_records)
+    else:
+        output_records = processed_records
+
+    chunk_summaries = [summary for summary in summaries if summary.get("status") != "passthrough"]
+    repaired_count = sum(1 for summary in chunk_summaries if summary.get("status") == "repaired")
+    failed_count = sum(1 for summary in chunk_summaries if summary.get("status") == "repair_failed")
+    skipped_count = sum(1 for summary in chunk_summaries if summary.get("status") == "skipped_no_candidates")
+    reviewed_no_change_count = sum(
+        1 for summary in chunk_summaries if summary.get("status") == "reviewed_no_change"
+    )
+    total_added_edges = sum(int(summary.get("added_edge_count", 0) or 0) for summary in chunk_summaries)
+    total_dropped_nodes = sum(int(summary.get("dropped_node_count", 0) or 0) for summary in chunk_summaries)
+    salvaged_partial_json_chunk_count = sum(
+        1
+        for summary in chunk_summaries
+        if bool((summary.get("sanitization") or {}).get("salvaged_partial_json"))
+    )
+    total_filtered_invalid_edges = sum(
+        sum(int(count or 0) for count in ((summary.get("sanitization") or {}).get("dropped_edge_reasons") or {}).values())
+        for summary in chunk_summaries
+    )
+
+    report = {
+        "input_file": str(config.input_file),
+        "output_file": str(config.output_file),
+        "model": config.model,
+        "base_url": config.base_url,
+        "retry_mode": len(retry_chunk_id_set) > 0,
+        "retry_chunk_ids": retry_chunk_ids,
+        "retry_report_file": str(config.retry_report_file) if config.retry_report_file is not None else None,
+        "baseline_output_file": str(config.baseline_output_file) if config.baseline_output_file is not None else None,
+        "summary": {
+            "record_count": len(all_input_records),
+            "chunk_record_count": sum(1 for record in all_input_records if record.get("record_type") == "chunk_result"),
+            "processed_record_count": len(processing_records),
+            "processed_chunk_record_count": sum(
+                1 for record in processing_records if record.get("record_type") == "chunk_result"
+            ),
+            "repaired_chunk_count": repaired_count,
+            "repair_failed_chunk_count": failed_count,
+            "skipped_no_candidate_chunk_count": skipped_count,
+            "reviewed_no_change_chunk_count": reviewed_no_change_count,
+            "total_added_edges": total_added_edges,
+            "total_suggested_drop_nodes": sum(
+                int(summary.get("suggested_drop_node_count", 0) or 0) for summary in chunk_summaries
+            ),
+            "total_dropped_nodes": total_dropped_nodes,
+            "salvaged_partial_json_chunk_count": salvaged_partial_json_chunk_count,
+            "total_filtered_invalid_edges": total_filtered_invalid_edges,
+        },
+        "chunk_summaries": chunk_summaries,
+    }
+    return output_records, report
+
+
+def write_jsonl(path: Path, records: Sequence[Dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    with path.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def main() -> None:
+    config = read_env_config()
+
+    if not config.input_file.exists():
+        raise RuntimeError(f"Input file does not exist: {config.input_file}")
+
+    if len(config.api_key) == 0:
+        raise RuntimeError(
+            "Missing API key. Set REPAIR_API_KEY, OPENAI_API_KEY, DASHSCOPE_API_KEY, or LLM_API_KEY."
+        )
+
+    output_records, report = asyncio.run(run_async(config))
+    write_jsonl(config.output_file, output_records)
+    config.report_file.parent.mkdir(parents=True, exist_ok=True)
+    config.report_file.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    summary = report["summary"]
+    print(f"[repair] input={config.input_file}")
+    print(f"[repair] output={config.output_file}")
+    print(f"[repair] report={config.report_file}")
+    if report.get("retry_mode"):
+        print(f"[repair] retry_chunk_count={len(report.get('retry_chunk_ids') or [])}")
+        print(f"[repair] baseline_output_file={report.get('baseline_output_file')}")
+    print(
+        "[repair] "
+        f"chunks={summary['chunk_record_count']} "
+        f"processed_chunks={summary['processed_chunk_record_count']} "
+        f"repaired={summary['repaired_chunk_count']} "
+        f"failed={summary['repair_failed_chunk_count']} "
+        f"added_edges={summary['total_added_edges']} "
+        f"dropped_nodes={summary['total_dropped_nodes']}"
+    )
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("[fatal] interrupted by user", file=sys.stderr)
+        raise SystemExit(130)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[fatal] {exc}", file=sys.stderr)
+        raise SystemExit(1)

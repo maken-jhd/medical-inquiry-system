@@ -1,0 +1,406 @@
+{
+  "merge_groups": [
+    {
+      "canonical_name": "替诺福韦 (TDF)",
+      "aliases": [
+        "替诺福韦",
+        "TDF",
+        "替诺福韦 (TDF)",
+        "替诺福韦（TDF）",
+        "富马酸替诺福韦二吡呋酯"
+      ],
+      "confidence": "high",
+      "reason": "同一药物的中英文缩写及全称（包含盐基不同表述的同一有效成分）"
+    },
+    {
+      "canonical_name": "丙酚替诺福韦 (TAF)",
+      "aliases": [
+        "丙酚替诺福韦",
+        "TAF",
+        "丙酚替诺福韦（TAF）",
+        "替诺福韦艾拉酚胺",
+        "替诺福韦艾拉酚胺（TAF）",
+        "富马酸丙酚替诺福韦"
+      ],
+      "confidence": "high",
+      "reason": "同一药物的中英文缩写及不同药典翻译名称"
+    },
+    {
+      "canonical_name": "拉米夫定 (3TC)",
+      "aliases": [
+        "拉米夫定",
+        "3TC",
+        "拉米夫定 (3TC)",
+        "拉米夫定（3TC）"
+      ],
+      "confidence": "high",
+      "reason": "同一药物的中英文缩写变体"
+    },
+    {
+      "canonical_name": "恩曲他滨 (FTC)",
+      "aliases": [
+        "恩曲他滨",
+        "恩曲他滨（FTC）"
+      ],
+      "confidence": "high",
+      "reason": "同一药物的中英文缩写变体"
+    },
+    {
+      "canonical_name": "阿巴卡韦 (ABC)",
+      "aliases": [
+        "阿巴卡韦",
+        "ABC",
+        "阿巴卡韦（ABC）"
+      ],
+      "confidence": "high",
+      "reason": "同一药物的中英文缩写变体"
+    },
+    {
+      "canonical_name": "齐多夫定 (AZT)",
+      "aliases": [
+        "齐多夫定",
+        "AZT",
+        "齐多夫定（AZT）"
+      ],
+      "confidence": "high",
+      "reason": "同一药物的中英文缩写变体"
+    },
+    {
+      "canonical_name": "依非韦伦 (EFV)",
+      "aliases": [
+        "依非韦伦",
+        "依非韦仑",
+        "依法韦仑（EFV）",
+        "EFV"
+      ],
+      "confidence": "high",
+      "reason": "同一药物的不同中文音译及英文缩写"
+    },
+    {
+      "canonical_name": "奈韦拉平 (NVP)",
+      "aliases": [
+        "奈韦拉平",
+        "NVP"
+      ],
+      "confidence": "high",
+      "reason": "同一药物的中英文缩写变体"
+    },
+    {
+      "canonical_name": "利匹韦林 (RPV)",
+      "aliases": [
+        "利匹韦林",
+        "RPV"
+      ],
+      "confidence": "high",
+      "reason": "同一药物的中英文缩写变体"
+    },
+    {
+      "canonical_name": "多拉韦林 (DOR)",
+      "aliases": [
+        "多拉韦林",
+        "DOR"
+      ],
+      "confidence": "high",
+      "reason": "同一药物的中英文缩写变体"
+    },
+    {
+      "canonical_name": "多替拉韦 (DTG)",
+      "aliases": [
+        "多替拉韦",
+        "度鲁特韦",
+        "DTG"
+      ],
+      "confidence": "high",
+      "reason": "同一药物的不同中文音译及英文缩写"
+    },
+    {
+      "canonical_name": "比克替拉韦 (BIC)",
+      "aliases": [
+        "比克替拉韦",
+        "比克替拉韦（BIC）",
+        "BIC"
+      ],
+      "confidence": "high",
+      "reason": "同一药物的中英文缩写变体"
+    },
+    {
+      "canonical_name": "拉替拉韦 (RAL)",
+      "aliases": [
+        "拉替拉韦",
+        "拉替拉韦（RAL）"
+      ],
+      "confidence": "high",
+      "reason": "同一药物的中英文缩写变体"
+    },
+    {
+      "canonical_name": "卡博特韦长效注射剂 (CAB-LA)",
+      "aliases": [
+        "卡博特韦长效注射剂",
+        "卡博特韦长效注射剂（CAB-LA）",
+        "CAB-LA",
+        "CAB长效注射剂",
+        "长效卡替拉韦 (CAB-LA)",
+        "长效注射卡博特韦 (CAB LA)",
+        "卡博替韦注射液"
+      ],
+      "confidence": "high",
+      "reason": "同一长效注射型药物的不同中文表述与缩写"
+    },
+    {
+      "canonical_name": "卡博特韦 (CAB)",
+      "aliases": [
+        "卡博特韦（CAB）",
+        "卡博替韦片"
+      ],
+      "confidence": "medium",
+      "reason": "同一基础药物（非长效注射剂型）的不同表述"
+    },
+    {
+      "canonical_name": "洛匹那韦/利托那韦 (LPV/r)",
+      "aliases": [
+        "洛匹那韦/利托那韦",
+        "洛匹那韦/利托那韦（LPV/r）",
+        "LPV/r"
+      ],
+      "confidence": "high",
+      "reason": "同一复合制剂的中英文/缩写变体"
+    },
+    {
+      "canonical_name": "达芦那韦/利托那韦 (DRV/r)",
+      "aliases": [
+        "达芦那韦/利托那韦",
+        "达芦那韦/利托那韦（DRV/r）",
+        "DRV/r"
+      ],
+      "confidence": "high",
+      "reason": "同一组合药物的中英文/缩写变体"
+    },
+    {
+      "canonical_name": "阿扎那韦/利托那韦 (ATV/r)",
+      "aliases": [
+        "阿扎那韦/利托那韦（ATV/r）",
+        "ATV/r"
+      ],
+      "confidence": "high",
+      "reason": "同一组合药物的中英文/缩写变体"
+    },
+    {
+      "canonical_name": "艾维雷韦/考比司他 (EVG/c)",
+      "aliases": [
+        "艾维雷韦/考比司他",
+        "EVG/c"
+      ],
+      "confidence": "high",
+      "reason": "同一组合药物的中英文/缩写变体"
+    },
+    {
+      "canonical_name": "替诺福韦/恩曲他滨 (TDF/FTC)",
+      "aliases": [
+        "替诺福韦/恩曲他滨",
+        "替诺福韦/恩曲他滨 (TDF/FTC)",
+        "替诺福韦酯/恩曲他滨 (TDF/FTC)",
+        "TDF/FTC",
+        "FTC/TDF"
+      ],
+      "confidence": "high",
+      "reason": "同一复方制剂的成分不同排序、中英文及不同化学名表述"
+    },
+    {
+      "canonical_name": "丙酚替诺福韦/恩曲他滨 (TAF/FTC)",
+      "aliases": [
+        "丙酚替诺福韦/恩曲他滨",
+        "丙酚替诺福韦/恩曲他滨 (TAF/FTC)",
+        "替诺福韦艾拉酚胺/恩曲他滨 (TAF/FTC)",
+        "TAF/FTC",
+        "FTC/TAF"
+      ],
+      "confidence": "high",
+      "reason": "同一复方制剂的成分不同排序及中英文变体"
+    },
+    {
+      "canonical_name": "替诺福韦+拉米夫定 (TDF/3TC)",
+      "aliases": [
+        "替诺福韦+拉米夫定",
+        "TDF/3TC"
+      ],
+      "confidence": "high",
+      "reason": "同一组合方案的中英文缩写变体"
+    },
+    {
+      "canonical_name": "齐多夫定+拉米夫定 (AZT/3TC)",
+      "aliases": [
+        "齐多夫定+拉米夫定",
+        "AZT/3TC"
+      ],
+      "confidence": "high",
+      "reason": "同一复方或组合药物的中英文缩写变体"
+    },
+    {
+      "canonical_name": "阿巴卡韦+拉米夫定 (ABC/3TC)",
+      "aliases": [
+        "阿巴卡韦+拉米夫定"
+      ],
+      "confidence": "high",
+      "reason": "复方药物组合的规范化"
+    },
+    {
+      "canonical_name": "多替拉韦+拉米夫定 (DTG/3TC)",
+      "aliases": [
+        "多替拉韦+拉米夫定",
+        "多替拉韦/拉米夫定"
+      ],
+      "confidence": "high",
+      "reason": "同一复方方案的符号使用差异（加号或斜杠）"
+    },
+    {
+      "canonical_name": "比克替拉韦/恩曲他滨/丙酚替诺福韦 (BIC/FTC/TAF)",
+      "aliases": [
+        "比克替拉韦/恩曲他滨/丙酚替诺福韦",
+        "BIC/FTC/TAF"
+      ],
+      "confidence": "high",
+      "reason": "同一单片复方制剂的中英文变体"
+    },
+    {
+      "canonical_name": "氟康唑",
+      "aliases": [
+        "氟康唑",
+        "Fluconazole"
+      ],
+      "confidence": "high",
+      "reason": "同一药物的中英文变体"
+    },
+    {
+      "canonical_name": "伊曲康唑",
+      "aliases": [
+        "伊曲康唑",
+        "Itraconazole"
+      ],
+      "confidence": "high",
+      "reason": "同一药物的中英文变体"
+    },
+    {
+      "canonical_name": "伏立康唑",
+      "aliases": [
+        "伏立康唑",
+        "Voriconazole"
+      ],
+      "confidence": "high",
+      "reason": "同一药物的中英文变体"
+    },
+    {
+      "canonical_name": "泊沙康唑",
+      "aliases": [
+        "泊沙康唑",
+        "Posaconazole"
+      ],
+      "confidence": "high",
+      "reason": "同一药物的中英文变体"
+    },
+    {
+      "canonical_name": "酮康唑",
+      "aliases": [
+        "酮康唑",
+        "Ketoconazole"
+      ],
+      "confidence": "high",
+      "reason": "同一药物的中英文变体"
+    },
+    {
+      "canonical_name": "两性霉素B",
+      "aliases": [
+        "两性霉素B",
+        "两性霉素 B"
+      ],
+      "confidence": "high",
+      "reason": "空格引起的格式差异"
+    },
+    {
+      "canonical_name": "两性霉素B脂质体",
+      "aliases": [
+        "两性霉素B脂质体",
+        "两性霉素 B 脂质体",
+        "Liposomal Amphotericin B",
+        "Amphotericin B Lipid Complex"
+      ],
+      "confidence": "medium",
+      "reason": "同为两性霉素B的脂质体剂型中英文变体及细微配方分类（知识图谱节点可合并为脂质体类）"
+    },
+    {
+      "canonical_name": "两性霉素B脱氧胆酸盐",
+      "aliases": [
+        "两性霉素B脱氧胆酸盐",
+        "Amphotericin B deoxycholate"
+      ],
+      "confidence": "high",
+      "reason": "同一药物剂型的中英文变体"
+    },
+    {
+      "canonical_name": "氟胞嘧啶",
+      "aliases": [
+        "5-氟胞嘧啶",
+        "氟胞嘧啶"
+      ],
+      "confidence": "high",
+      "reason": "同一药物的全称与简称变体"
+    },
+    {
+      "canonical_name": "复方磺胺甲噁唑 (TMP-SMX)",
+      "aliases": [
+        "复方磺胺甲噁唑",
+        "复方磺胺甲噁唑 (TMP-SMZ)",
+        "复方磺胺甲噁唑（SMZ-TMP）",
+        "TMP-SMX",
+        "SMZ-TMP",
+        "磺胺甲噁唑—甲氧苄啶"
+      ],
+      "confidence": "high",
+      "reason": "同一抗菌药物的中英文化学名、组合缩写及连字符方向差异"
+    },
+    {
+      "canonical_name": "西多福韦",
+      "aliases": [
+        "西多福韦",
+        "西多福韦 (Cidofovir)"
+      ],
+      "confidence": "high",
+      "reason": "包含英文标注的格式差异"
+    },
+    {
+      "canonical_name": "非甾体抗炎药 (NSAIDs)",
+      "aliases": [
+        "非甾体抗炎药",
+        "非甾体类抗炎药"
+      ],
+      "confidence": "high",
+      "reason": "同一药理学分类的表述习惯差异"
+    },
+    {
+      "canonical_name": "高效抗反转录病毒治疗 (cART)",
+      "aliases": [
+        "高效抗反转录病毒治疗",
+        "cART"
+      ],
+      "confidence": "high",
+      "reason": "同一疗法的中英文及缩写变体"
+    },
+    {
+      "canonical_name": "阿扎那韦 (ATV)",
+      "aliases": [
+        "阿扎那韦",
+        "ATV"
+      ],
+      "confidence": "high",
+      "reason": "同一药物的中英文缩写变体"
+    },
+    {
+      "canonical_name": "达芦那韦 (DRV)",
+      "aliases": [
+        "达芦那韦",
+        "DRV"
+      ],
+      "confidence": "high",
+      "reason": "同一药物的中英文缩写变体"
+    }
+  ]
+}

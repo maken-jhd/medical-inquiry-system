@@ -1,0 +1,120 @@
+{
+  "merge_groups": [
+    {
+      "canonical_name": "肺孢子菌肺炎 (PCP)",
+      "aliases": [
+        "肺孢子菌肺炎",
+        "PCP",
+        "肺孢子菌肺炎(PCP)",
+        "肺孢子菌感染"
+      ],
+      "confidence": "high",
+      "reason": "同一种机会性感染的中英文缩写、全称及常见临床指代"
+    },
+    {
+      "canonical_name": "隐球菌性脑膜炎",
+      "aliases": [
+        "隐球菌性脑膜炎",
+        "隐球菌脑膜炎",
+        "隐球菌性脑膜脑炎"
+      ],
+      "confidence": "high",
+      "reason": "同一种中枢神经系统真菌感染的医学全称与习惯性简称变体"
+    },
+    {
+      "canonical_name": "隐球菌病",
+      "aliases": [
+        "隐球菌病",
+        "隐球菌感染",
+        "新生隐球菌感染"
+      ],
+      "confidence": "high",
+      "reason": "同一类真菌感染的不同习惯表述及包含具体病原体前缀的变体"
+    },
+    {
+      "canonical_name": "巨细胞病毒疾病 (CMVD)",
+      "aliases": [
+        "CMVD",
+        "巨细胞病毒感染",
+        "活动性CMV感染"
+      ],
+      "confidence": "high",
+      "reason": "同一种病毒感染引起的临床疾病状态的中英文简称及活跃状态描述"
+    },
+    {
+      "canonical_name": "巨细胞病毒性视网膜炎",
+      "aliases": [
+        "巨细胞病毒视网膜炎",
+        "CMV性视网膜炎"
+      ],
+      "confidence": "high",
+      "reason": "同一靶器官机会性感染的中文全称与中英混合缩写变体"
+    },
+    {
+      "canonical_name": "巨细胞病毒脑炎",
+      "aliases": [
+        "巨细胞病毒脑炎",
+        "巨细胞病毒性脑炎",
+        "CMV脑炎"
+      ],
+      "confidence": "high",
+      "reason": "同一靶器官机会性感染的中文全称（有无“性”字）与中英混合缩写变体"
+    },
+    {
+      "canonical_name": "巨细胞病毒肺炎",
+      "aliases": [
+        "巨细胞病毒肺炎",
+        "CMV肺炎"
+      ],
+      "confidence": "high",
+      "reason": "同一靶器官机会性感染的中文全称与中英混合缩写变体"
+    },
+    {
+      "canonical_name": "结核病 (TB)",
+      "aliases": [
+        "结核病",
+        "活动性结核病",
+        "结核病作为HIV机会性感染",
+        "结核分枝杆菌感染"
+      ],
+      "confidence": "high",
+      "reason": "在HIV机会性感染语境下，指代同一种疾病/病原体感染发病状态的不同描述"
+    },
+    {
+      "canonical_name": "非结核分枝杆菌感染 (NTM)",
+      "aliases": [
+        "非结核分枝杆菌病",
+        "NTM感染"
+      ],
+      "confidence": "high",
+      "reason": "同一种致病菌群感染的中英文简称及“病/感染”的习惯后缀变体"
+    },
+    {
+      "canonical_name": "食管念珠菌病",
+      "aliases": [
+        "食管念珠菌感染",
+        "食道念珠菌病"
+      ],
+      "confidence": "high",
+      "reason": "同一部位真菌感染的解剖学同义词（食管/食道）与病理命名变体"
+    },
+    {
+      "canonical_name": "口咽念珠菌病",
+      "aliases": [
+        "口咽念珠菌感染",
+        "口腔念珠菌感染"
+      ],
+      "confidence": "high",
+      "reason": "同一部位或相邻累及部位真菌感染的临床等效诊断名词"
+    },
+    {
+      "canonical_name": "性传播感染 (STI)",
+      "aliases": [
+        "性传播感染",
+        "性传播疾病"
+      ],
+      "confidence": "high",
+      "reason": "同一类传播途径疾病的医学标准术语（STI）与传统术语（STD）变体"
+    }
+  ]
+}

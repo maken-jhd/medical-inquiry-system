@@ -1,0 +1,7 @@
+cold_start_limit: 8
+hypothesis_limit: 6
+validation_limit: 10
+red_flag_multiplier: 2.0
+graph_weight_multiplier: 1.0
+information_gain_multiplier: 1.5
+repeat_penalty: 3.0

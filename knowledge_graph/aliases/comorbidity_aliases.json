@@ -1,0 +1,49 @@
+{
+  "merge_groups": [
+    {
+      "canonical_name": "乙型肝炎病毒（HBV）感染",
+      "aliases": [
+        "乙型肝炎病毒感染",
+        "乙型肝炎病毒（HBV）感染"
+      ],
+      "confidence": "high",
+      "reason": "同一病毒感染的中英文全称、缩写及临床中常互换使用的慢性状态变体"
+    },
+    {
+      "canonical_name": "慢性乙型肝炎病毒感染",
+      "aliases": [
+        "慢性乙型肝炎病毒感染",
+        "慢性乙型肝炎"
+      ],
+      "confidence": "high",
+      "reason": "同一病毒感染的中英文全称、缩写及临床中常互换使用的慢性状态变体"
+    },
+    {
+      "canonical_name": "丙型肝炎病毒（HCV）感染",
+      "aliases": [
+        "丙型肝炎病毒感染",
+        "丙型肝炎病毒（HCV）感染"
+      ],
+      "confidence": "high",
+      "reason": "同一病毒感染的中英文全称及缩写变体"
+    },
+    {
+      "canonical_name": "心血管疾病",
+      "aliases": [
+        "心血管疾病",
+        "心血管疾病（CVD）"
+      ],
+      "confidence": "high",
+      "reason": "同一疾病是否包含英文缩写（CVD）的变体"
+    },
+    {
+      "canonical_name": "免疫缺陷或免疫抑制",
+      "aliases": [
+        "已知类型的免疫缺陷或免疫抑制",
+        "Immunosuppression"
+      ],
+      "confidence": "medium",
+      "reason": "同一医学概念的中英文表达及精简表述变体"
+    }
+  ]
+}

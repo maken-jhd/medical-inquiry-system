@@ -1,0 +1,19 @@
+# 忽略特定的大型数据文件夹
+/HIV/
+/HIV_cleaned/
+
+# 忽略所有 .sh 脚本文件
+*.sh
+
+# macOS 系统自动生成的隐藏文件
+.DS_Store
+
+# Python 自动生成的编译缓存文件（避免把 __pycache__ 传上去）
+__pycache__/
+*.pyc
+*.pyo
+
+/test_outputs/
+
+output_graph_test_errors.jsonl
+output_graph_test.jsonl

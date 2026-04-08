@@ -1,0 +1,119 @@
+{
+  "merge_groups": [
+    {
+      "canonical_name": "HIV感染者/艾滋病患者",
+      "aliases": [
+        "HIV感染者",
+        "HIV/AIDS 患者",
+        "HIV/AIDS患者",
+        "HIV感染/AIDS患者",
+        "艾滋病患者",
+        "AIDS患者",
+        "HIV/AIDS人群",
+        "HIV感染者/艾滋病患者",
+        "Patients with AIDS"
+      ],
+      "confidence": "high",
+      "reason": "同类感染群体/患病人群的不同中文全称、简写、中英混合及纯英文表述"
+    },
+    {
+      "canonical_name": "妊娠期妇女",
+      "aliases": [
+        "孕妇",
+        "妊娠期妇女"
+      ],
+      "confidence": "high",
+      "reason": "同类人群的日常习惯称呼与医学规范术语"
+    },
+    {
+      "canonical_name": "HIV感染妊娠期妇女",
+      "aliases": [
+        "HIV阳性孕产妇",
+        "HIV感染妊娠妇女",
+        "HIV感染妊娠期妇女"
+      ],
+      "confidence": "high",
+      "reason": "同类特定患病孕产妇群体的等价表述"
+    },
+    {
+      "canonical_name": "男男性行为者 (MSM)",
+      "aliases": [
+        "MSM",
+        "男男性行为者",
+        "男男性行为者 (MSM)",
+        "男男性行为者(MSM)"
+      ],
+      "confidence": "high",
+      "reason": "特定性行为暴露高危人群的中英文缩写、全称及不同括号格式"
+    },
+    {
+      "canonical_name": "静脉注射吸毒者 (IDUs)",
+      "aliases": [
+        "IDUs",
+        "注射毒品人群",
+        "注射毒品者 (IDUs)",
+        "静脉吸毒者",
+        "静脉注射吸毒者(IDUs)"
+      ],
+      "confidence": "high",
+      "reason": "特定药物依赖/高危行为人群的不同中文表述习惯及英文缩写"
+    },
+    {
+      "canonical_name": "CD4+ T淋巴细胞计数 < 100/μL的HIV感染者",
+      "aliases": [
+        "CD4+ T 淋巴细胞计数<100/μL的HIV感染者",
+        "CD4+ T淋巴细胞计数<100/μL的HIV患者",
+        "CD4<100/μL的艾滋病患者",
+        "HIV感染者（CD4<100/μL）"
+      ],
+      "confidence": "high",
+      "reason": "具有特定严重免疫缺陷指标界值的同一类患者群体的等价表述"
+    },
+    {
+      "canonical_name": "单阳伴侣中的HIV阴性方",
+      "aliases": [
+        "HIV单阳家庭阴性方",
+        "单阳伴侣中的 HIV 阴性方"
+      ],
+      "confidence": "high",
+      "reason": "在HIV暴露前预防(PrEP)或伴侣传播语境下单阳家庭/伴侣中未感染方的不同表述"
+    },
+    {
+      "canonical_name": "HIV暴露新生儿/婴儿",
+      "aliases": [
+        "HIV暴露婴儿",
+        "HIV暴露新生儿"
+      ],
+      "confidence": "high",
+      "reason": "母婴阻断语境下具有相同暴露风险的低龄患儿群体的等价表述"
+    },
+    {
+      "canonical_name": "免疫功能缺陷/抑制患者",
+      "aliases": [
+        "免疫功能缺陷者",
+        "免疫抑制患者"
+      ],
+      "confidence": "medium",
+      "reason": "处于相似免疫系统低下状态的广义临床人群表述（在某些严格病理分类下有细微区分，但在图谱节点中常合并）"
+    },
+    {
+      "canonical_name": "儿童患者",
+      "aliases": [
+        "儿童",
+        "儿科患者"
+      ],
+      "confidence": "high",
+      "reason": "同一年龄段就诊人群的日常称呼与医学等价表述"
+    },
+    {
+      "canonical_name": "青少年人群",
+      "aliases": [
+        "青少年人群",
+        "成人及青少年",
+        "性活跃青壮年及青少年"
+      ],
+      "confidence": "medium",
+      "reason": "存在包含关系及部分重叠的年龄群体（按图谱颗粒度需求，建议提取核心群体'青少年'作为合并基准，或将组合词拆分为独立节点）"
+    }
+  ]
+}

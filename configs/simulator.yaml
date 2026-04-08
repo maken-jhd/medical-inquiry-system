@@ -1,0 +1,4 @@
+seed_case_count: 50
+default_behavior_style: cooperative
+max_replay_turns: 20
+strict_non_disclosure: true

@@ -1,0 +1,14 @@
+{
+  "merge_groups": [
+    {
+      "canonical_name": "卡波西肉瘤",
+      "aliases": [
+        "卡波西肉瘤",
+        "卡波氏肉瘤",
+        "卡波济肉瘤"
+      ],
+      "confidence": "high",
+      "reason": "同一疾病（Kaposi's sarcoma）的不同中文音译名称"
+    }
+  ]
+}

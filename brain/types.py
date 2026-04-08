@@ -1,0 +1,227 @@
+"""定义问诊大脑阶段二使用的核心数据结构。"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Literal, Optional
+
+
+SlotTruthValue = Literal["true", "false", "unknown"]
+SlotCertainty = Literal["certain", "uncertain", "unknown"]
+EvidenceExistence = Literal["exist", "non_exist", "unknown"]
+EvidenceCertainty = Literal["confident", "doubt", "unknown"]
+ReasoningStage = Literal["A1", "A2", "A3", "A4", "STOP", "FALLBACK"]
+
+
+@dataclass
+class SlotState:
+    """表示单个槽位在当前会话中的状态。"""
+
+    node_id: str
+    status: SlotTruthValue = "unknown"
+    certainty: SlotCertainty = "unknown"
+    value: Optional[Any] = None
+    evidence: List[str] = field(default_factory=list)
+    source_turns: List[int] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class EvidenceState:
+    """表示单个证据节点在演绎分析后的状态。"""
+
+    node_id: str
+    existence: EvidenceExistence = "unknown"
+    certainty: EvidenceCertainty = "unknown"
+    reasoning: str = ""
+    source_turns: List[int] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class HypothesisScore:
+    """表示某个候选疾病或阶段的当前得分。"""
+
+    node_id: str
+    label: str
+    name: str
+    score: float
+    evidence_node_ids: List[str] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ActionStats:
+    """表示某个搜索动作在 MCTS 中的访问统计。"""
+
+    action_id: str
+    visit_count: int = 0
+    total_value: float = 0.0
+    average_value: float = 0.0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class StateVisitStats:
+    """表示某个状态签名在搜索过程中的访问统计。"""
+
+    state_signature: str
+    visit_count: int = 0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class KeyFeature:
+    """表示 A1 阶段提取出的核心线索。"""
+
+    name: str
+    normalized_name: str
+    status: EvidenceExistence = "exist"
+    certainty: EvidenceCertainty = "doubt"
+    reasoning: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class A1ExtractionResult:
+    """表示 A1 核心症状提取阶段的输出。"""
+
+    key_features: List[KeyFeature] = field(default_factory=list)
+    reasoning: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class HypothesisCandidate:
+    """表示 A2 阶段产生的单个候选假设。"""
+
+    node_id: str
+    name: str
+    label: str = "Disease"
+    score: float = 0.0
+    reasoning: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class A2HypothesisResult:
+    """表示 A2 假设生成阶段的输出。"""
+
+    primary_hypothesis: Optional[HypothesisCandidate] = None
+    alternatives: List[HypothesisCandidate] = field(default_factory=list)
+    reasoning: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class QuestionCandidate:
+    """表示一个可被选作下一问的候选节点。"""
+
+    node_id: str
+    label: str
+    name: str
+    topic_id: Optional[str] = None
+    priority: float = 0.0
+    information_gain: float = 0.0
+    graph_weight: float = 0.0
+    red_flag_score: float = 0.0
+    asked_before: bool = False
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class MctsAction:
+    """表示可供 UCT 选择的候选动作。"""
+
+    action_id: str
+    action_type: str
+    target_node_id: str
+    target_node_label: str
+    target_node_name: str
+    hypothesis_id: Optional[str] = None
+    topic_id: Optional[str] = None
+    prior_score: float = 0.0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class A3VerificationResult:
+    """表示 A3 证据验证阶段的输出。"""
+
+    relevant_symptom: Optional[MctsAction] = None
+    question_text: str = ""
+    reasoning: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class SimulationOutcome:
+    """表示对某个候选动作进行局部 simulation 的结果。"""
+
+    action_id: str
+    expected_reward: float = 0.0
+    positive_branch_reward: float = 0.0
+    negative_branch_reward: float = 0.0
+    depth: int = 0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class SessionState:
+    """表示一次完整问诊会话的全局状态。"""
+
+    session_id: str
+    turn_index: int = 0
+    active_topics: List[str] = field(default_factory=list)
+    slots: Dict[str, SlotState] = field(default_factory=dict)
+    evidence_states: Dict[str, EvidenceState] = field(default_factory=dict)
+    candidate_hypotheses: List[HypothesisScore] = field(default_factory=list)
+    asked_node_ids: List[str] = field(default_factory=list)
+    action_stats: Dict[str, ActionStats] = field(default_factory=dict)
+    state_visit_stats: Dict[str, StateVisitStats] = field(default_factory=dict)
+    fail_count: int = 0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class SlotUpdate:
+    """表示一次用户回答触发的槽位更新。"""
+
+    node_id: str
+    status: SlotTruthValue
+    certainty: SlotCertainty = "certain"
+    value: Optional[Any] = None
+    evidence: Optional[str] = None
+    turn_index: Optional[int] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class A4DeductiveResult:
+    """表示 A4 演绎分析阶段的结构化判断结果。"""
+
+    existence: EvidenceExistence = "unknown"
+    certainty: EvidenceCertainty = "unknown"
+    reasoning: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class RouteDecision:
+    """表示当前状态下下一步应进入的推理阶段。"""
+
+    stage: ReasoningStage
+    reason: str
+    next_topic_id: Optional[str] = None
+    next_hypothesis_id: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class StopDecision:
+    """表示问诊是否终止以及终止原因。"""
+
+    should_stop: bool
+    reason: str
+    confidence: float = 0.0
+    metadata: Dict[str, Any] = field(default_factory=dict)

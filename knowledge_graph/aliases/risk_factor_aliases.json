@@ -1,0 +1,95 @@
+{
+  "merge_groups": [
+    {
+      "canonical_name": "未接受抗逆转录病毒治疗",
+      "aliases": [
+        "未启动抗反转录病毒治疗",
+        "未启动抗逆转录病毒治疗",
+        "未接受 cART",
+        "未接受抗逆转录病毒治疗"
+      ],
+      "confidence": "high",
+      "reason": "指代同一临床状态（未进行ART治疗）的不同中文翻译（逆转录/反转录）、缩写及动词变体"
+    },
+    {
+      "canonical_name": "CD4+ T淋巴细胞计数低",
+      "aliases": [
+        "CD4 细胞计数低",
+        "CD4+ T淋巴细胞计数低",
+        "CD4+ T淋巴细胞计数降低",
+        "低CD4+ T细胞计数",
+        "基线CD4+ T淋巴细胞计数低"
+      ],
+      "confidence": "high",
+      "reason": "同一免疫功能低下风险因素的不同词序、简称及包含基线修饰语的表述"
+    },
+    {
+      "canonical_name": "免疫抑制状态",
+      "aliases": [
+        "免疫功能严重低下",
+        "免疫功能低下",
+        "免疫抑制",
+        "免疫抑制状态"
+      ],
+      "confidence": "high",
+      "reason": "泛指机体防御能力下降的同义临床状态描述"
+    },
+    {
+      "canonical_name": "高龄/老年",
+      "aliases": [
+        "高龄",
+        "老年",
+        "高龄 (>60 岁)"
+      ],
+      "confidence": "high",
+      "reason": "同一年龄相关危险因素的习惯用语及包含具体界值标准的变体"
+    },
+    {
+      "canonical_name": "HIV病毒载量高/未受抑制",
+      "aliases": [
+        "HIV病毒载量高",
+        "基线HIV病毒载量高",
+        "病毒载量未受抑制"
+      ],
+      "confidence": "high",
+      "reason": "指代体液内病毒复制活跃、未被药物有效压制的等价临床评估结论"
+    },
+    {
+      "canonical_name": "近期性传播感染 (STI)",
+      "aliases": [
+        "新诊断性传播感染（如梅毒、淋病、衣原体）",
+        "近半年性病感染史",
+        "近期性传播感染"
+      ],
+      "confidence": "high",
+      "reason": "同一暴露风险的历史状态表述，包含举例说明及具体时间界定变体"
+    },
+    {
+      "canonical_name": "共用针具注射毒品",
+      "aliases": [
+        "共用针具注射毒品",
+        "注射毒品并共用针具"
+      ],
+      "confidence": "high",
+      "reason": "同一种血液传播高危行为的不同语序排列"
+    },
+    {
+      "canonical_name": "性伴为HIV感染者",
+      "aliases": [
+        "HIV 阳性性伴侣",
+        "性伴为HIV感染者"
+      ],
+      "confidence": "high",
+      "reason": "同一种性传播暴露风险环境的不同主客体表述"
+    },
+    {
+      "canonical_name": "HPV多重感染",
+      "aliases": [
+        "HPV多重感染",
+        "初次检查HPV多重感染"
+      ],
+      "confidence": "high",
+      "reason": "同一种特定的病原体感染风险特征，包含诊断时机的修饰变体"
+    }
+  ]
+}

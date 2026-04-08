@@ -1,0 +1,157 @@
+{
+  "merge_groups": [
+    {
+      "canonical_name": "CD4+ T淋巴细胞计数 < 200/μL",
+      "aliases": [
+        "CD4+ T淋巴细胞计数 < 200/μL",
+        "CD4+ T 淋巴细胞计数 < 200/μL",
+        "CD4+ T 淋巴细胞计数 < 200 /μL",
+        "CD4+ T 淋巴细胞计数 <200 /μL",
+        "CD4 细胞计数 <200 个/mm³",
+        "CD4+ T 淋巴细胞 < 200/μL",
+        "CD4+ T 淋巴细胞 <200/μL",
+        "CD4 < 200/μL",
+        "CD4 < 200个/mm³",
+        "CD4+ T 淋巴细胞计数 <200/μL",
+        "CD4+ T淋巴细胞计数 < 200 /μL",
+        "CD4+ T淋巴细胞计数<200/μL",
+        "CD4+ T 淋巴细胞计数低于200/μL",
+        "CD4+T淋巴细胞计数<200/μL",
+        "CD4细胞计数<200个/mm³",
+        "CD4+ T细胞计数 < 2.0×10⁸/L",
+        "CD4细胞计数 < 2.0 × 10⁸ 个/L",
+        "CD4细胞计数 < 2.0×10⁸/L"
+      ],
+      "confidence": "high",
+      "reason": "同一指标及临床重要阈值的不同空格、缩写、缺失字以及国际单位等效换算（200个/μL、个/mm³ 与 2.0×10⁸/L 等价）"
+    },
+    {
+      "canonical_name": "CD4+ T淋巴细胞计数 < 100/μL",
+      "aliases": [
+        "CD4+ T 淋巴细胞计数 < 100 /μL",
+        "CD4+ T 淋巴细胞计数 < 100/μL",
+        "CD4+ T淋巴细胞计数 < 100/μL",
+        "CD4+ T淋巴细胞计数<100/μL",
+        "CD4 <100/μL",
+        "CD4+ T 淋巴细胞 <100/μL",
+        "CD4+ T 淋巴细胞计数 <100 /μL",
+        "CD4+ T 淋巴细胞计数 <100/μL",
+        "CD4+ T淋巴细胞 < 100/μL",
+        "CD4+ T淋巴细胞计数 < 100 /μL"
+      ],
+      "confidence": "high",
+      "reason": "同一指标及阈值的不同空格和中英文缩写变体"
+    },
+    {
+      "canonical_name": "CD4+ T淋巴细胞计数 < 50/μL",
+      "aliases": [
+        "CD4+ T淋巴细胞计数 < 50/μL",
+        "CD4+ T 淋巴细胞计数 <50/μL",
+        "CD4 <50/μL",
+        "CD4+ T 淋巴细胞计数 < 50 /μL",
+        "CD4+ T 淋巴细胞计数 < 50/μL",
+        "CD4+ T 淋巴细胞计数 <50 /μL",
+        "CD4+ T淋巴细胞计数 < 50 /μL",
+        "CD4+ T淋巴细胞计数<50/μL",
+        "CD4+T淋巴细胞计数<50/μL",
+        "CD4+ T 液巴细胞计数 < 50 /μL"
+      ],
+      "confidence": "high",
+      "reason": "同一指标及阈值的不同空格、缩写变体及OCR识别错别字（液巴细胞）修正"
+    },
+    {
+      "canonical_name": "HIV RNA低于检测下限",
+      "aliases": [
+        "病毒载量低于检测下限",
+        "病毒载量持续低于检测下限",
+        "HIV RNA 低于检测下限",
+        "HIV RNA 未检测到",
+        "HIV病毒载量低于检测下限",
+        "病毒载量未检出"
+      ],
+      "confidence": "high",
+      "reason": "指代抗病毒治疗实现完全病毒学抑制状态（Undetectable）的等效临床描述"
+    },
+    {
+      "canonical_name": "弓形虫IgG抗体阳性",
+      "aliases": [
+        "弓形虫IgG抗体阳性",
+        "弓形虫IgG阳性",
+        "弓形虫抗体阳性",
+        "抗弓形虫IgG抗体阳性"
+      ],
+      "confidence": "high",
+      "reason": "同一血清学病原体特异性抗原检测阳性结果的不同命名与省略表达（临床上默认弓形虫抗体阳性多指代IgG记忆抗体）"
+    },
+    {
+      "canonical_name": "eGFR < 60 mL/min/1.73m²",
+      "aliases": [
+        "eCrCl < 60 mL/min",
+        "eGFR < 60 mL/(min·1.73m²)",
+        "eGFR < 60 mL/min",
+        "eGFR < 60 mL/min/1.73m²",
+        "eGFR < 60 mL·min⁻¹·1.73m⁻²"
+      ],
+      "confidence": "high",
+      "reason": "肾功能受损标准阈值（慢性肾脏病分期界限）的不同单位排版格式，及肌酐清除率(eCrCl)作为等效临床替代指标的合并"
+    },
+    {
+      "canonical_name": "eGFR < 30 mL/min/1.73m²",
+      "aliases": [
+        "eGFR < 30 mL/(min·1.73m²)",
+        "eGFR < 30 mL/min",
+        "eGFR < 30 mL/min/1.73m²",
+        "eGFR < 30 mL·min⁻¹·1.73m⁻²"
+      ],
+      "confidence": "high",
+      "reason": "严重肾功能受损/ART药物调整阈值的不同单位排版格式（上标、括号、省略体表面积）"
+    },
+    {
+      "canonical_name": "动脉血氧分压 (PaO2) < 70 mmHg",
+      "aliases": [
+        "PaO2 <70 mmHg",
+        "动脉血氧分压 < 70 mmHg",
+        "吸入空气时 PO₂ < 70 mmHg"
+      ],
+      "confidence": "high",
+      "reason": "同一血气分析关键指标阈值（如用于评估PCP肺炎严重程度）的中英文及测试条件说明变体"
+    },
+    {
+      "canonical_name": "肺泡-动脉氧分压差 > 35 mmHg",
+      "aliases": [
+        "肺泡-动脉氧分压差 > 35 mmHg",
+        "肺泡-动脉血氧分压差 ≥ 35 mmHg",
+        "肺泡-动脉血氧分压差>35 mmHg"
+      ],
+      "confidence": "high",
+      "reason": "同一血气衍生指标的等价中文字面表述及微小阈值符号（大于与大于等于）差异"
+    },
+    {
+      "canonical_name": "蛋白尿定量 > 300 mg/天",
+      "aliases": [
+        "蛋白尿 > 300 mg/天",
+        "蛋白尿定量 > 300 mg/天"
+      ],
+      "confidence": "high",
+      "reason": "同一定量尿液检查异常指标及阈值的等价临床表述"
+    },
+    {
+      "canonical_name": "eGFR较基线下降 ≥ 25%",
+      "aliases": [
+        "eGFR下降 ≥25%",
+        "eGFR较基线下降幅度 >= 25%"
+      ],
+      "confidence": "high",
+      "reason": "同一肾功能恶化判定动态标准的等效表述和符号变体"
+    },
+    {
+      "canonical_name": "颅内压/脑脊液压力 > 200 mmH₂O",
+      "aliases": [
+        "脑脊液压力 >200 mm H₂O",
+        "颅内压 > 200 mmH₂O"
+      ],
+      "confidence": "high",
+      "reason": "由于在腰穿测定时两者临床等效，属于同一物理生理指标的同义词及其对应危险阈值的变体"
+    }
+  ]
+}
