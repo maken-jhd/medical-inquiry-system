@@ -85,7 +85,9 @@ class LlmClient:
             "trajectory_agent_verifier": (
                 "请作为临床推理评审者，结合患者上下文、候选最终答案和最佳推理路径，"
                 "给出该答案的代理评审分数。"
-                "输出字段必须包含 score、should_accept_stop、reasoning、missing_evidence、risk_flags。"
+                "输出字段必须包含 score、should_accept_stop、reject_reason、reasoning、"
+                "missing_evidence、risk_flags、recommended_next_evidence、alternative_candidates。"
+                "其中 reject_reason 只能取 missing_key_support、strong_alternative_not_ruled_out、trajectory_insufficient 之一。"
                 "score 取值范围为 0 到 1。"
             ),
         }

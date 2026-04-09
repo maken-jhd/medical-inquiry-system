@@ -28,6 +28,10 @@ class HypothesisManagerConfig:
     overlap_penalty: float = 0.10
     feature_coverage_bonus: float = 0.20
     semantic_score_bonus: float = 0.22
+    verifier_alt_bonus: float = 0.35
+    verifier_uncertainty_penalty: float = 0.25
+    verifier_missing_support_penalty: float = 0.12
+    verifier_trajectory_penalty: float = 0.08
 
 
 class HypothesisManager:
@@ -138,6 +142,64 @@ class HypothesisManager:
 
         return sorted(updated, key=lambda item: (-item.score, item.name))
 
+    # 根据 verifier 的拒停理由对主备选假设做一次显式重排。
+    def apply_verifier_repair(
+        self,
+        hypotheses: Iterable[HypothesisScore],
+        current_answer_id: str | None,
+        reject_reason: str,
+        recommended_next_evidence: list[str] | None = None,
+        alternative_candidates: list[dict] | None = None,
+    ) -> List[HypothesisScore]:
+        ranked = [self._clone_hypothesis(item) for item in hypotheses]
+        alternative_items = list(alternative_candidates or [])
+        preferred_evidence = [
+            str(item).strip()
+            for item in (recommended_next_evidence or [])
+            if len(str(item).strip()) > 0
+        ]
+
+        for index, hypothesis in enumerate(ranked):
+            score_delta = 0.0
+            metadata = dict(hypothesis.metadata)
+            matched_alternative = self._match_verifier_alternative(hypothesis, alternative_items)
+
+            if current_answer_id and hypothesis.node_id == current_answer_id:
+                if reject_reason == "strong_alternative_not_ruled_out":
+                    score_delta -= self.config.verifier_uncertainty_penalty
+                elif reject_reason == "missing_key_support":
+                    score_delta -= self.config.verifier_missing_support_penalty
+                elif reject_reason == "trajectory_insufficient":
+                    score_delta -= self.config.verifier_trajectory_penalty
+
+            if matched_alternative is not None:
+                score_delta += max(self.config.verifier_alt_bonus - index * 0.05, self.config.verifier_alt_bonus * 0.5)
+                metadata["verifier_alternative_reason"] = matched_alternative.get("reason", "")
+
+            merged_evidence = self._merge_recommended_evidence(
+                metadata.get("recommended_next_evidence", []),
+                preferred_evidence,
+            )
+            metadata.update(
+                {
+                    "recommended_next_evidence": merged_evidence,
+                    "verifier_reject_reason": reject_reason,
+                    "verifier_adjustment": score_delta,
+                    "verifier_role": "alternative" if matched_alternative is not None else metadata.get("verifier_role", "current"),
+                }
+            )
+
+            ranked[index] = HypothesisScore(
+                node_id=hypothesis.node_id,
+                label=hypothesis.label,
+                name=hypothesis.name,
+                score=max(hypothesis.score + score_delta, 0.0),
+                evidence_node_ids=list(hypothesis.evidence_node_ids),
+                metadata=metadata,
+            )
+
+        return sorted(ranked, key=lambda item: (-item.score, item.name))
+
     # 根据证据存在性和确定性计算对假设分数的调整值。
     def _score_delta_from_evidence(self, evidence_state: EvidenceState) -> float:
         relation_type = str(evidence_state.metadata.get("relation_type", ""))
@@ -175,6 +237,56 @@ class HypothesisManager:
             return 0.6
 
         return 0.9
+
+    # 克隆假设对象，避免直接修改原列表中的引用。
+    def _clone_hypothesis(self, hypothesis: HypothesisScore) -> HypothesisScore:
+        return HypothesisScore(
+            node_id=hypothesis.node_id,
+            label=hypothesis.label,
+            name=hypothesis.name,
+            score=hypothesis.score,
+            evidence_node_ids=list(hypothesis.evidence_node_ids),
+            metadata=dict(hypothesis.metadata),
+        )
+
+    # 将 verifier 推荐的下一步证据与现有推荐证据做去重合并。
+    def _merge_recommended_evidence(
+        self,
+        existing: object,
+        preferred_evidence: list[str],
+    ) -> list[str]:
+        merged: list[str] = []
+
+        if isinstance(existing, list):
+            for item in existing:
+                text = str(item).strip()
+
+                if len(text) > 0 and text not in merged:
+                    merged.append(text)
+
+        for item in preferred_evidence:
+            if item not in merged:
+                merged.append(item)
+
+        return merged
+
+    # 将 verifier 提及的替代诊断与当前 hypothesis 对齐。
+    def _match_verifier_alternative(
+        self,
+        hypothesis: HypothesisScore,
+        alternative_candidates: list[dict],
+    ) -> dict | None:
+        for item in alternative_candidates:
+            answer_id = str(item.get("answer_id") or "").strip()
+            answer_name = str(item.get("answer_name") or "").strip()
+
+            if len(answer_id) > 0 and answer_id == hypothesis.node_id:
+                return item
+
+            if len(answer_name) > 0 and answer_name == hypothesis.name:
+                return item
+
+        return None
 
     # 尝试使用 LLM 对候选假设进行更贴近论文的排序。
     def _try_rank_with_llm(

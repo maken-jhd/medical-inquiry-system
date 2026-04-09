@@ -347,8 +347,11 @@ class SearchResult:
     """表示一次局部搜索返回的动作与答案评分结果。"""
 
     selected_action: Optional[MctsAction] = None
+    root_best_action: Optional[MctsAction] = None
+    repair_selected_action: Optional[MctsAction] = None
     trajectories: List[ReasoningTrajectory] = field(default_factory=list)
     final_answer_scores: List[FinalAnswerScore] = field(default_factory=list)
     best_answer_id: Optional[str] = None
     best_answer_name: Optional[str] = None
+    verifier_repair_context: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)

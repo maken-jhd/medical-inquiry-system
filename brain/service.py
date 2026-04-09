@@ -185,6 +185,7 @@ class ConsultationBrain:
         tracker.set_evidence_state(session_id, evidence_state)
         self._apply_hypothesis_feedback(session_id, pending_action, evidence_state)
         self._record_action_reward(session_id, pending_action, a4_result)
+        tracker.get_session(session_id).metadata["last_answered_action"] = pending_action
         tracker.clear_pending_action(session_id)
         updated_state = tracker.get_session(session_id)
         current_hypothesis = self._find_hypothesis_by_id(
@@ -316,6 +317,7 @@ class ConsultationBrain:
         )
         search_result = SearchResult(
             selected_action=selected_action,
+            root_best_action=selected_action,
             trajectories=trajectories,
             final_answer_scores=final_scores,
             best_answer_id=best_answer.answer_id if best_answer is not None else None,
@@ -376,6 +378,8 @@ class ConsultationBrain:
         linked_entities: list[LinkedEntity] = []
         a2_result = A2HypothesisResult()
         search_result = SearchResult()
+        selected_action: MctsAction | None = None
+        default_search_action: MctsAction | None = None
         route_after_slot_update = self.deps.router.route_after_slot_update(state)
 
         should_run_a1 = tracker.get_session(session_id).turn_index == 1 or stage_after_a4 == "A1"
@@ -416,9 +420,7 @@ class ConsultationBrain:
 
             if effective_stage in {"A2", "A3"} and len(tracker.get_session(session_id).candidate_hypotheses) > 0:
                 search_result = self.run_reasoning_search(session_id, patient_context)
-                selected_action = self.choose_next_question_from_search(session_id, search_result)
-            else:
-                selected_action = None
+                default_search_action = self.choose_next_question_from_search(session_id, search_result)
 
         stop_decision = self.deps.stop_rule_engine.check_sufficiency(
             tracker.get_session(session_id),
@@ -426,6 +428,23 @@ class ConsultationBrain:
         )
         best_answer_score = self.deps.trajectory_evaluator.select_best_answer(search_result.final_answer_scores)
         accept_decision = self.deps.stop_rule_engine.should_accept_final_answer(best_answer_score, tracker.get_session(session_id))
+        repair_context = self._build_verifier_repair_context(
+            session_id,
+            search_result,
+            best_answer_score,
+            accept_decision,
+        )
+
+        if repair_context is not None:
+            self._apply_verifier_repair_strategy(session_id, repair_context)
+            search_result.verifier_repair_context = dict(repair_context)
+            selected_action = self._choose_repair_action(session_id, search_result, repair_context)
+            search_result.repair_selected_action = selected_action
+        elif default_search_action is not None:
+            selected_action = default_search_action
+
+        if self._has_search_signal(search_result):
+            search_result.selected_action = selected_action
 
         if self._should_emit_final_report(search_result, selected_action, stop_decision, accept_decision):
             final_report = (
@@ -464,6 +483,7 @@ class ConsultationBrain:
 
         if selected_action is not None:
             tracker.mark_question_asked(session_id, selected_action.target_node_id)
+            tracker.get_session(session_id).metadata["last_selected_action"] = selected_action
             tracker.set_pending_action(session_id, selected_action)
 
             if selected_action.topic_id is not None:
@@ -558,12 +578,23 @@ class ConsultationBrain:
     def _ensure_search_tree(self, session_id: str, state: SessionState) -> SearchTree:
         tracker = self.deps.state_tracker
         tree = tracker.get_bound_search_tree(session_id)
+        top_hypothesis_id = self._get_top_hypothesis_id(state)
+        root_signature = self.deps.mcts_engine.build_state_signature(state, top_hypothesis_id)
+        force_tree_refresh = bool(state.metadata.pop("force_tree_refresh", False))
 
-        if tree is not None:
-            return tree
+        if tree is not None and tree.root_id is not None:
+            root = tree.get_node(tree.root_id)
+            root_top_hypothesis_id = str(root.metadata.get("top_hypothesis_id") or "") or None
+
+            if not force_tree_refresh and root.state_signature == root_signature and root_top_hypothesis_id == top_hypothesis_id:
+                return tree
+
+        if force_tree_refresh:
+            state.metadata["tree_refresh_reason"] = state.metadata.get("tree_refresh_reason", "forced_refresh")
+        elif tree is not None:
+            state.metadata["tree_refresh_reason"] = state.metadata.get("tree_refresh_reason", "state_signature_changed")
 
         tree = SearchTree()
-        root_signature = self.deps.mcts_engine.build_state_signature(state)
         tree.add_node(
             TreeNode(
                 node_id=f"root::{root_signature}",
@@ -572,11 +603,23 @@ class ConsultationBrain:
                 action_from_parent=None,
                 stage="A2",
                 depth=0,
-                metadata={"session_id": session_id, "rollout_state": deepcopy(state)},
+                metadata={
+                    "session_id": session_id,
+                    "rollout_state": deepcopy(state),
+                    "top_hypothesis_id": top_hypothesis_id,
+                },
             )
         )
         tracker.bind_search_tree(session_id, tree)
         return tree
+
+    # 从当前状态中读取 top1 hypothesis id，辅助搜索树决定是否需要换根。
+    def _get_top_hypothesis_id(self, state: SessionState) -> str | None:
+        if len(state.candidate_hypotheses) == 0:
+            return None
+
+        ranked = sorted(state.candidate_hypotheses, key=lambda item: (-item.score, item.name))
+        return ranked[0].node_id
 
     # 从叶子节点恢复 rollout 上下文，包括当前分支状态与主备选假设。
     def _build_rollout_context_from_leaf(self, session_id: str, leaf: TreeNode) -> dict:
@@ -659,6 +702,241 @@ class ConsultationBrain:
                 "gated_by_verifier": True,
             },
         )
+
+    # 根据 verifier 的拒停信息构造 repair 分流上下文。
+    def _build_verifier_repair_context(
+        self,
+        session_id: str,
+        search_result: SearchResult,
+        best_answer_score: FinalAnswerScore | None,
+        accept_decision: StopDecision,
+    ) -> dict | None:
+        if best_answer_score is None or accept_decision.should_stop:
+            return None
+
+        metadata = dict(best_answer_score.metadata)
+
+        if metadata.get("verifier_mode") != "llm_verifier" or bool(metadata.get("verifier_should_accept", True)):
+            return None
+
+        state = self.deps.state_tracker.get_session(session_id)
+        reject_reason = str(metadata.get("verifier_reject_reason", "")).strip() or "missing_key_support"
+        current_hypothesis = self._find_hypothesis_by_id(state.candidate_hypotheses, search_result.best_answer_id)
+        recommended_next_evidence = self._normalize_string_list(metadata.get("verifier_recommended_next_evidence", []))
+
+        if current_hypothesis is not None:
+            recommended_next_evidence = self._merge_unique_strings(
+                recommended_next_evidence,
+                self._normalize_string_list(current_hypothesis.metadata.get("recommended_next_evidence", [])),
+            )
+
+        alternative_candidates = self._normalize_alternative_candidates(metadata.get("verifier_alternative_candidates", []))
+
+        if reject_reason == "strong_alternative_not_ruled_out" and len(alternative_candidates) == 0:
+            alternative_candidates = [
+                {
+                    "answer_id": item.node_id,
+                    "answer_name": item.name,
+                    "reason": "来自当前 hypothesis 排名中的强备选候选。",
+                }
+                for item in state.candidate_hypotheses[1:3]
+            ]
+
+        if reject_reason == "missing_key_support" and len(recommended_next_evidence) == 0:
+            recommended_next_evidence = self._normalize_string_list(metadata.get("verifier_missing_evidence", []))[:3]
+
+        return {
+            "reject_reason": reject_reason,
+            "recommended_next_evidence": recommended_next_evidence,
+            "alternative_candidates": alternative_candidates,
+            "verifier_reasoning": str(metadata.get("verifier_reasoning", "")),
+            "force_tree_refresh": True,
+            "repair_stage": self._map_reject_reason_to_stage(reject_reason),
+            "current_answer_id": best_answer_score.answer_id,
+            "current_answer_name": best_answer_score.answer_name,
+        }
+
+    # 将 verifier 拒停结果显式写回 hypothesis 排序与会话元数据。
+    def _apply_verifier_repair_strategy(self, session_id: str, repair_context: dict) -> None:
+        state = self.deps.state_tracker.get_session(session_id)
+        current_top_hypothesis_id = self._get_top_hypothesis_id(state)
+        reject_reason = str(repair_context.get("reject_reason", "missing_key_support"))
+
+        if len(state.candidate_hypotheses) > 0:
+            updated = self.deps.hypothesis_manager.apply_verifier_repair(
+                state.candidate_hypotheses,
+                current_answer_id=repair_context.get("current_answer_id"),
+                reject_reason=reject_reason,
+                recommended_next_evidence=self._normalize_string_list(repair_context.get("recommended_next_evidence", [])),
+                alternative_candidates=self._normalize_alternative_candidates(repair_context.get("alternative_candidates", [])),
+            )
+            self.deps.state_tracker.set_candidate_hypotheses(session_id, updated)
+
+        refreshed_state = self.deps.state_tracker.get_session(session_id)
+        new_top_hypothesis_id = self._get_top_hypothesis_id(refreshed_state)
+        refreshed_state.metadata["verifier_repair_context"] = dict(repair_context)
+        refreshed_state.metadata["force_tree_refresh"] = bool(repair_context.get("force_tree_refresh", True))
+
+        if current_top_hypothesis_id != new_top_hypothesis_id:
+            refreshed_state.metadata["tree_refresh_reason"] = "top_hypothesis_changed_after_verifier"
+        else:
+            refreshed_state.metadata["tree_refresh_reason"] = f"verifier_reject::{reject_reason}"
+
+    # 在 verifier 拒停之后，显式选择修补证据缺口能力更强的下一问。
+    def _choose_repair_action(
+        self,
+        session_id: str,
+        search_result: SearchResult,
+        repair_context: dict,
+    ) -> MctsAction | None:
+        state = self.deps.state_tracker.get_session(session_id)
+        current_hypothesis = sorted(
+            state.candidate_hypotheses,
+            key=lambda item: (-item.score, item.name),
+        )[0] if len(state.candidate_hypotheses) > 0 else None
+
+        if current_hypothesis is None:
+            return self.choose_next_question_from_search(session_id, search_result)
+
+        alternatives = [
+            item
+            for item in state.candidate_hypotheses
+            if item.node_id != current_hypothesis.node_id
+        ][: self.deps.hypothesis_manager.config.expand_top_k_hypotheses]
+        rows = self.deps.retriever.retrieve_r2_expected_evidence(current_hypothesis, state)
+        actions = self.deps.action_builder.build_verification_actions(
+            rows,
+            hypothesis_id=current_hypothesis.node_id,
+            topic_id=current_hypothesis.label,
+            competing_hypotheses=alternatives,
+            current_hypothesis=current_hypothesis,
+        )
+        available_actions = [
+            item
+            for item in actions
+            if item.target_node_id not in state.asked_node_ids
+        ]
+
+        if len(available_actions) == 0:
+            return self.choose_next_question_from_search(session_id, search_result)
+
+        recent_question_type = self._get_recent_question_type(state)
+        ranked = sorted(
+            available_actions,
+            key=lambda item: (
+                -self._score_repair_action(item, repair_context, recent_question_type),
+                -item.prior_score,
+                item.target_node_name,
+            ),
+        )
+        return ranked[0]
+
+    # 按 verifier 揭示的缺口类型计算 repair score。
+    def _score_repair_action(
+        self,
+        action: MctsAction,
+        repair_context: dict,
+        recent_question_type: str | None,
+    ) -> float:
+        reject_reason = str(repair_context.get("reject_reason", "missing_key_support"))
+        discriminative_gain = float(action.metadata.get("discriminative_gain", 0.0))
+        novelty_score = float(action.metadata.get("novelty_score", 0.0))
+        recommended_bonus = float(action.metadata.get("recommended_evidence_bonus", 0.0))
+        patient_burden = float(action.metadata.get("patient_burden", 0.0))
+        question_type_hint = str(action.metadata.get("question_type_hint", "symptom"))
+        score = action.prior_score
+
+        if reject_reason == "missing_key_support":
+            return score + recommended_bonus * 2.8 + discriminative_gain * 0.9 - patient_burden * 0.15
+
+        if reject_reason == "strong_alternative_not_ruled_out":
+            return score + discriminative_gain * 1.6 + recommended_bonus * 1.2 - patient_burden * 0.1
+
+        type_diversity_bonus = 0.45 if recent_question_type is not None and question_type_hint != recent_question_type else 0.0
+        return score + novelty_score * 1.7 + type_diversity_bonus - patient_burden * 0.08
+
+    # 返回最近一次真实追问的 question type，用于 trajectory_insufficient 下切换问法。
+    def _get_recent_question_type(self, state: SessionState) -> str | None:
+        for key in ("last_answered_action", "last_selected_action"):
+            action = state.metadata.get(key)
+
+            if isinstance(action, MctsAction):
+                return str(action.metadata.get("question_type_hint", "symptom"))
+
+            if isinstance(action, dict):
+                metadata = action.get("metadata", {})
+
+                if isinstance(metadata, dict):
+                    return str(metadata.get("question_type_hint", "symptom"))
+
+        return None
+
+    # 将 verifier 拒停原因映射为更明确的 repair 阶段语义。
+    def _map_reject_reason_to_stage(self, reject_reason: str) -> str:
+        if reject_reason == "strong_alternative_not_ruled_out":
+            return "A2"
+
+        return "A3"
+
+    # 把任意列表清洗为唯一字符串列表。
+    def _normalize_string_list(self, payload: object) -> list[str]:
+        if not isinstance(payload, list):
+            return []
+
+        values: list[str] = []
+
+        for item in payload:
+            text = str(item).strip()
+
+            if len(text) == 0 or text in values:
+                continue
+
+            values.append(text)
+
+        return values
+
+    # 把 verifier 的替代诊断列表标准化为 dict 列表。
+    def _normalize_alternative_candidates(self, payload: object) -> list[dict]:
+        if not isinstance(payload, list):
+            return []
+
+        normalized: list[dict] = []
+
+        for item in payload:
+            if isinstance(item, dict):
+                answer_name = str(item.get("answer_name") or item.get("name") or "").strip()
+                answer_id = str(item.get("answer_id") or item.get("node_id") or "").strip()
+
+                if len(answer_name) == 0 and len(answer_id) == 0:
+                    continue
+
+                normalized.append(
+                    {
+                        "answer_id": answer_id or None,
+                        "answer_name": answer_name or answer_id,
+                        "reason": str(item.get("reason", "")).strip(),
+                    }
+                )
+                continue
+
+            text = str(item).strip()
+
+            if len(text) == 0:
+                continue
+
+            normalized.append({"answer_id": None, "answer_name": text, "reason": ""})
+
+        return normalized
+
+    # 合并两组字符串列表，同时保持原有顺序和唯一性。
+    def _merge_unique_strings(self, left: list[str], right: list[str]) -> list[str]:
+        merged = list(left)
+
+        for item in right:
+            if item not in merged:
+                merged.append(item)
+
+        return merged
 
     # 判断当前搜索是否已经产生了可供 verifier 或下一问消费的有效信号。
     def _has_search_signal(self, search_result: SearchResult) -> bool:

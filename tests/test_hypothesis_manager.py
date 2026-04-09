@@ -1,7 +1,7 @@
 """测试 A2 假设管理中的竞争性重排与 LLM metadata 回写。"""
 
 from brain.hypothesis_manager import HypothesisManager
-from brain.types import HypothesisCandidate, PatientContext
+from brain.types import HypothesisCandidate, HypothesisScore, PatientContext
 
 
 class FakeLlmClient:
@@ -61,3 +61,24 @@ def test_hypothesis_manager_attaches_llm_competition_metadata() -> None:
     assert result.primary_hypothesis.metadata["recommended_next_evidence"] == ["低氧血症"]
     assert result.primary_hypothesis.metadata["competition_role"] == "primary"
     assert result.alternatives[0].metadata["competition_role"] == "alternative"
+
+
+# 验证 verifier 指出强替代假设未排除时，A2 会显式重排 hypothesis 分数。
+def test_hypothesis_manager_applies_verifier_reshuffle() -> None:
+    manager = HypothesisManager()
+    hypotheses = [
+        HypothesisScore(node_id="phase_acute", label="DiseasePhase", name="急性期", score=1.0, metadata={}),
+        HypothesisScore(node_id="disease_pcp", label="Disease", name="肺孢子菌肺炎 (PCP)", score=0.82, metadata={}),
+    ]
+
+    reranked = manager.apply_verifier_repair(
+        hypotheses,
+        current_answer_id="phase_acute",
+        reject_reason="strong_alternative_not_ruled_out",
+        recommended_next_evidence=["低氧血症"],
+        alternative_candidates=[{"answer_id": "disease_pcp", "answer_name": "肺孢子菌肺炎 (PCP)", "reason": "红旗证据尚未排除"}],
+    )
+
+    assert reranked[0].node_id == "disease_pcp"
+    assert reranked[0].metadata["verifier_alternative_reason"] == "红旗证据尚未排除"
+    assert reranked[0].metadata["recommended_next_evidence"] == ["低氧血症"]

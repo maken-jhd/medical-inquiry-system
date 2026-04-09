@@ -492,6 +492,47 @@
 - 切断了“历史最优 child 被无限重选”的循环来源
 - 为 verifier 拒停后的继续追问提供了更合理的动作切换基础
 - 这也是从“能继续问”进一步走向“能继续问得合理”的必要一步
+
+#### 6. verifier 拒停后的显式 repair 分流
+
+- `trajectory_evaluator.py`
+  - verifier 现在会保留：
+    - `verifier_reject_reason`
+    - `verifier_recommended_next_evidence`
+    - `verifier_alternative_candidates`
+- `service.py`
+  - 新增显式 repair context：
+    - `missing_key_support`
+    - `strong_alternative_not_ruled_out`
+    - `trajectory_insufficient`
+  - 并针对三类拒停走不同的后续动作策略
+- `hypothesis_manager.py`
+  - 新增 verifier-driven hypothesis reshuffle
+  - 当 verifier 指出强 alternative 未排除时，会显式给 alternative bonus，并对当前 top1 加 uncertainty penalty
+- `service.py`
+  - 下一问不再只依赖 root best action
+  - 改为在 verifier 拒停后选择 “best repair action”
+
+解决的问题：
+
+- verifier 的输出不再只是“告诉系统先别停”
+- 而是开始真正决定“接下来该补什么证据、是否要重新排序 hypothesis、该问哪一类问题”
+- 这让 stop gating 从“防止早停”进一步升级为“驱动后续修复动作”
+
+#### 7. 每轮状态签名换根
+
+- `service.py::_ensure_search_tree()`
+  - 现在会把当前 top hypothesis id 纳入根状态签名
+  - 当出现：
+    - verifier reject
+    - top hypothesis 改变
+    - 当前状态签名变化
+  - 就按当前状态重新建 root
+
+解决的问题：
+
+- 降低了跨轮复用旧树时把历史 root action 误带进新状态的风险
+- 对问诊这种强状态依赖任务来说，这一步比单纯“复用一棵树”更稳健
 ## 十二、当前仍未彻底解决的问题
 
 虽然第二阶段已经从脚手架推进到了真实 smoke 可跑，但以下问题仍然需要继续记录和补强：

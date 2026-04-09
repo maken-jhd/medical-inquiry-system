@@ -46,10 +46,19 @@ class FakeVerifierClient:
         return True
 
     def run_structured_prompt(self, prompt_name: str, variables: dict, schema: type) -> dict:
-        _ = variables
+        assert "answer_candidates" in variables
         _ = schema
         assert prompt_name == "trajectory_agent_verifier"
-        return {"score": 0.88, "reasoning": "最佳轨迹与患者上下文一致。"}
+        return {
+            "score": 0.88,
+            "should_accept_stop": False,
+            "reject_reason": "missing_key_support",
+            "reasoning": "最佳轨迹与患者上下文一致，但缺少关键支持证据。",
+            "missing_evidence": ["低氧血症"],
+            "risk_flags": ["支持证据不足"],
+            "recommended_next_evidence": ["低氧血症"],
+            "alternative_candidates": [{"answer_name": "结核病", "reason": "尚未完成鉴别"}],
+        }
 
 
 # 验证当启用 llm_verifier 模式时，agent evaluation 会消费 verifier 分数。
@@ -74,3 +83,6 @@ def test_trajectory_evaluator_supports_llm_verifier_mode() -> None:
 
     assert len(scores) == 1
     assert scores[0].agent_evaluation == 0.88
+    assert scores[0].metadata["verifier_reject_reason"] == "missing_key_support"
+    assert scores[0].metadata["verifier_recommended_next_evidence"] == ["低氧血症"]
+    assert scores[0].metadata["verifier_alternative_candidates"][0]["answer_name"] == "结核病"

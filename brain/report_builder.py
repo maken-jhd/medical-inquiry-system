@@ -61,6 +61,13 @@ class ReportBuilder:
             "session_id": session_state.session_id,
             "turn_index": session_state.turn_index,
             "selected_action": asdict(search_result.selected_action) if search_result.selected_action is not None else None,
+            "root_best_action": asdict(search_result.root_best_action) if search_result.root_best_action is not None else None,
+            "repair_selected_action": (
+                asdict(search_result.repair_selected_action)
+                if search_result.repair_selected_action is not None
+                else None
+            ),
+            "verifier_repair_context": dict(search_result.verifier_repair_context),
             "best_answer_id": search_result.best_answer_id,
             "best_answer_name": search_result.best_answer_name,
             "trajectory_count": len(search_result.trajectories),
@@ -88,6 +95,14 @@ class ReportBuilder:
                     "answer_id": search_result.best_answer_id,
                     "answer_name": search_result.best_answer_name,
                 },
+                "selected_action": asdict(search_result.selected_action) if search_result.selected_action is not None else None,
+                "root_best_action": asdict(search_result.root_best_action) if search_result.root_best_action is not None else None,
+                "repair_selected_action": (
+                    asdict(search_result.repair_selected_action)
+                    if search_result.repair_selected_action is not None
+                    else None
+                ),
+                "verifier_repair_context": dict(search_result.verifier_repair_context),
                 "answer_group_scores": [asdict(item) for item in search_result.final_answer_scores],
                 "best_trajectory": asdict(best_trajectory) if best_trajectory is not None else None,
                 "trajectory_summary": self._summarize_trajectory(best_trajectory),

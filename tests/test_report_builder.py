@@ -1,7 +1,7 @@
 """测试最终推理报告会输出解释性字段。"""
 
 from brain.report_builder import ReportBuilder
-from brain.types import FinalAnswerScore, ReasoningTrajectory, SearchResult, SessionState, StopDecision
+from brain.types import FinalAnswerScore, MctsAction, ReasoningTrajectory, SearchResult, SessionState, StopDecision
 
 
 # 验证 build_final_reasoning_report 会包含答案胜出原因与路径摘要。
@@ -9,8 +9,33 @@ def test_report_builder_includes_reasoning_summary_fields() -> None:
     builder = ReportBuilder()
     state = SessionState(session_id="s1")
     search_result = SearchResult(
+        selected_action=MctsAction(
+            action_id="verify::d1::n2",
+            action_type="verify_evidence",
+            target_node_id="n2",
+            target_node_label="LabFinding",
+            target_node_name="低氧血症",
+        ),
+        root_best_action=MctsAction(
+            action_id="verify::d1::n3",
+            action_type="verify_evidence",
+            target_node_id="n3",
+            target_node_label="LabFinding",
+            target_node_name="CD4+ T淋巴细胞计数 < 200/μL",
+        ),
+        repair_selected_action=MctsAction(
+            action_id="verify::d1::n2",
+            action_type="verify_evidence",
+            target_node_id="n2",
+            target_node_label="LabFinding",
+            target_node_name="低氧血症",
+        ),
         best_answer_id="d1",
         best_answer_name="肺孢子菌肺炎",
+        verifier_repair_context={
+            "reject_reason": "missing_key_support",
+            "recommended_next_evidence": ["低氧血症"],
+        },
         trajectories=[
             ReasoningTrajectory(
                 trajectory_id="t1",
@@ -53,3 +78,46 @@ def test_report_builder_includes_reasoning_summary_fields() -> None:
     assert "肺孢子菌肺炎" in report["why_this_answer_wins"]
     assert "发热" in report["trajectory_summary"]
     assert report["evidence_for_best_answer"] == ["发热", "低氧血症"]
+    assert report["root_best_action"]["target_node_name"] == "CD4+ T淋巴细胞计数 < 200/μL"
+    assert report["repair_selected_action"]["target_node_name"] == "低氧血症"
+    assert report["verifier_repair_context"]["reject_reason"] == "missing_key_support"
+
+
+# 验证 build_search_report 会显式区分 root best action 与 repair selected action。
+def test_report_builder_exposes_action_selection_layers_in_search_report() -> None:
+    builder = ReportBuilder()
+    state = SessionState(session_id="s2", turn_index=2)
+    search_result = SearchResult(
+        selected_action=MctsAction(
+            action_id="verify::phase::rash",
+            action_type="verify_evidence",
+            target_node_id="symptom_rash",
+            target_node_label="Symptom",
+            target_node_name="皮疹",
+        ),
+        root_best_action=MctsAction(
+            action_id="verify::phase::cd4",
+            action_type="verify_evidence",
+            target_node_id="lab_cd4",
+            target_node_label="LabFinding",
+            target_node_name="CD4+ T淋巴细胞计数 < 200/μL",
+        ),
+        repair_selected_action=MctsAction(
+            action_id="verify::phase::rash",
+            action_type="verify_evidence",
+            target_node_id="symptom_rash",
+            target_node_label="Symptom",
+            target_node_name="皮疹",
+        ),
+        verifier_repair_context={
+            "reject_reason": "trajectory_insufficient",
+            "recommended_next_evidence": ["皮疹"],
+        },
+    )
+
+    report = builder.build_search_report(state, search_result)
+
+    assert report["selected_action"]["target_node_name"] == "皮疹"
+    assert report["root_best_action"]["target_node_name"] == "CD4+ T淋巴细胞计数 < 200/μL"
+    assert report["repair_selected_action"]["target_node_name"] == "皮疹"
+    assert report["verifier_repair_context"]["reject_reason"] == "trajectory_insufficient"

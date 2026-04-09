@@ -52,6 +52,14 @@ class TrajectoryEvaluator:
         patient_context: PatientContext | None = None,
     ) -> List[FinalAnswerScore]:
         total_trajectories = sum(len(items) for items in grouped.values())
+        answer_candidates = [
+            {
+                "answer_id": answer_id,
+                "answer_name": answer_name,
+                "trajectory_count": len(trajectories),
+            }
+            for (answer_id, answer_name), trajectories in grouped.items()
+        ]
         scores: List[FinalAnswerScore] = []
 
         for (answer_id, answer_name), trajectories in grouped.items():
@@ -62,6 +70,7 @@ class TrajectoryEvaluator:
                 answer_id=answer_id,
                 answer_name=answer_name,
                 patient_context=patient_context,
+                answer_candidates=answer_candidates,
             )
             final_score = (
                 consistency * self.config.consistency_weight
@@ -114,6 +123,7 @@ class TrajectoryEvaluator:
         answer_id: str,
         answer_name: str,
         patient_context: PatientContext | None = None,
+        answer_candidates: list[dict] | None = None,
     ) -> tuple[float, dict]:
         if len(trajectories) == 0:
             return 0.0, {"verifier_mode": "empty"}
@@ -124,15 +134,19 @@ class TrajectoryEvaluator:
                 answer_id=answer_id,
                 answer_name=answer_name,
                 patient_context=patient_context,
+                answer_candidates=answer_candidates,
             )
 
             if llm_result is not None:
                 return llm_result["score"], {
                     "verifier_mode": "llm_verifier",
                     "verifier_should_accept": llm_result["should_accept_stop"],
+                    "verifier_reject_reason": llm_result["reject_reason"],
                     "verifier_reasoning": llm_result["reasoning"],
                     "verifier_missing_evidence": llm_result["missing_evidence"],
                     "verifier_risk_flags": llm_result["risk_flags"],
+                    "verifier_recommended_next_evidence": llm_result["recommended_next_evidence"],
+                    "verifier_alternative_candidates": llm_result["alternative_candidates"],
                 }
 
         if self.config.agent_eval_mode != "fallback":
@@ -156,6 +170,7 @@ class TrajectoryEvaluator:
         answer_id: str,
         answer_name: str,
         patient_context: PatientContext | None = None,
+        answer_candidates: list[dict] | None = None,
     ) -> dict | None:
         if self.llm_client is None or not self.llm_client.is_available() or patient_context is None:
             return None
@@ -171,6 +186,7 @@ class TrajectoryEvaluator:
                     "answer_name": answer_name,
                     "best_trajectory": best_trajectory,
                     "trajectory_count": len(trajectories),
+                    "answer_candidates": answer_candidates or [],
                 },
                 dict,
             )
@@ -182,13 +198,119 @@ class TrajectoryEvaluator:
         except Exception:
             return None
 
+        should_accept_stop = payload.get("should_accept_stop")
+
+        if should_accept_stop is None:
+            should_accept_stop = payload.get("should_accept")
+
+        recommended_next_evidence = self._normalize_string_list(payload.get("recommended_next_evidence", []))
+        alternative_candidates = self._normalize_alternative_candidates(payload.get("alternative_candidates", []))
+        reject_reason = self._infer_reject_reason(
+            payload,
+            trajectory_count=len(trajectories),
+            alternative_candidates=alternative_candidates,
+            missing_evidence=self._normalize_string_list(payload.get("missing_evidence", [])),
+        )
+
         return {
             "score": max(min(score, 1.0), 0.0),
-            "should_accept_stop": bool(payload.get("should_accept_stop", score >= 0.75)),
+            "should_accept_stop": bool(should_accept_stop if should_accept_stop is not None else score >= 0.75),
+            "reject_reason": reject_reason,
             "reasoning": str(payload.get("reasoning", "")),
-            "missing_evidence": list(payload.get("missing_evidence", [])) if isinstance(payload.get("missing_evidence", []), list) else [],
-            "risk_flags": list(payload.get("risk_flags", [])) if isinstance(payload.get("risk_flags", []), list) else [],
+            "missing_evidence": self._normalize_string_list(payload.get("missing_evidence", [])),
+            "risk_flags": self._normalize_string_list(payload.get("risk_flags", [])),
+            "recommended_next_evidence": recommended_next_evidence,
+            "alternative_candidates": alternative_candidates,
         }
+
+    # 对 verifier 输出中的候选替代诊断做标准化，统一为 dict 列表。
+    def _normalize_alternative_candidates(self, payload: object) -> list[dict]:
+        if not isinstance(payload, list):
+            return []
+
+        normalized: list[dict] = []
+
+        for item in payload:
+            if isinstance(item, dict):
+                answer_name = str(item.get("answer_name") or item.get("name") or "").strip()
+                answer_id = str(item.get("answer_id") or item.get("node_id") or "").strip()
+
+                if len(answer_name) == 0 and len(answer_id) == 0:
+                    continue
+
+                normalized.append(
+                    {
+                        "answer_id": answer_id or None,
+                        "answer_name": answer_name or answer_id,
+                        "reason": str(item.get("reason", "")).strip(),
+                    }
+                )
+                continue
+
+            text = str(item).strip()
+
+            if len(text) == 0:
+                continue
+
+            normalized.append({"answer_id": None, "answer_name": text, "reason": ""})
+
+        return normalized
+
+    # 将 verifier 返回的任意列表字段压平成字符串列表。
+    def _normalize_string_list(self, payload: object) -> list[str]:
+        if not isinstance(payload, list):
+            return []
+
+        values: list[str] = []
+
+        for item in payload:
+            text = str(item).strip()
+
+            if len(text) == 0 or text in values:
+                continue
+
+            values.append(text)
+
+        return values
+
+    # 当 verifier 未显式返回 reject_reason 时，根据缺口特征做保守推断。
+    def _infer_reject_reason(
+        self,
+        payload: dict,
+        trajectory_count: int,
+        alternative_candidates: list[dict],
+        missing_evidence: list[str],
+    ) -> str:
+        raw_reason = str(payload.get("reject_reason", "")).strip()
+        allowed = {
+            "missing_key_support",
+            "strong_alternative_not_ruled_out",
+            "trajectory_insufficient",
+        }
+
+        if raw_reason in allowed:
+            return raw_reason
+
+        if len(alternative_candidates) > 0:
+            return "strong_alternative_not_ruled_out"
+
+        reasoning_text = " ".join(
+            [
+                str(payload.get("reasoning", "")),
+                " ".join(self._normalize_string_list(payload.get("risk_flags", []))),
+            ]
+        ).lower()
+
+        if any(keyword in reasoning_text for keyword in ["鉴别", "alternative", "替代", "未排除", "排除"]):
+            return "strong_alternative_not_ruled_out"
+
+        if trajectory_count <= 1 or any(keyword in reasoning_text for keyword in ["稳定", "路径", "不足", "不稳"]):
+            return "trajectory_insufficient"
+
+        if len(missing_evidence) > 0:
+            return "missing_key_support"
+
+        return "missing_key_support"
 
     # 使用动作序列 Jaccard 估计两条轨迹的相似度。
     def _trajectory_similarity(self, left: ReasoningTrajectory, right: ReasoningTrajectory) -> float:
