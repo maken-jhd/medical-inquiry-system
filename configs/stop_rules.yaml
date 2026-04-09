@@ -1,4 +1,17 @@
-min_top1_margin: 0.25
-min_top1_score: 1.0
-max_fail_count: 2
-min_candidate_count: 1
+search_stop:
+  max_rollouts: 8
+  max_tree_depth: 6
+  max_fail_count: 2
+
+final_acceptance:
+  min_answer_consistency: 0.45
+  min_agent_eval_score: 0.65
+  min_final_score: 0.55
+
+fallback:
+  enable_no_kg_mode: true
+  enable_question_selector_mode: true
+
+legacy:
+  min_top1_margin: 0.25
+  min_top1_score: 1.0

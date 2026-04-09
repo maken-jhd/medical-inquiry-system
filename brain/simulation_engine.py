@@ -5,7 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, List, Optional
 
-from .types import HypothesisCandidate, HypothesisScore, MctsAction, SessionState, SimulationOutcome
+from .types import (
+    HypothesisCandidate,
+    HypothesisScore,
+    MctsAction,
+    ReasoningTrajectory,
+    SessionState,
+    SimulationOutcome,
+)
 
 
 @dataclass
@@ -15,6 +22,7 @@ class SimulationConfig:
     positive_branch_probability: float = 0.6
     positive_reward_multiplier: float = 1.0
     negative_reward_multiplier: float = 0.45
+    rollout_max_depth: int = 3
     relation_bonus_map: dict[str, float] | None = None
 
     # 初始化默认的关系收益加成表。
@@ -80,6 +88,48 @@ class SimulationEngine:
                 "positive_probability": positive_probability,
                 "relation_type": relation_type,
             },
+        )
+
+    # 从单个动作出发构造一条轻量 rollout 轨迹。
+    def rollout_from_action(
+        self,
+        action: MctsAction,
+        state: SessionState,
+        patient_context: object | None,
+        max_depth: int | None = None,
+        primary_hypothesis: HypothesisCandidate | HypothesisScore | None = None,
+    ) -> ReasoningTrajectory:
+        _ = patient_context
+        depth = max_depth or self.config.rollout_max_depth
+        outcome = self.simulate_action(action, state, primary_hypothesis)
+        hypothesis_id = action.hypothesis_id or "UNKNOWN"
+        hypothesis_name = primary_hypothesis.name if primary_hypothesis is not None else "UNKNOWN"
+        simulated_answer = "positive" if outcome.positive_branch_reward >= outcome.negative_branch_reward else "negative"
+
+        steps = [
+            {
+                "stage": "A3",
+                "action_id": action.action_id,
+                "action_name": action.target_node_name,
+                "target_node_id": action.target_node_id,
+                "target_node_name": action.target_node_name,
+                "question_type_hint": action.metadata.get("question_type_hint", "symptom"),
+            },
+            {
+                "stage": "SIMULATION",
+                "branch_answer": simulated_answer,
+                "expected_reward": outcome.expected_reward,
+                "depth": min(depth, self.config.rollout_max_depth),
+            },
+        ]
+
+        return ReasoningTrajectory(
+            trajectory_id=f"trajectory::{action.action_id}",
+            final_answer_id=hypothesis_id,
+            final_answer_name=hypothesis_name,
+            steps=steps,
+            score=outcome.expected_reward,
+            metadata={"simulation_outcome": outcome.metadata},
         )
 
     # 根据动作类型、红旗程度和历史提问情况估算阳性回答概率。

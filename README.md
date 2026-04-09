@@ -12,7 +12,14 @@
 一句话概括当前状态：
 
 - 第一阶段：已可跑通
-- 第二阶段：已经进入“最小闭环可跑”的阶段，但还在持续补强真实联调和离线评测能力
+- 第二阶段：已经进入“Med-MCTS 结构对齐后的最小搜索闭环可跑”阶段，但还在持续补强真实联调和离线评测能力
+
+更详细的局部说明可分别查看：
+
+- 第一阶段知识图谱处理链：[knowledge_graph/README.md](/Users/loki/Workspace/GraduationDesign/knowledge_graph/README.md)
+- 第二阶段问诊大脑：[brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
+- 虚拟病人与离线回放：[simulator/README.md](/Users/loki/Workspace/GraduationDesign/simulator/README.md)
+- 第二阶段测试：[tests/README.md](/Users/loki/Workspace/GraduationDesign/tests/README.md)
 
 ## 项目结构
 
@@ -102,9 +109,32 @@ Neo4j 初始化脚本位于：
 - [brain/question_selector.py](/Users/loki/Workspace/GraduationDesign/brain/question_selector.py)：下一问打分与选择器
 - [brain/mcts_engine.py](/Users/loki/Workspace/GraduationDesign/brain/mcts_engine.py)：基于 UCT 的动作选择器
 - [brain/simulation_engine.py](/Users/loki/Workspace/GraduationDesign/brain/simulation_engine.py)：局部 simulation 预演器
+- [brain/med_extractor.py](/Users/loki/Workspace/GraduationDesign/brain/med_extractor.py)：患者原话到 `(P, C)` 的结构化抽取层
+- [brain/entity_linker.py](/Users/loki/Workspace/GraduationDesign/brain/entity_linker.py)：mention 到 KG 节点的阈值化链接器
+- [brain/search_tree.py](/Users/loki/Workspace/GraduationDesign/brain/search_tree.py)：显式搜索树结构
+- [brain/trajectory_evaluator.py](/Users/loki/Workspace/GraduationDesign/brain/trajectory_evaluator.py)：轨迹聚合与最终答案评分器
 - [brain/stop_rules.py](/Users/loki/Workspace/GraduationDesign/brain/stop_rules.py)：终止与降级规则
 - [brain/report_builder.py](/Users/loki/Workspace/GraduationDesign/brain/report_builder.py)：结构化结果汇总
 - [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)：A1-A4 问诊编排层
+
+## 当前与 Med-MCTS 的对齐状态
+
+当前第二阶段不是完整论文复现，但已经完成了“结构对齐后的基础实现”：
+
+- `MedExtractor`：已补
+- `A1`：已支持 LLM 主通道与规则回退
+- `A2`：已支持患者上下文 + R1 候选排序
+- `A3`：已支持 R2 检索、动作构造与问句生成
+- `A4`：已支持目标感知解释和显式路由
+- `SearchTree + UCT + rollout`：已完成最小可运行版本
+- `TrajectoryEvaluator`：已完成基础版聚合评分
+
+当前仍未完成的重点：
+
+- 更深层的 rollout
+- 更强的 LLM verifier / deductive judge
+- 更贴近论文的最终答案聚类与评审策略
+- 更严格的真实图谱联调与离线 benchmark
 
 ## 虚拟病人脚手架
 

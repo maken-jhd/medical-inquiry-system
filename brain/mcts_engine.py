@@ -1,22 +1,29 @@
-"""负责基于 UCT 在候选动作中选择当前最优动作。"""
+"""负责基于 UCT 在候选动作和搜索树节点中执行选择与回传。"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 from math import log, sqrt
 from typing import Iterable, Optional
 
-from .types import MctsAction, SessionState, SimulationOutcome
+from .search_tree import SearchTree
+from .types import MctsAction, SessionState, SimulationOutcome, TreeNode
 
 
 @dataclass
 class MctsConfig:
     """保存 UCT 选择阶段的核心超参数。"""
 
-    exploration_constant: float = 1.4
+    exploration_constant: float = 2.0
     prior_weight: float = 0.35
     simulation_weight: float = 0.45
     unvisited_bonus: float = 0.2
+    num_rollouts: int = 8
+    max_depth: int = 6
+    max_child_nodes: int = 4
+    discount_factor: float = 1.0
+    max_kg_triplets: int = 15
 
 
 class MctsEngine:
@@ -32,16 +39,23 @@ class MctsEngine:
         session_state: SessionState,
         hypothesis_id: Optional[str] = None,
     ) -> str:
-        positive_slots = sorted(slot.node_id for slot in session_state.slots.values() if slot.status == "true")
-        negative_slots = sorted(slot.node_id for slot in session_state.slots.values() if slot.status == "false")
+        positive_slots = sorted(
+            f"{slot.node_id}:{slot.certainty}" for slot in session_state.slots.values() if slot.status == "true"
+        )
+        negative_slots = sorted(
+            f"{slot.node_id}:{slot.certainty}" for slot in session_state.slots.values() if slot.status == "false"
+        )
         active_topics = sorted(session_state.active_topics)
-        parts = [
-            f"H={hypothesis_id or 'NONE'}",
-            f"P={','.join(positive_slots[:8])}",
-            f"N={','.join(negative_slots[:8])}",
-            f"T={','.join(active_topics[:4])}",
-        ]
-        return "|".join(parts)
+        payload = "|".join(
+            [
+                f"H={hypothesis_id or 'NONE'}",
+                f"P={';'.join(positive_slots)}",
+                f"N={';'.join(negative_slots)}",
+                f"T={';'.join(active_topics)}",
+                f"Q={session_state.metadata.get('pending_action_id', '')}",
+            ]
+        )
+        return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
     # 按照 UCT 对候选动作打分并返回当前最优动作。
     def select_action(
@@ -71,6 +85,53 @@ class MctsEngine:
             ),
         )
         return ranked[0]
+
+    # 在搜索树中选择当前最值得继续向下扩展的叶子节点。
+    def select_leaf(self, tree: SearchTree) -> Optional[TreeNode]:
+        leaf_nodes = [node for node in tree.get_leaf_nodes() if not node.terminal]
+
+        if len(leaf_nodes) == 0:
+            return None
+
+        return sorted(leaf_nodes, key=lambda item: (-item.average_value, item.depth, item.node_id))[0]
+
+    # 将候选动作扩展为搜索树中的子节点。
+    def expand_node(
+        self,
+        tree: SearchTree,
+        parent_node_id: str,
+        actions: Iterable[MctsAction],
+    ) -> list[TreeNode]:
+        parent = tree.get_node(parent_node_id)
+        created: list[TreeNode] = []
+
+        for index, action in enumerate(actions):
+            if index >= self.config.max_child_nodes:
+                break
+
+            child_id = f"{parent.node_id}::{action.action_id}"
+            child = TreeNode(
+                node_id=child_id,
+                state_signature=child_id,
+                parent_id=parent.node_id,
+                action_from_parent=action.action_id,
+                stage="A3",
+                depth=parent.depth + 1,
+                metadata={
+                    "action": action,
+                    "hypothesis_id": action.hypothesis_id,
+                    "target_node_id": action.target_node_id,
+                },
+            )
+            tree.add_node(child)
+            tree.add_edge(parent.node_id, child.node_id)
+            created.append(child)
+
+        return created
+
+    # 将奖励值从叶子节点沿父链回传到根节点。
+    def backpropagate(self, tree: SearchTree, node_id: str, reward: float) -> None:
+        tree.backpropagate(node_id, reward)
 
     # 计算单个动作的 UCT 分数。
     def score_action(

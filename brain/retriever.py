@@ -7,9 +7,12 @@ from typing import Iterable, List, Sequence
 
 from .neo4j_client import Neo4jClient
 from .types import (
+    ClinicalFeatureItem,
     HypothesisCandidate,
     HypothesisScore,
     KeyFeature,
+    LinkedEntity,
+    PatientContext,
     QuestionCandidate,
     SessionState,
 )
@@ -80,6 +83,8 @@ class RetrievalConfig:
         "PopulationGroup",
         "ManagementAction",
     )
+    kg_similarity_threshold: float = 0.72
+    disable_kg_below_threshold: bool = True
 
 
 class GraphRetriever:
@@ -129,14 +134,18 @@ class GraphRetriever:
     # 执行论文中的 R1：从核心特征反向检索候选疾病或阶段。
     def retrieve_r1_candidates(
         self,
-        key_features: Sequence[KeyFeature],
+        linked_features: Sequence[LinkedEntity | ClinicalFeatureItem | KeyFeature],
+        patient_context: PatientContext | None = None,
         session_state: SessionState | None = None,
         top_k: int | None = None,
     ) -> List[HypothesisCandidate]:
-        feature_names = self._collect_positive_feature_names(key_features, session_state)
+        feature_names = self._collect_positive_feature_names(linked_features, patient_context, session_state)
         limit = top_k or self.config.r1_limit
 
         if len(feature_names) == 0:
+            return []
+
+        if self.config.disable_kg_below_threshold and self._all_link_confidence_low(linked_features):
             return []
 
         rows = self.client.run_query(
@@ -202,23 +211,49 @@ class GraphRetriever:
 
         rows = self.client.run_query(
             """
-            MATCH (hyp)-[r]-(target)
-            WHERE hyp.id = $hypothesis_id
-              AND type(r) IN $relation_types
-              AND NOT target.id IN $asked_ids
-              AND NOT target.id IN $known_slot_ids
-              AND any(label IN labels(target) WHERE label IN $target_labels)
+            CALL () {
+              MATCH (hyp)-[r]->(target)
+              WHERE hyp.id = $hypothesis_id
+                AND type(r) IN $relation_types
+                AND NOT target.id IN $asked_ids
+                AND NOT target.id IN $known_slot_ids
+                AND any(label IN labels(target) WHERE label IN $target_labels)
+              RETURN target, r, 1.0 AS direction_confidence
+              UNION
+              MATCH (target)-[r]->(hyp)
+              WHERE hyp.id = $hypothesis_id
+                AND type(r) IN $relation_types
+                AND NOT target.id IN $asked_ids
+                AND NOT target.id IN $known_slot_ids
+                AND any(label IN labels(target) WHERE label IN $target_labels)
+              RETURN target, r, 0.65 AS direction_confidence
+            }
             RETURN target.id AS node_id,
                    labels(target)[0] AS label,
                    coalesce(target.canonical_name, target.name) AS name,
                    type(r) AS relation_type,
-                   coalesce(target.weight, 0.0) + coalesce(r.weight, 0.0) AS priority,
+                   coalesce(r.weight, 0.0) AS relation_weight,
+                   coalesce(target.weight, 0.0) AS node_weight,
+                   direction_confidence AS similarity_confidence,
+                   CASE
+                     WHEN type(r) IN ['HAS_LAB_FINDING', 'DIAGNOSED_BY'] THEN 1.0
+                     WHEN type(r) = 'MANIFESTS_AS' THEN 0.85
+                     WHEN type(r) = 'REQUIRES_DETAIL' THEN 0.55
+                     ELSE 0.45
+                   END AS contradiction_priority,
+                   CASE
+                     WHEN labels(target)[0] IN ['LabFinding', 'LabTest'] THEN 'lab'
+                     WHEN labels(target)[0] IN ['RiskFactor', 'RiskBehavior'] THEN 'risk'
+                     WHEN labels(target)[0] = 'ClinicalAttribute' THEN 'detail'
+                     ELSE 'symptom'
+                   END AS question_type_hint,
+                   (coalesce(target.weight, 0.0) + coalesce(r.weight, 0.0)) * direction_confidence AS priority,
                    CASE
                      WHEN labels(target)[0] IN ['Sign', 'LabFinding'] THEN true
                      ELSE false
                    END AS is_red_flag,
                    labels(target)[0] AS topic_id
-            ORDER BY priority DESC, name
+            ORDER BY priority DESC, contradiction_priority DESC, name
             LIMIT $limit
             """,
             {
@@ -267,7 +302,7 @@ class GraphRetriever:
 
     # 兼容旧接口：根据当前阳性槽位向前检索候选疾病、阶段或并发问题。
     def get_forward_hypotheses(self, session_state: SessionState, top_k: int | None = None) -> List[HypothesisScore]:
-        candidates = self.retrieve_r1_candidates([], session_state, top_k)
+        candidates = self.retrieve_r1_candidates([], None, session_state, top_k)
         return self._build_hypothesis_scores(candidates)
 
     # 兼容旧接口：从候选假设反向检索最值得继续验证的节点。
@@ -294,15 +329,24 @@ class GraphRetriever:
             for row in rows
         ]
 
-    # 从 A1 核心特征和当前槽位中汇总阳性特征名称。
+    # 从 A1 核心特征、实体链接结果和当前槽位中汇总阳性特征名称。
     def _collect_positive_feature_names(
         self,
-        key_features: Sequence[KeyFeature],
+        linked_features: Sequence[LinkedEntity | ClinicalFeatureItem | KeyFeature],
+        patient_context: PatientContext | None = None,
         session_state: SessionState | None = None,
     ) -> List[str]:
         feature_names: list[str] = []
 
-        for feature in key_features:
+        for feature in linked_features:
+            if isinstance(feature, LinkedEntity):
+                if feature.canonical_name and feature.canonical_name not in feature_names:
+                    feature_names.append(feature.canonical_name)
+
+                if feature.mention not in feature_names:
+                    feature_names.append(feature.mention)
+                continue
+
             if feature.status != "exist":
                 continue
 
@@ -311,6 +355,14 @@ class GraphRetriever:
 
             if feature.name not in feature_names:
                 feature_names.append(feature.name)
+
+        if patient_context is not None:
+            for feature in patient_context.clinical_features:
+                if feature.status != "exist":
+                    continue
+
+                if feature.normalized_name not in feature_names:
+                    feature_names.append(feature.normalized_name)
 
         if session_state is not None:
             for slot in session_state.slots.values():
@@ -325,6 +377,22 @@ class GraphRetriever:
                     feature_names.append(normalized_name)
 
         return feature_names
+
+    # 判断当前链接实体是否整体都低于可信阈值。
+    def _all_link_confidence_low(
+        self,
+        linked_features: Sequence[LinkedEntity | ClinicalFeatureItem | KeyFeature],
+    ) -> bool:
+        scores: list[float] = []
+
+        for feature in linked_features:
+            if isinstance(feature, LinkedEntity):
+                scores.append(feature.similarity)
+
+        if len(scores) == 0:
+            return False
+
+        return max(scores) < self.config.kg_similarity_threshold
 
     # 将 R1 候选转换为系统使用的假设分数对象。
     def _build_hypothesis_scores(self, candidates: Iterable[HypothesisCandidate]) -> List[HypothesisScore]:

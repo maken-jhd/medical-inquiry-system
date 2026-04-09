@@ -5,11 +5,13 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Dict, Iterable, Optional
 
+from .search_tree import SearchTree
 from .types import (
     ActionStats,
     EvidenceState,
     HypothesisScore,
     MctsAction,
+    ReasoningTrajectory,
     SessionState,
     SlotState,
     SlotUpdate,
@@ -40,6 +42,10 @@ class StateTracker:
     # 返回一份当前会话状态的深拷贝，避免外部直接修改原对象。
     def get_session_copy(self, session_id: str) -> SessionState:
         return deepcopy(self.get_session(session_id))
+
+    # 克隆当前会话状态，供 rollout 或分支推演时使用。
+    def clone_session_state(self, session_id: str) -> SessionState:
+        return self.get_session_copy(session_id)
 
     # 确保指定槽位存在；若不存在则自动创建默认槽位。
     def ensure_slot(self, session_id: str, node_id: str) -> SlotState:
@@ -102,6 +108,16 @@ class StateTracker:
         state.candidate_hypotheses = list(hypotheses)
         return state
 
+    # 保存一条推理轨迹，供最终答案聚合与解释性报告使用。
+    def save_trajectory(self, session_id: str, trajectory: ReasoningTrajectory) -> None:
+        state = self.get_session(session_id)
+        state.trajectories.append(trajectory)
+
+    # 返回当前会话已保存的所有推理轨迹。
+    def list_trajectories(self, session_id: str) -> list[ReasoningTrajectory]:
+        state = self.get_session(session_id)
+        return list(state.trajectories)
+
     # 记录某个问题节点已经被问过，避免重复追问。
     def mark_question_asked(self, session_id: str, node_id: str) -> None:
         state = self.get_session(session_id)
@@ -161,11 +177,31 @@ class StateTracker:
     def set_pending_action(self, session_id: str, action: MctsAction) -> None:
         state = self.get_session(session_id)
         state.metadata["pending_action"] = action
+        state.metadata["pending_action_id"] = action.action_id
 
     # 清空当前会话中的待验证动作。
     def clear_pending_action(self, session_id: str) -> None:
         state = self.get_session(session_id)
         state.metadata.pop("pending_action", None)
+        state.metadata.pop("pending_action_id", None)
+
+    # 将搜索树绑定到当前会话，便于多轮搜索复用同一棵树。
+    def bind_search_tree(self, session_id: str, tree: SearchTree) -> None:
+        state = self.get_session(session_id)
+        state.metadata["search_tree"] = tree
+
+    # 读取当前会话绑定的搜索树；若尚未绑定则返回空值。
+    def get_bound_search_tree(self, session_id: str) -> Optional[SearchTree]:
+        state = self.get_session(session_id)
+        tree = state.metadata.get("search_tree")
+
+        if tree is None:
+            return None
+
+        if isinstance(tree, SearchTree):
+            return tree
+
+        return None
 
     # 为指定动作累计一次 reward，用于后续 UCT 计算。
     def record_action_feedback(

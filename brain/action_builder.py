@@ -50,6 +50,14 @@ class ActionBuilder:
                     prior_score=priority,
                     metadata={
                         "relation_type": row.get("relation_type"),
+                        "relation_weight": float(row.get("relation_weight", 0.0)),
+                        "node_weight": float(row.get("node_weight", 0.0)),
+                        "similarity_confidence": float(row.get("similarity_confidence", 0.0)),
+                        "contradiction_priority": float(row.get("contradiction_priority", 0.0)),
+                        "question_type_hint": row.get("question_type_hint", "symptom"),
+                        "discriminative_gain": float(row.get("contradiction_priority", 0.0)),
+                        "novelty_score": max(0.0, 1.0 - float(row.get("relation_weight", 0.0))),
+                        "patient_burden": 0.6 if row.get("question_type_hint") == "lab" else 0.25,
                         "is_red_flag": bool(row.get("is_red_flag", False)),
                     },
                 )
@@ -60,28 +68,38 @@ class ActionBuilder:
     # 从动作集合中选出当前最适合作为 A3 输出的验证动作。
     def build_a3_verification_result(
         self,
-        actions: Iterable[MctsAction],
+        selected_action: MctsAction | None,
+        rationale: str = "",
     ) -> A3VerificationResult:
-        ranked = sorted(actions, key=lambda item: (-item.prior_score, item.target_node_name))
-
-        if len(ranked) == 0:
+        if selected_action is None:
             return A3VerificationResult(
                 relevant_symptom=None,
                 question_text="",
                 reasoning="当前没有可用的 R2 验证动作，建议回到 A2 重新生成假设。",
             )
 
-        action = ranked[0]
-        question_text = self.render_question_text(action)
+        question_text = self.render_question_text(selected_action)
         return A3VerificationResult(
-            relevant_symptom=action,
+            relevant_symptom=selected_action,
             question_text=question_text,
-            reasoning="已选择当前优先级最高的验证动作进入 A3 提问阶段。",
+            reasoning=rationale or "已选择当前最值得验证的动作进入 A3 提问阶段。",
         )
 
-    # 根据目标节点名称生成一个基础版提问文本。
-    def render_question_text(self, action: MctsAction) -> str:
-        return f"我想再确认一下：近期是否存在“{action.target_node_name}”相关表现？"
+    # 根据动作类型和目标标签生成更贴近临床语境的提问文本。
+    def render_question_text(self, action: MctsAction, style: str = "clinical") -> str:
+        question_type_hint = str(action.metadata.get("question_type_hint", "symptom"))
+        target_name = action.target_node_name
+
+        if question_type_hint == "lab":
+            return f"我想确认一下，之前有没有做过和“{target_name}”相关的检查，结果是否提示异常？"
+
+        if question_type_hint == "risk":
+            return f"我需要再核实一下，近期是否存在“{target_name}”相关情况？"
+
+        if question_type_hint == "detail":
+            return f"关于“{target_name}”，能再具体描述一下吗？"
+
+        return f"我想再确认一下：近期是否存在“{target_name}”相关表现？"
 
     # 在没有主假设时，将冷启动问题包装成可追踪动作。
     def build_probe_action_from_question_candidate(self, candidate: QuestionCandidate) -> MctsAction:

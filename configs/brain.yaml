@@ -1,7 +1,34 @@
-cold_start_limit: 8
-hypothesis_limit: 6
-validation_limit: 10
-red_flag_multiplier: 2.0
-graph_weight_multiplier: 1.0
-information_gain_multiplier: 1.5
-repeat_penalty: 3.0
+search:
+  num_rollouts: 8
+  max_depth: 6
+  max_child_nodes: 4
+  exploration_weight: 2.0
+  discount_factor: 1.0
+  max_kg_triplets: 15
+
+kg:
+  entity_link_threshold: 0.72
+  top_k_entity_matches: 5
+  disable_kg_below_threshold: true
+
+path_evaluation:
+  consistency_weight: 0.3
+  diversity_weight: 0.4
+  agent_eval_weight: 0.3
+
+a1:
+  use_llm_extractor: true
+  fallback_to_rules: true
+
+a2:
+  expand_top_k_hypotheses: 3
+
+a3:
+  use_discriminative_gain: true
+  validation_limit: 10
+
+a4:
+  use_llm_deductive_judge: false
+
+fallback:
+  enable_question_selector_mode: true

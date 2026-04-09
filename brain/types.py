@@ -14,6 +14,53 @@ ReasoningStage = Literal["A1", "A2", "A3", "A4", "STOP", "FALLBACK"]
 
 
 @dataclass
+class PatientGeneralInfo:
+    """表示患者一般信息 P。"""
+
+    age: Optional[int] = None
+    sex: Optional[str] = None
+    pregnancy_status: Optional[str] = None
+    past_history: List[str] = field(default_factory=list)
+    epidemiology: List[str] = field(default_factory=list)
+
+
+@dataclass
+class ClinicalFeatureItem:
+    """表示 MedExtractor 输出的临床结构化特征 C。"""
+
+    name: str
+    normalized_name: str
+    category: str
+    status: str = "unknown"
+    certainty: str = "unknown"
+    evidence_text: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class PatientContext:
+    """表示 MedExtractor 输出的结构化患者上下文。"""
+
+    general_info: PatientGeneralInfo = field(default_factory=PatientGeneralInfo)
+    clinical_features: List[ClinicalFeatureItem] = field(default_factory=list)
+    raw_text: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class LinkedEntity:
+    """表示提及实体和图谱节点之间的链接结果。"""
+
+    mention: str
+    node_id: Optional[str] = None
+    canonical_name: Optional[str] = None
+    similarity: float = 0.0
+    is_trusted: bool = False
+    label: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class SlotState:
     """表示单个槽位在当前会话中的状态。"""
 
@@ -167,6 +214,49 @@ class SimulationOutcome:
 
 
 @dataclass
+class TreeNode:
+    """表示搜索树中的单个节点。"""
+
+    node_id: str
+    state_signature: str
+    parent_id: Optional[str]
+    action_from_parent: Optional[str]
+    stage: str
+    depth: int
+    children_ids: List[str] = field(default_factory=list)
+    visit_count: int = 0
+    total_value: float = 0.0
+    average_value: float = 0.0
+    terminal: bool = False
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ReasoningTrajectory:
+    """表示一次 rollout 或交互式诊断形成的轨迹。"""
+
+    trajectory_id: str
+    final_answer_id: Optional[str] = None
+    final_answer_name: Optional[str] = None
+    steps: List[Dict[str, Any]] = field(default_factory=list)
+    score: float = 0.0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class FinalAnswerScore:
+    """表示某个最终答案分组的聚合评分。"""
+
+    answer_id: str
+    answer_name: str
+    consistency: float
+    diversity: float
+    agent_evaluation: float
+    final_score: float
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class SessionState:
     """表示一次完整问诊会话的全局状态。"""
 
@@ -179,6 +269,7 @@ class SessionState:
     asked_node_ids: List[str] = field(default_factory=list)
     action_stats: Dict[str, ActionStats] = field(default_factory=dict)
     state_visit_stats: Dict[str, StateVisitStats] = field(default_factory=dict)
+    trajectories: List[ReasoningTrajectory] = field(default_factory=list)
     fail_count: int = 0
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -203,6 +294,26 @@ class A4DeductiveResult:
     existence: EvidenceExistence = "unknown"
     certainty: EvidenceCertainty = "unknown"
     reasoning: str = ""
+    supporting_span: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class DeductiveDecision:
+    """表示 A4 后用于驱动代码路由的诊断决策。"""
+
+    existence: EvidenceExistence = "unknown"
+    certainty: EvidenceCertainty = "unknown"
+    decision_type: Literal[
+        "confirm_hypothesis",
+        "exclude_hypothesis",
+        "reverify_hypothesis",
+        "switch_hypothesis",
+        "need_more_information",
+    ] = "need_more_information"
+    contradiction_explanation: str = ""
+    diagnostic_rationale: str = ""
+    next_stage: ReasoningStage = "A3"
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -224,4 +335,16 @@ class StopDecision:
     should_stop: bool
     reason: str
     confidence: float = 0.0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class SearchResult:
+    """表示一次局部搜索返回的动作与答案评分结果。"""
+
+    selected_action: Optional[MctsAction] = None
+    trajectories: List[ReasoningTrajectory] = field(default_factory=list)
+    final_answer_scores: List[FinalAnswerScore] = field(default_factory=list)
+    best_answer_id: Optional[str] = None
+    best_answer_name: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)

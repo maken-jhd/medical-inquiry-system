@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from typing import Any, Dict, List
 
-from .types import SessionState, StopDecision
+from .types import FinalAnswerScore, ReasoningTrajectory, SearchResult, SessionState, StopDecision
 
 
 class ReportBuilder:
@@ -46,5 +47,63 @@ class ReportBuilder:
             "confirmed_slots": confirmed_slots,
             "candidate_hypotheses": hypotheses,
             "active_topics": list(session_state.active_topics),
+            "trajectory_count": len(session_state.trajectories),
             "metadata": dict(session_state.metadata),
         }
+
+    # 构造搜索阶段的中间报告，便于调试 rollout 与动作选择。
+    def build_search_report(
+        self,
+        session_state: SessionState,
+        search_result: SearchResult,
+    ) -> Dict[str, Any]:
+        return {
+            "session_id": session_state.session_id,
+            "turn_index": session_state.turn_index,
+            "selected_action": asdict(search_result.selected_action) if search_result.selected_action is not None else None,
+            "best_answer_id": search_result.best_answer_id,
+            "best_answer_name": search_result.best_answer_name,
+            "trajectory_count": len(search_result.trajectories),
+            "final_answer_scores": [asdict(item) for item in search_result.final_answer_scores],
+        }
+
+    # 构造最终诊断推理报告，包含最佳轨迹和备选答案评分。
+    def build_final_reasoning_report(
+        self,
+        session_state: SessionState,
+        stop_decision: StopDecision,
+        search_result: SearchResult | None = None,
+    ) -> Dict[str, Any]:
+        final_report = self.build_final_report(session_state, stop_decision)
+
+        if search_result is None:
+            return final_report
+
+        best_trajectory = self._select_best_trajectory(search_result.trajectories, search_result.best_answer_id)
+        final_report.update(
+            {
+                "best_final_answer": {
+                    "answer_id": search_result.best_answer_id,
+                    "answer_name": search_result.best_answer_name,
+                },
+                "answer_group_scores": [asdict(item) for item in search_result.final_answer_scores],
+                "best_trajectory": asdict(best_trajectory) if best_trajectory is not None else None,
+                "alternative_trajectories": [
+                    asdict(item) for item in search_result.trajectories if best_trajectory is None or item.trajectory_id != best_trajectory.trajectory_id
+                ][:3],
+            }
+        )
+        return final_report
+
+    # 选出与最终答案一致且分数最高的最佳轨迹。
+    def _select_best_trajectory(
+        self,
+        trajectories: List[ReasoningTrajectory],
+        answer_id: str | None,
+    ) -> ReasoningTrajectory | None:
+        matched = [item for item in trajectories if answer_id is None or item.final_answer_id == answer_id]
+
+        if len(matched) == 0:
+            return None
+
+        return sorted(matched, key=lambda item: (-item.score, item.trajectory_id))[0]
