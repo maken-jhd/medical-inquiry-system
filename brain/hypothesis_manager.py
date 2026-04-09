@@ -24,6 +24,10 @@ class HypothesisManagerConfig:
     negative_confident_penalty: float = 1.0
     negative_uncertain_penalty: float = 0.4
     expand_top_k_hypotheses: int = 3
+    unique_evidence_bonus: float = 0.18
+    overlap_penalty: float = 0.10
+    feature_coverage_bonus: float = 0.20
+    semantic_score_bonus: float = 0.22
 
 
 class HypothesisManager:
@@ -48,18 +52,19 @@ class HypothesisManager:
             candidates,
             key=lambda item: (-item.score, item.name),
         )
+        ranked_candidates = self._rerank_candidates_with_competition(sorted_candidates)
 
         primary_hypothesis: Optional[HypothesisCandidate] = None
         alternatives: List[HypothesisCandidate] = []
 
-        if len(sorted_candidates) > 0:
-            llm_result = self._try_rank_with_llm(patient_context, sorted_candidates)
+        if len(ranked_candidates) > 0:
+            llm_result = self._try_rank_with_llm(patient_context, ranked_candidates)
 
             if llm_result is not None:
-                return llm_result
+                return self._attach_llm_competition_metadata(llm_result)
 
-            primary_hypothesis = sorted_candidates[0]
-            alternatives = sorted_candidates[1 : self.config.expand_top_k_hypotheses]
+            primary_hypothesis = ranked_candidates[0]
+            alternatives = ranked_candidates[1 : self.config.expand_top_k_hypotheses]
 
         reasoning = "已根据患者上下文与图谱 R1 候选分数生成当前主假设和备选假设。"
 
@@ -69,7 +74,7 @@ class HypothesisManager:
             feature_names = [item.normalized_name for item in patient_context.clinical_features[:5]]
             reasoning = (
                 f"已结合患者一般信息与线索 {', '.join(feature_names) or '无明显核心特征'}"
-                " 生成当前主假设和备选假设。"
+                " 生成当前主假设和备选假设，并做了竞争性重排。"
             )
 
         return A2HypothesisResult(
@@ -216,6 +221,118 @@ class HypothesisManager:
                 "why_primary_beats_alternatives": payload.get("why_primary_beats_alternatives", ""),
                 "recommended_next_evidence": payload.get("recommended_next_evidence", []),
             },
+        )
+
+    # 在进入最终 A2 之前，先用候选之间的竞争关系做一次轻量重排。
+    def _rerank_candidates_with_competition(
+        self,
+        candidates: list[HypothesisCandidate],
+    ) -> list[HypothesisCandidate]:
+        if len(candidates) <= 1:
+            return candidates
+
+        evidence_frequency: dict[str, int] = {}
+
+        for candidate in candidates:
+            evidence_names = {
+                str(item)
+                for item in candidate.metadata.get("evidence_names", [])
+                if len(str(item)) > 0
+            }
+
+            for evidence_name in evidence_names:
+                evidence_frequency[evidence_name] = evidence_frequency.get(evidence_name, 0) + 1
+
+        reranked: list[HypothesisCandidate] = []
+
+        for candidate in candidates:
+            evidence_names = [
+                str(item)
+                for item in candidate.metadata.get("evidence_names", [])
+                if len(str(item)) > 0
+            ]
+            unique_evidence_count = sum(1 for item in evidence_names if evidence_frequency.get(item, 0) == 1)
+            overlap_ratio = 0.0
+
+            if len(evidence_names) > 0:
+                overlap_ratio = sum(1 for item in evidence_names if evidence_frequency.get(item, 0) > 1) / len(evidence_names)
+
+            feature_coverage = float(candidate.metadata.get("feature_coverage", 0.0))
+            semantic_score = float(candidate.metadata.get("semantic_score", candidate.score))
+            rerank_bonus = (
+                unique_evidence_count * self.config.unique_evidence_bonus
+                + feature_coverage * self.config.feature_coverage_bonus
+                + semantic_score * self.config.semantic_score_bonus
+                - overlap_ratio * self.config.overlap_penalty
+            )
+            reranked.append(
+                HypothesisCandidate(
+                    node_id=candidate.node_id,
+                    name=candidate.name,
+                    label=candidate.label,
+                    score=candidate.score + rerank_bonus,
+                    reasoning=candidate.reasoning,
+                    metadata={
+                        **dict(candidate.metadata),
+                        "unique_evidence_count": unique_evidence_count,
+                        "overlap_ratio": overlap_ratio,
+                        "competition_rerank_bonus": rerank_bonus,
+                    },
+                )
+            )
+
+        return sorted(reranked, key=lambda item: (-item.score, item.name))
+
+    # 将 LLM 输出的竞争性信息真正写回主假设和备选假设 metadata。
+    def _attach_llm_competition_metadata(self, result: A2HypothesisResult) -> A2HypothesisResult:
+        primary = result.primary_hypothesis
+        alternatives = list(result.alternatives)
+        recommended_next_evidence = result.metadata.get("recommended_next_evidence", [])
+        supporting_features = result.metadata.get("supporting_features", [])
+        conflicting_features = result.metadata.get("conflicting_features", [])
+        why_primary_beats_alternatives = result.metadata.get("why_primary_beats_alternatives", "")
+
+        if primary is not None:
+            primary = HypothesisCandidate(
+                node_id=primary.node_id,
+                name=primary.name,
+                label=primary.label,
+                score=primary.score,
+                reasoning=primary.reasoning,
+                metadata={
+                    **dict(primary.metadata),
+                    "recommended_next_evidence": recommended_next_evidence,
+                    "supporting_features": supporting_features,
+                    "conflicting_features": conflicting_features,
+                    "why_primary_beats_alternatives": why_primary_beats_alternatives,
+                    "competition_role": "primary",
+                },
+            )
+
+        enriched_alternatives: list[HypothesisCandidate] = []
+
+        for alternative in alternatives:
+            enriched_alternatives.append(
+                HypothesisCandidate(
+                    node_id=alternative.node_id,
+                    name=alternative.name,
+                    label=alternative.label,
+                    score=alternative.score,
+                    reasoning=alternative.reasoning,
+                    metadata={
+                        **dict(alternative.metadata),
+                        "competition_role": "alternative",
+                        "primary_candidate_id": primary.node_id if primary is not None else None,
+                        "why_not_primary": why_primary_beats_alternatives,
+                    },
+                )
+            )
+
+        return A2HypothesisResult(
+            primary_hypothesis=primary,
+            alternatives=enriched_alternatives,
+            reasoning=result.reasoning,
+            metadata=dict(result.metadata),
         )
 
     # 将 LLM 返回的候选信息与现有图谱候选做对齐。

@@ -8,6 +8,11 @@
 - 演绎分析驱动的严格路由
 - 虚拟病人支持下的离线自动对战与策略缓存
 
+补充说明：
+
+- 本文主要记录“目标路线”和“当前执行状态”
+- 若需要查看更偏过程复盘与论文素材整理的内容，可参见 [phase2_changelog.md](/Users/loki/Workspace/GraduationDesign/docs/phase2_changelog.md)
+
 ## 当前进度快照
 
 截至当前版本，下面这些点已经有了第一轮实现：

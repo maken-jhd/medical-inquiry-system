@@ -75,3 +75,57 @@ def test_retriever_returns_r2_expected_evidence() -> None:
     assert len(rows) == 1
     assert rows[0]["node_id"] == "lab_po2"
     assert rows[0]["relation_type"] == "HAS_LAB_FINDING"
+
+
+class SemanticFakeNeo4jClient(FakeNeo4jClient):
+    """提供更接近真实场景的 R1 候选，验证语义收紧后的排序。"""
+
+    def run_query(self, query: str, params: dict | None = None) -> list[dict]:
+        self.last_query = query
+        self.last_params = params or {}
+
+        if "MATCH (feature)-[r]->(candidate)" in query:
+            return [
+                {
+                    "node_id": "disease_good",
+                    "label": "Disease",
+                    "name": "肺孢子菌肺炎 (PCP)",
+                    "relation_count": 2.0,
+                    "matched_feature_count": 2,
+                    "candidate_weight": 0.8,
+                    "direction_confidence": 1.0,
+                    "relation_types": ["MANIFESTS_AS", "HAS_LAB_FINDING"],
+                    "evidence_names": ["发热", "干咳"],
+                    "evidence_node_ids": ["symptom_fever", "symptom_dry_cough"],
+                },
+                {
+                    "node_id": "phase_generic",
+                    "label": "DiseasePhase",
+                    "name": "原发性肺部感染",
+                    "relation_count": 1.0,
+                    "matched_feature_count": 1,
+                    "candidate_weight": 1.0,
+                    "direction_confidence": 0.65,
+                    "relation_types": ["ASSOCIATED_WITH"],
+                    "evidence_names": ["呼吸困难"],
+                    "evidence_node_ids": ["symptom_dyspnea"],
+                },
+            ]
+
+        return super().run_query(query, params)
+
+
+# 验证 R1 会压低单证据泛化候选，并优先保留覆盖更好的疾病候选。
+def test_retriever_tightens_r1_candidate_semantics() -> None:
+    retriever = GraphRetriever(SemanticFakeNeo4jClient())
+    key_features = [
+        KeyFeature(name="发热", normalized_name="发热"),
+        KeyFeature(name="干咳", normalized_name="干咳"),
+        KeyFeature(name="呼吸困难", normalized_name="呼吸困难"),
+    ]
+
+    candidates = retriever.retrieve_r1_candidates(key_features)
+
+    assert len(candidates) == 1
+    assert candidates[0].node_id == "disease_good"
+    assert candidates[0].metadata["feature_coverage"] > 0.6

@@ -96,3 +96,64 @@ def test_mcts_engine_select_leaf_descends_by_tree_policy() -> None:
 
     assert selected_leaf is not None
     assert selected_leaf.node_id == "root::b::c"
+
+
+# 验证根动作选择会跳过当前会话中已经追问过的节点，避免重复追问。
+def test_mcts_engine_select_root_action_skips_already_asked_targets() -> None:
+    engine = MctsEngine()
+    tree = SearchTree()
+    root = TreeNode(node_id="root", state_signature="root", parent_id=None, action_from_parent=None, stage="A2", depth=0)
+    repeated_child = TreeNode(
+        node_id="root::repeat",
+        state_signature="repeat",
+        parent_id="root",
+        action_from_parent="repeat",
+        stage="A3",
+        depth=1,
+        visit_count=5,
+        total_value=4.0,
+        average_value=0.8,
+        metadata={
+            "prior_score": 1.0,
+            "action": MctsAction(
+                action_id="repeat",
+                action_type="verify_evidence",
+                target_node_id="lab_cd4",
+                target_node_label="LabFinding",
+                target_node_name="CD4+ T淋巴细胞计数 < 200/μL",
+                prior_score=1.0,
+            ),
+        },
+    )
+    fresh_child = TreeNode(
+        node_id="root::fresh",
+        state_signature="fresh",
+        parent_id="root",
+        action_from_parent="fresh",
+        stage="A3",
+        depth=1,
+        visit_count=2,
+        total_value=1.2,
+        average_value=0.6,
+        metadata={
+            "prior_score": 0.6,
+            "action": MctsAction(
+                action_id="fresh",
+                action_type="verify_evidence",
+                target_node_id="symptom_lymph",
+                target_node_label="Sign",
+                target_node_name="淋巴结肿大",
+                prior_score=0.6,
+            ),
+        },
+    )
+    tree.add_node(root)
+    tree.add_node(repeated_child)
+    tree.add_node(fresh_child)
+    tree.add_edge("root", "root::repeat")
+    tree.add_edge("root", "root::fresh")
+
+    selected = engine.select_root_action(tree, excluded_target_node_ids=["lab_cd4"])
+
+    assert selected is not None
+    assert selected.action_id == "fresh"

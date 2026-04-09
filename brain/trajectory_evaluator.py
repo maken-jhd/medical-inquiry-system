@@ -57,7 +57,7 @@ class TrajectoryEvaluator:
         for (answer_id, answer_name), trajectories in grouped.items():
             consistency = len(trajectories) / total_trajectories if total_trajectories > 0 else 0.0
             diversity = self._compute_diversity(trajectories)
-            agent_evaluation = self._compute_agent_evaluation(
+            agent_evaluation, agent_metadata = self._compute_agent_evaluation(
                 trajectories,
                 answer_id=answer_id,
                 answer_name=answer_name,
@@ -76,7 +76,7 @@ class TrajectoryEvaluator:
                     diversity=diversity,
                     agent_evaluation=agent_evaluation,
                     final_score=final_score,
-                    metadata={"trajectory_count": len(trajectories)},
+                    metadata={"trajectory_count": len(trajectories), **agent_metadata},
                 )
             )
 
@@ -114,25 +114,31 @@ class TrajectoryEvaluator:
         answer_id: str,
         answer_name: str,
         patient_context: PatientContext | None = None,
-    ) -> float:
+    ) -> tuple[float, dict]:
         if len(trajectories) == 0:
-            return 0.0
+            return 0.0, {"verifier_mode": "empty"}
 
         if self.config.agent_eval_mode == "llm_verifier":
-            llm_score = self._compute_llm_agent_evaluation(
+            llm_result = self._compute_llm_agent_evaluation(
                 trajectories,
                 answer_id=answer_id,
                 answer_name=answer_name,
                 patient_context=patient_context,
             )
 
-            if llm_score is not None:
-                return llm_score
+            if llm_result is not None:
+                return llm_result["score"], {
+                    "verifier_mode": "llm_verifier",
+                    "verifier_should_accept": llm_result["should_accept_stop"],
+                    "verifier_reasoning": llm_result["reasoning"],
+                    "verifier_missing_evidence": llm_result["missing_evidence"],
+                    "verifier_risk_flags": llm_result["risk_flags"],
+                }
 
         if self.config.agent_eval_mode != "fallback":
             total_score = sum(item.score for item in trajectories)
             normalized = total_score / len(trajectories)
-            return max(min(normalized, 1.0), 0.0)
+            return max(min(normalized, 1.0), 0.0), {"verifier_mode": self.config.agent_eval_mode}
 
         total_score = sum(item.score for item in trajectories)
         best_score = max(item.score for item in trajectories)
@@ -141,7 +147,7 @@ class TrajectoryEvaluator:
         )
         normalized = total_score / len(trajectories)
         normalized = normalized * 0.55 + best_score * 0.3 + terminal_ratio * 0.15
-        return max(min(normalized, 1.0), 0.0)
+        return max(min(normalized, 1.0), 0.0), {"verifier_mode": "fallback"}
 
     # 使用可选的 LLM verifier 对某个答案组做一次代理级评审。
     def _compute_llm_agent_evaluation(
@@ -150,7 +156,7 @@ class TrajectoryEvaluator:
         answer_id: str,
         answer_name: str,
         patient_context: PatientContext | None = None,
-    ) -> float | None:
+    ) -> dict | None:
         if self.llm_client is None or not self.llm_client.is_available() or patient_context is None:
             return None
 
@@ -176,7 +182,13 @@ class TrajectoryEvaluator:
         except Exception:
             return None
 
-        return max(min(score, 1.0), 0.0)
+        return {
+            "score": max(min(score, 1.0), 0.0),
+            "should_accept_stop": bool(payload.get("should_accept_stop", score >= 0.75)),
+            "reasoning": str(payload.get("reasoning", "")),
+            "missing_evidence": list(payload.get("missing_evidence", [])) if isinstance(payload.get("missing_evidence", []), list) else [],
+            "risk_flags": list(payload.get("risk_flags", [])) if isinstance(payload.get("risk_flags", []), list) else [],
+        }
 
     # 使用动作序列 Jaccard 估计两条轨迹的相似度。
     def _trajectory_similarity(self, left: ReasoningTrajectory, right: ReasoningTrajectory) -> float:

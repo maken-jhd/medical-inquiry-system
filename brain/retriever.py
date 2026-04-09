@@ -85,6 +85,7 @@ class RetrievalConfig:
     )
     kg_similarity_threshold: float = 0.72
     disable_kg_below_threshold: bool = True
+    r1_min_semantic_score: float = 0.48
 
 
 class GraphRetriever:
@@ -175,17 +176,22 @@ class GraphRetriever:
               RETURN candidate, feature, r, 0.65 AS direction_confidence
             }
             WITH candidate,
-                 feature,
                  collect(direction_confidence) AS direction_confidences,
-                 count(r) AS relation_count
+                 count(r) AS relation_count,
+                 count(DISTINCT feature) AS matched_feature_count,
+                 collect(DISTINCT type(r)) AS relation_types,
+                 collect(DISTINCT coalesce(feature.canonical_name, feature.name)) AS evidence_names,
+                 collect(DISTINCT feature.id) AS evidence_node_ids
             RETURN candidate.id AS node_id,
                    labels(candidate)[0] AS label,
                    coalesce(candidate.canonical_name, candidate.name) AS name,
                    relation_count AS relation_count,
+                   matched_feature_count AS matched_feature_count,
                    coalesce(candidate.weight, 0.0) AS candidate_weight,
                    reduce(total = 0.0, item IN direction_confidences | total + item) / size(direction_confidences) AS direction_confidence,
-                   collect(DISTINCT coalesce(feature.canonical_name, feature.name)) AS evidence_names,
-                   collect(DISTINCT feature.id) AS evidence_node_ids
+                   relation_types AS relation_types,
+                   evidence_names AS evidence_names,
+                   evidence_node_ids AS evidence_node_ids
             ORDER BY relation_count DESC, candidate_weight DESC, name
             LIMIT $limit
             """,
@@ -199,34 +205,51 @@ class GraphRetriever:
         )
 
         candidates: List[HypothesisCandidate] = []
+        total_feature_count = max(len(feature_names), 1)
 
         for row in rows:
             evidence_names = row.get("evidence_names", [])
             link_similarity = self._estimate_link_similarity(evidence_names, link_similarity_map)
             direction_confidence = float(row.get("direction_confidence", 1.0))
-            score = (
-                float(row.get("relation_count", 0.0)) * 0.5
-                + float(row.get("candidate_weight", 0.0)) * 0.25
-                + direction_confidence * 0.15
-                + link_similarity * 0.10
+            matched_feature_count = int(row.get("matched_feature_count", len(evidence_names)))
+            relation_types = [str(item) for item in row.get("relation_types", [])]
+            semantic_score, semantic_metadata = self._score_r1_candidate(
+                row,
+                total_feature_count=total_feature_count,
+                matched_feature_count=matched_feature_count,
+                direction_confidence=direction_confidence,
+                link_similarity=link_similarity,
+                relation_types=relation_types,
             )
+
+            if semantic_score < self.config.r1_min_semantic_score:
+                continue
+
             candidates.append(
                 HypothesisCandidate(
                     node_id=row["node_id"],
                     name=row["name"],
                     label=row["label"],
-                    score=score,
+                    score=semantic_score,
                     reasoning=f"R1 根据核心特征 {', '.join(evidence_names[:4])} 检索到该候选。",
                     metadata={
                         "evidence_names": evidence_names,
                         "evidence_node_ids": row.get("evidence_node_ids", []),
+                        "matched_feature_count": matched_feature_count,
+                        "feature_coverage": semantic_metadata["feature_coverage"],
+                        "relation_types": relation_types,
+                        "label_prior": semantic_metadata["label_prior"],
+                        "relation_specificity": semantic_metadata["relation_specificity"],
+                        "generic_single_feature_penalty": semantic_metadata["generic_single_feature_penalty"],
                         "direction_confidence": direction_confidence,
                         "entity_link_similarity": link_similarity,
+                        "semantic_score": semantic_score,
+                        "semantic_score_breakdown": semantic_metadata,
                     },
                 )
             )
 
-        return candidates
+        return sorted(candidates, key=lambda item: (-item.score, item.name))
 
     # 执行论文中的 R2：从当前主假设反向检索最值得验证的证据节点。
     def retrieve_r2_expected_evidence(
@@ -462,6 +485,102 @@ class GraphRetriever:
             return 0.0
 
         return sum(scores) / len(scores)
+
+    # 对单个 R1 候选进行更严格的语义评分，降低泛化候选和单证据弱候选的排序位置。
+    def _score_r1_candidate(
+        self,
+        row: dict,
+        total_feature_count: int,
+        matched_feature_count: int,
+        direction_confidence: float,
+        link_similarity: float,
+        relation_types: Sequence[str],
+    ) -> tuple[float, dict]:
+        feature_coverage = min(matched_feature_count / total_feature_count, 1.0)
+        candidate_weight = min(float(row.get("candidate_weight", 0.0)), 1.0)
+        relation_count = min(float(row.get("relation_count", 0.0)) / max(total_feature_count, 1), 1.0)
+        relation_specificity = self._compute_relation_specificity(relation_types)
+        label_prior = self._label_prior(str(row.get("label", "")))
+        generic_single_feature_penalty = self._generic_single_feature_penalty(
+            label=str(row.get("label", "")),
+            matched_feature_count=matched_feature_count,
+            total_feature_count=total_feature_count,
+            relation_types=relation_types,
+        )
+
+        score = (
+            feature_coverage * 0.34
+            + relation_count * 0.18
+            + relation_specificity * 0.16
+            + label_prior * 0.14
+            + direction_confidence * 0.10
+            + candidate_weight * 0.04
+            + link_similarity * 0.04
+            - generic_single_feature_penalty
+        )
+        score = max(score, 0.0)
+
+        return score, {
+            "feature_coverage": feature_coverage,
+            "relation_count_ratio": relation_count,
+            "relation_specificity": relation_specificity,
+            "label_prior": label_prior,
+            "direction_confidence": direction_confidence,
+            "candidate_weight": candidate_weight,
+            "entity_link_similarity": link_similarity,
+            "generic_single_feature_penalty": generic_single_feature_penalty,
+        }
+
+    # 根据关系类型估计该候选的语义支持强度。
+    def _compute_relation_specificity(self, relation_types: Sequence[str]) -> float:
+        if len(relation_types) == 0:
+            return 0.0
+
+        weights = {
+            "DIAGNOSED_BY": 1.0,
+            "HAS_LAB_FINDING": 0.95,
+            "MANIFESTS_AS": 0.9,
+            "REQUIRES_DETAIL": 0.55,
+            "RISK_FACTOR_FOR": 0.5,
+            "ASSOCIATED_WITH": 0.35,
+            "COMPLICATED_BY": 0.3,
+            "APPLIES_TO": 0.2,
+        }
+        scores = [weights.get(item, 0.25) for item in relation_types]
+        return sum(scores) / len(scores)
+
+    # 给不同候选标签设置一个轻量语义先验，降低泛化标签过早排到前面。
+    def _label_prior(self, label: str) -> float:
+        priors = {
+            "Disease": 1.0,
+            "OpportunisticInfection": 0.95,
+            "Tumor": 0.85,
+            "Comorbidity": 0.78,
+            "DiseasePhase": 0.72,
+            "SyndromeOrComplication": 0.68,
+        }
+        return priors.get(label, 0.7)
+
+    # 对“总特征较多但只吃到一个泛化证据”的候选做额外降权。
+    def _generic_single_feature_penalty(
+        self,
+        label: str,
+        matched_feature_count: int,
+        total_feature_count: int,
+        relation_types: Sequence[str],
+    ) -> float:
+        if total_feature_count <= 1 or matched_feature_count > 1:
+            return 0.0
+
+        if label not in {"DiseasePhase", "SyndromeOrComplication", "Comorbidity"}:
+            return 0.0
+
+        weak_relation_types = {"ASSOCIATED_WITH", "APPLIES_TO", "COMPLICATED_BY", "RISK_FACTOR_FOR"}
+
+        if len(relation_types) > 0 and all(item in weak_relation_types for item in relation_types):
+            return 0.24
+
+        return 0.18
 
     # 将 R1 候选转换为系统使用的假设分数对象。
     def _build_hypothesis_scores(self, candidates: Iterable[HypothesisCandidate]) -> List[HypothesisScore]:

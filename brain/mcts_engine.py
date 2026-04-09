@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 from math import log, sqrt
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Sequence
 
 from .search_tree import SearchTree
 from .types import MctsAction, SessionState, SimulationOutcome, TreeNode
@@ -208,12 +208,26 @@ class MctsEngine:
         return node.average_value + prior_score + exploration
 
     # 从根节点的子节点中选择当前平均价值最高的动作。
-    def select_root_action(self, tree: SearchTree) -> Optional[MctsAction]:
+    def select_root_action(
+        self,
+        tree: SearchTree,
+        excluded_target_node_ids: Sequence[str] | None = None,
+    ) -> Optional[MctsAction]:
         if tree.root_id is None:
             return None
 
         root = tree.get_node(tree.root_id)
-        children = [tree.get_node(child_id) for child_id in root.children_ids]
+        excluded_ids = set(excluded_target_node_ids or [])
+        children = []
+
+        for child_id in root.children_ids:
+            child = tree.get_node(child_id)
+            action = child.metadata.get("action")
+
+            if isinstance(action, MctsAction) and action.target_node_id in excluded_ids:
+                continue
+
+            children.append(child)
 
         if len(children) == 0:
             return None

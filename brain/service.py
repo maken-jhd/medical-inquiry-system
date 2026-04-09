@@ -42,6 +42,7 @@ from .types import (
     SlotUpdate,
     StopDecision,
     TreeNode,
+    RouteDecision,
 )
 
 
@@ -131,12 +132,14 @@ class ConsultationBrain:
     # 兼容旧接口：根据当前状态输出最终报告。
     def finalize(self, session_id: str) -> dict:
         state = self.deps.state_tracker.get_session(session_id)
-        stop_decision = self.deps.stop_rule_engine.check_sufficiency(state, state.candidate_hypotheses)
         search_result = state.metadata.get("last_search_result")
 
         if isinstance(search_result, SearchResult):
-            return self.deps.report_builder.build_final_reasoning_report(state, stop_decision, search_result)
+            best_answer_score = self.deps.trajectory_evaluator.select_best_answer(search_result.final_answer_scores)
+            accept_decision = self.deps.stop_rule_engine.should_accept_final_answer(best_answer_score, state)
+            return self.deps.report_builder.build_final_reasoning_report(state, accept_decision, search_result)
 
+        stop_decision = self.deps.stop_rule_engine.check_sufficiency(state, state.candidate_hypotheses)
         return self.deps.report_builder.build_final_report(state, stop_decision)
 
     # 将患者原话抽成论文中的结构化上下文 P/C。
@@ -307,7 +310,10 @@ class ConsultationBrain:
         grouped = self.deps.trajectory_evaluator.group_by_answer(trajectories)
         final_scores = self.deps.trajectory_evaluator.score_groups(grouped, patient_context=patient_context)
         best_answer = self.deps.trajectory_evaluator.select_best_answer(final_scores)
-        selected_action = self.deps.mcts_engine.select_root_action(tree)
+        selected_action = self.deps.mcts_engine.select_root_action(
+            tree,
+            excluded_target_node_ids=state.asked_node_ids,
+        )
         search_result = SearchResult(
             selected_action=selected_action,
             trajectories=trajectories,
@@ -347,13 +353,8 @@ class ConsultationBrain:
     ) -> dict:
         state = self.deps.state_tracker.get_session(session_id)
         best_answer_score = self.deps.trajectory_evaluator.select_best_answer(search_result.final_answer_scores)
-        accept_decision = self.deps.stop_rule_engine.should_accept_final_answer(best_answer_score)
-
-        if accept_decision.should_stop:
-            return self.deps.report_builder.build_final_reasoning_report(state, accept_decision, search_result)
-
-        fallback_stop = self.deps.stop_rule_engine.check_sufficiency(state, state.candidate_hypotheses)
-        return self.deps.report_builder.build_final_reasoning_report(state, fallback_stop, search_result)
+        accept_decision = self.deps.stop_rule_engine.should_accept_final_answer(best_answer_score, state)
+        return self.deps.report_builder.build_final_reasoning_report(state, accept_decision, search_result)
 
     # 处理单轮患者输入，并输出当前下一问或最终报告。
     def process_turn(self, session_id: str, patient_text: str) -> dict:
@@ -366,6 +367,7 @@ class ConsultationBrain:
             patient_text,
             turn_index,
         )
+        route_after_a4 = self._gate_route_after_a4(route_after_a4)
         applied_updates: list[SlotUpdate] = list(a4_updates)
         state = tracker.get_session(session_id)
         stage_after_a4 = getattr(route_after_a4, "stage", None)
@@ -375,39 +377,6 @@ class ConsultationBrain:
         a2_result = A2HypothesisResult()
         search_result = SearchResult()
         route_after_slot_update = self.deps.router.route_after_slot_update(state)
-
-        if stage_after_a4 == "STOP":
-            stop_decision = StopDecision(
-                should_stop=True,
-                reason=route_after_a4.reason if route_after_a4 is not None else "A4 已满足终止条件。",
-                confidence=1.0,
-                metadata=route_after_a4.metadata if route_after_a4 is not None else {},
-            )
-            last_search_result = state.metadata.get("last_search_result")
-            final_report = self.deps.report_builder.build_final_reasoning_report(
-                state,
-                stop_decision,
-                last_search_result if isinstance(last_search_result, SearchResult) else None,
-            )
-            return {
-                "session_id": session_id,
-                "turn_index": turn_index,
-                "patient_text": patient_text,
-                "patient_context": asdict(patient_context),
-                "linked_entities": [],
-                "a1": asdict(a1_result),
-                "a2": asdict(a2_result),
-                "a3": asdict(A3VerificationResult()),
-                "a4": asdict(a4_result) if a4_result is not None else None,
-                "deductive_decision": asdict(deductive_decision) if deductive_decision is not None else None,
-                "route_after_a4": asdict(route_after_a4) if route_after_a4 is not None else None,
-                "route_after_slot_update": asdict(route_after_slot_update),
-                "updates": [asdict(item) for item in applied_updates],
-                "search_report": None,
-                "next_question": None,
-                "pending_action": None,
-                "final_report": final_report,
-            }
 
         should_run_a1 = tracker.get_session(session_id).turn_index == 1 or stage_after_a4 == "A1"
 
@@ -456,10 +425,14 @@ class ConsultationBrain:
             tracker.get_session(session_id).candidate_hypotheses,
         )
         best_answer_score = self.deps.trajectory_evaluator.select_best_answer(search_result.final_answer_scores)
-        accept_decision = self.deps.stop_rule_engine.should_accept_final_answer(best_answer_score)
+        accept_decision = self.deps.stop_rule_engine.should_accept_final_answer(best_answer_score, tracker.get_session(session_id))
 
-        if stop_decision.should_stop or accept_decision.should_stop:
-            final_report = self.finalize_from_search(session_id, search_result)
+        if self._should_emit_final_report(search_result, selected_action, stop_decision, accept_decision):
+            final_report = (
+                self.finalize_from_search(session_id, search_result)
+                if self._has_search_signal(search_result)
+                else self.deps.report_builder.build_final_report(tracker.get_session(session_id), stop_decision)
+            )
             return {
                 "session_id": session_id,
                 "turn_index": turn_index,
@@ -670,6 +643,47 @@ class ConsultationBrain:
 
         return None
 
+    # 将 A4 的直接 STOP 先降级为继续搜索，由 verifier 再决定是否真正终止。
+    def _gate_route_after_a4(self, route: RouteDecision | None) -> RouteDecision | None:
+        if route is None or route.stage != "STOP":
+            return route
+
+        return RouteDecision(
+            stage="A3",
+            reason="A4 给出终止倾向，但系统会先经过 search + verifier 二次确认后再真正停止。",
+            next_topic_id=route.next_topic_id,
+            next_hypothesis_id=route.next_hypothesis_id,
+            metadata={
+                **dict(route.metadata),
+                "proposed_stage": "STOP",
+                "gated_by_verifier": True,
+            },
+        )
+
+    # 判断当前搜索是否已经产生了可供 verifier 或下一问消费的有效信号。
+    def _has_search_signal(self, search_result: SearchResult) -> bool:
+        return (
+            search_result.selected_action is not None
+            or len(search_result.trajectories) > 0
+            or len(search_result.final_answer_scores) > 0
+        )
+
+    # 只有在答案被明确接受时，或者完全没有搜索信号且也无可继续动作时，才直接输出最终报告。
+    def _should_emit_final_report(
+        self,
+        search_result: SearchResult,
+        selected_action: MctsAction | None,
+        stop_decision: StopDecision,
+        accept_decision: StopDecision,
+    ) -> bool:
+        if accept_decision.should_stop:
+            return True
+
+        if self._has_search_signal(search_result):
+            return False
+
+        return stop_decision.should_stop and selected_action is None
+
 
 # 基于现有依赖的默认实现，快速构造一个可运行的问诊大脑。
 def build_default_brain(client: Neo4jClient) -> ConsultationBrain:
@@ -681,6 +695,7 @@ def build_default_brain(client: Neo4jClient) -> ConsultationBrain:
     a2_config = dict(config.get("a2", {}))
     a4_config = dict(config.get("a4", {}))
     fallback_config = dict(config.get("fallback", {}))
+    stop_config = dict(config.get("stop", {}))
     llm_client = LlmClient()
     deps = BrainDependencies(
         state_tracker=StateTracker(),
@@ -707,6 +722,11 @@ def build_default_brain(client: Neo4jClient) -> ConsultationBrain:
                 max_fail_count=int(fallback_config.get("max_fail_count", 2)),
                 max_rollouts=int(search_config.get("num_rollouts", 8)),
                 max_tree_depth=int(search_config.get("max_depth", 6)),
+                min_turn_index_before_final_answer=int(stop_config.get("min_turn_index_before_final_answer", 2)),
+                min_trajectory_count_before_accept=int(stop_config.get("min_trajectory_count_before_accept", 2)),
+                min_answer_consistency=float(stop_config.get("min_answer_consistency", 0.45)),
+                min_agent_eval_score=float(stop_config.get("min_agent_eval_score", 0.65)),
+                min_final_score=float(stop_config.get("min_final_score", 0.55)),
             )
         ),
         report_builder=ReportBuilder(),

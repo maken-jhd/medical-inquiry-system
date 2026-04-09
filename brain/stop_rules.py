@@ -21,6 +21,9 @@ class StopRuleConfig:
     min_answer_consistency: float = 0.45
     min_agent_eval_score: float = 0.65
     min_final_score: float = 0.55
+    min_turn_index_before_final_answer: int = 2
+    min_trajectory_count_before_accept: int = 2
+    require_verifier_accept_flag: bool = True
 
 
 class StopRuleEngine:
@@ -85,9 +88,30 @@ class StopRuleEngine:
         return StopDecision(False, "continue_search")
 
     # 判断最终答案评分是否足以被接受为当前结果。
-    def should_accept_final_answer(self, answer_score: FinalAnswerScore | None) -> StopDecision:
+    def should_accept_final_answer(
+        self,
+        answer_score: FinalAnswerScore | None,
+        session_state: SessionState | None = None,
+    ) -> StopDecision:
         if answer_score is None:
             return StopDecision(False, "no_answer_score")
+
+        if session_state is not None and session_state.turn_index < self.config.min_turn_index_before_final_answer:
+            return StopDecision(False, "turn_index_too_low", float(session_state.turn_index))
+
+        trajectory_count = int(answer_score.metadata.get("trajectory_count", 0))
+
+        if trajectory_count < self.config.min_trajectory_count_before_accept:
+            return StopDecision(False, "trajectory_count_too_low", float(trajectory_count))
+
+        verifier_mode = str(answer_score.metadata.get("verifier_mode", ""))
+
+        if (
+            self.config.require_verifier_accept_flag
+            and verifier_mode == "llm_verifier"
+            and not bool(answer_score.metadata.get("verifier_should_accept", False))
+        ):
+            return StopDecision(False, "verifier_rejected_stop", answer_score.agent_evaluation)
 
         if answer_score.consistency < self.config.min_answer_consistency:
             return StopDecision(False, "consistency_too_low", answer_score.consistency)

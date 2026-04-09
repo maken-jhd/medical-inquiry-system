@@ -15,7 +15,7 @@ path_evaluation:
   consistency_weight: 0.3
   diversity_weight: 0.4
   agent_eval_weight: 0.3
-  agent_eval_mode: fallback
+  agent_eval_mode: llm_verifier
 
 a1:
   use_llm_extractor: true
@@ -34,3 +34,10 @@ a4:
 fallback:
   enable_question_selector_mode: true
   max_fail_count: 2
+
+stop:
+  min_turn_index_before_final_answer: 2
+  min_trajectory_count_before_accept: 2
+  min_answer_consistency: 0.45
+  min_agent_eval_score: 0.72
+  min_final_score: 0.6

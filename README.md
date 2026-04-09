@@ -164,6 +164,7 @@ Neo4j 初始化脚本位于：
 - [tests/test_generate_cases.py](/Users/loki/Workspace/GraduationDesign/tests/test_generate_cases.py)
 - [tests/test_benchmark.py](/Users/loki/Workspace/GraduationDesign/tests/test_benchmark.py)
 - [phase2_execution_checklist.md](/Users/loki/Workspace/GraduationDesign/docs/phase2_execution_checklist.md)：第二阶段与虚拟病人开发清单
+- [phase2_changelog.md](/Users/loki/Workspace/GraduationDesign/docs/phase2_changelog.md)：第二阶段实现历程、问题改进与论文写作素材整理
 - [scripts/run_brain_demo.py](/Users/loki/Workspace/GraduationDesign/scripts/run_brain_demo.py)：最小命令行问诊演示入口
 
 当前 [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml) 已会被 [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py) 的默认构造逻辑真正读取并映射到：
@@ -184,6 +185,7 @@ Neo4j 初始化脚本位于：
 - [brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md) 说明第二阶段问诊大脑目录结构与文件职责
 - [simulator/README.md](/Users/loki/Workspace/GraduationDesign/simulator/README.md) 说明虚拟病人与离线回放目录结构与文件职责
 - [tests/README.md](/Users/loki/Workspace/GraduationDesign/tests/README.md) 说明第二阶段测试组织方式与当前覆盖范围
+- [phase2_changelog.md](/Users/loki/Workspace/GraduationDesign/docs/phase2_changelog.md) 重点记录第二阶段各轮改进分别解决了什么问题，适合作为论文写作材料
 
 ## 当前环境
 
