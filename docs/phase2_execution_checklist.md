@@ -17,19 +17,20 @@
 - `brain/entity_linker.py` 已提供 mention 到图谱节点的阈值化链接
 - `brain/retriever.py` 已实现 `R1 / R2` 双向检索基础版，并增加真实 Neo4j smoke 检查入口
 - `brain/search_tree.py` 已提供搜索树节点、父子关系和回传统计
-- `brain/mcts_engine.py` 已从动作打分器扩展到基础版树节点选择 / 扩展 / 回传控制器
-- `brain/simulation_engine.py` 已支持浅层 rollout 和轨迹对象输出
-- `brain/trajectory_evaluator.py` 已支持按最终答案聚类轨迹并计算一致性 / 多样性 / agent score
-- `brain/service.py` 已能按 `PatientContext -> A1 -> A2 -> R2/A3 -> rollout -> report` 跑通最小搜索闭环
+- `brain/mcts_engine.py` 已从动作打分器扩展到 tree policy + 节点扩展 + 回传控制器
+- `brain/simulation_engine.py` 已支持浅层多步 rollout 和轨迹对象输出
+- `brain/trajectory_evaluator.py` 已支持按最终答案聚类轨迹，并计算一致性 / 相似度驱动多样性 / agent score
+- `brain/service.py` 已能按 `PatientContext -> A1 -> A2 -> R2/A3 -> rollout -> report` 跑通多次 rollout 搜索闭环
+- `brain/service.py` 已会真正读取 `configs/brain.yaml` 并驱动默认依赖构造
 - `simulator/generate_cases.py` 已提供一批覆盖典型场景的 seed cases
 - `simulator/replay_engine.py` 已支持批量自动回放
 - `simulator/benchmark.py` 已支持基础离线指标统计
-- 第二阶段测试已扩展到 `20` 条并全部通过
+- 第二阶段测试已扩展到 `27` 条并全部通过
 
 当前仍需继续加强的重点：
 
 - `A2 / A3 / A4` 仍然是“论文近似实现”，还不是完整论文复现
-- 搜索树已存在，但 rollout 深度与最终聚合器仍偏轻量
+- 搜索树虽然已经进入真实 rollout 循环，但 rollout 深度与最终聚合器仍偏轻量
 - 真实 Neo4j 联调已打通，但 `R2` 的医学语义过滤还要继续收紧
 - 多轮会话的稳定收敛能力仍需继续加强
 - 更丰富的病例覆盖与更严格的离线指标仍待补齐
@@ -40,13 +41,13 @@
 |---|---|---|
 | MedExtractor | 已有基础版 | 已补 `patient_text -> (P, C)`，但仍以规则 + 可选 LLM 为主 |
 | A1 | 部分完成 | 已支持 LLM 主通道与规则回退 |
-| A2 | 部分完成 | 已支持患者上下文 + R1 候选排序，但仍偏轻量 |
-| A3 | 部分完成 | 已支持 R2 检索、动作构建、UCT 选择 |
-| A4 | 部分完成 | 已支持目标感知解释与路由，但还没有完整 verifier |
-| R1 / R2 | 已完成基础版 | 已与真实 Neo4j 图谱联调 |
-| Search Tree | 已完成骨架 | 已支持显式树节点与基础回传 |
-| Rollout | 已完成浅层版 | 已能输出轨迹，但深度与分支仍偏保守 |
-| Trajectory Evaluation | 已完成基础版 | 已能做 consistency / diversity / agent_eval 聚合 |
+| A2 | 部分完成 | 已支持患者上下文 + R1 候选排序，并可保留 recommended evidence |
+| A3 | 部分完成 | 已支持 R2 检索、动作构建、UCT 选择与区分性 gain |
+| A4 | 部分完成 | 已支持目标感知解释、显式路由与可选 LLM judge |
+| R1 / R2 | 已完成基础版 | 已与真实 Neo4j 图谱联调，R1 已增加方向语义 |
+| Search Tree | 已完成骨架 | 已支持显式树节点、tree policy 与回传 |
+| Rollout | 已完成浅层版 | 已能输出多步路径，但深度与分支仍偏保守 |
+| Trajectory Evaluation | 已完成基础版 | 已能做 consistency / similarity diversity / agent_eval 聚合 |
 | Full Med-MCTS Reproduction | 未完成 | 目前处于“结构对齐 + 轻量实现”阶段 |
 
 ## 一、为什么要改路线

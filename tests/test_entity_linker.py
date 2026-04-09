@@ -34,3 +34,4 @@ def test_entity_linker_returns_trusted_match() -> None:
     assert results[0].node_id == "symptom_fever"
     assert results[0].canonical_name == "发热"
     assert results[0].is_trusted is True
+    assert results[0].metadata["top_matches"][0]["canonical_name"] == "发热"

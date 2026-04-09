@@ -1,18 +1,18 @@
 # GraduationDesign
 
-本项目面向 HIV/AIDS 场景的智能问诊系统建设，当前已完成第一阶段的知识图谱底座整理，并已经搭好第二阶段“问诊大脑”和“虚拟病人”开发脚手架。
+本项目面向 HIV/AIDS 场景的智能问诊系统建设，当前已完成第一阶段的知识图谱底座整理，并已经把第二阶段“问诊大脑”和“虚拟病人”推进到可做真实端到端联调的阶段。
 
 ## 当前阶段
 
 当前工作可以分成两条主线：
 
 - `knowledge_graph/`：第一阶段，负责医学资料清理、图谱抽取、关系修补、别名合并与 Neo4j 入库
-- `brain/`、`simulator/`：第二阶段脚手架，负责 FSM 状态机、图谱联动问诊、虚拟病人生成与离线评测
+- `brain/`、`simulator/`：第二阶段，负责 Med-MCTS 风格问诊、虚拟病人生成与离线评测
 
 一句话概括当前状态：
 
 - 第一阶段：已可跑通
-- 第二阶段：已经进入“Med-MCTS 结构对齐后的最小搜索闭环可跑”阶段，但还在持续补强真实联调和离线评测能力
+- 第二阶段：已经进入“select -> expand -> simulate -> backpropagate 多次 rollout 可跑”的阶段，并已具备 A4 路由控制、配置驱动构造和真实 smoke 入口
 
 更详细的局部说明可分别查看：
 
@@ -95,20 +95,20 @@ Neo4j 初始化脚本位于：
 
 - [knowledge_graph/README.md](/Users/loki/Workspace/GraduationDesign/knowledge_graph/README.md)
 
-## 第二阶段：问诊大脑脚手架
+## 第二阶段：问诊大脑
 
-第二阶段已经搭好基础目录与核心文件：
+第二阶段已经不再只是脚手架，而是具备了更贴近论文的最小可运行实现：
 
 - 更详细的目录说明见：[brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
 - [brain/types.py](/Users/loki/Workspace/GraduationDesign/brain/types.py)：状态、候选问题、假设分数等核心数据结构
 - [brain/state_tracker.py](/Users/loki/Workspace/GraduationDesign/brain/state_tracker.py)：会话状态追踪器
 - [brain/session_dag.py](/Users/loki/Workspace/GraduationDesign/brain/session_dag.py)：会话内存 DAG / DFS 追问骨架
 - [brain/neo4j_client.py](/Users/loki/Workspace/GraduationDesign/brain/neo4j_client.py)：Neo4j 查询封装
-- [brain/retriever.py](/Users/loki/Workspace/GraduationDesign/brain/retriever.py)：冷启动、正向假设、反向验证检索骨架
+- [brain/retriever.py](/Users/loki/Workspace/GraduationDesign/brain/retriever.py)：冷启动、正向假设、反向验证检索，当前已支持 `R1 / R2` 方向置信度与实体链接相似度融合
 - [scripts/run_retriever_smoke.py](/Users/loki/Workspace/GraduationDesign/scripts/run_retriever_smoke.py)：真实 Neo4j 图谱联调脚本
 - [brain/question_selector.py](/Users/loki/Workspace/GraduationDesign/brain/question_selector.py)：下一问打分与选择器
-- [brain/mcts_engine.py](/Users/loki/Workspace/GraduationDesign/brain/mcts_engine.py)：基于 UCT 的动作选择器
-- [brain/simulation_engine.py](/Users/loki/Workspace/GraduationDesign/brain/simulation_engine.py)：局部 simulation 预演器
+- [brain/mcts_engine.py](/Users/loki/Workspace/GraduationDesign/brain/mcts_engine.py)：基于 UCT 的动作与树节点选择器
+- [brain/simulation_engine.py](/Users/loki/Workspace/GraduationDesign/brain/simulation_engine.py)：支持多分支浅层 rollout 的 simulation 预演器
 - [brain/med_extractor.py](/Users/loki/Workspace/GraduationDesign/brain/med_extractor.py)：患者原话到 `(P, C)` 的结构化抽取层
 - [brain/entity_linker.py](/Users/loki/Workspace/GraduationDesign/brain/entity_linker.py)：mention 到 KG 节点的阈值化链接器
 - [brain/search_tree.py](/Users/loki/Workspace/GraduationDesign/brain/search_tree.py)：显式搜索树结构
@@ -119,20 +119,20 @@ Neo4j 初始化脚本位于：
 
 ## 当前与 Med-MCTS 的对齐状态
 
-当前第二阶段不是完整论文复现，但已经完成了“结构对齐后的基础实现”：
+当前第二阶段不是完整论文复现，但已经完成了“结构对齐后的更贴近论文实现”：
 
 - `MedExtractor`：已补
 - `A1`：已支持 LLM 主通道与规则回退
-- `A2`：已支持患者上下文 + R1 候选排序
-- `A3`：已支持 R2 检索、动作构造与问句生成
-- `A4`：已支持目标感知解释和显式路由
-- `SearchTree + UCT + rollout`：已完成最小可运行版本
-- `TrajectoryEvaluator`：已完成基础版聚合评分
+- `A2`：已支持患者上下文 + R1 候选排序，并可保留 `recommended_next_evidence`
+- `A3`：已支持 R2 检索、动作构造、区分性 gain 与问句生成
+- `A4`：已支持目标感知解释、可选 LLM deductive judge 与显式路由
+- `SearchTree + UCT + rollout`：已支持多次 rollout 的 `select -> expand -> simulate -> backpropagate`
+- `TrajectoryEvaluator`：已支持路径聚类、相似度驱动 diversity 和可选 LLM verifier 模式
 
 当前仍未完成的重点：
 
 - 更深层的 rollout
-- 更强的 LLM verifier / deductive judge
+- 更稳定的真实多轮会话收敛
 - 更贴近论文的最终答案聚类与评审策略
 - 更严格的真实图谱联调与离线 benchmark
 
@@ -166,6 +166,17 @@ Neo4j 初始化脚本位于：
 - [phase2_execution_checklist.md](/Users/loki/Workspace/GraduationDesign/docs/phase2_execution_checklist.md)：第二阶段与虚拟病人开发清单
 - [scripts/run_brain_demo.py](/Users/loki/Workspace/GraduationDesign/scripts/run_brain_demo.py)：最小命令行问诊演示入口
 
+当前 [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml) 已会被 [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py) 的默认构造逻辑真正读取并映射到：
+
+- `MctsEngine`
+- `SimulationEngine`
+- `TrajectoryEvaluator`
+- `EntityLinker`
+- `GraphRetriever`
+- `EvidenceParser`
+- `HypothesisManager`
+- `StopRuleEngine`
+
 补充说明：
 
 - 全局 README 主要说明整体结构与阶段划分
@@ -190,13 +201,51 @@ Neo4j 初始化脚本位于：
 conda activate GraduationDesign
 ```
 
+## 测试与 Smoke
+
+推荐测试命令：
+
+```bash
+conda run -n GraduationDesign python -m pytest -q
+```
+
+说明：
+
+- 当前测试数为 `27`
+- 直接运行 `conda run -n GraduationDesign pytest -q` 在部分环境下可能出现导入路径问题
+- 因此建议统一使用 `python -m pytest`
+
+真实 Neo4j smoke：
+
+```bash
+NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/run_retriever_smoke.py --features 发热,干咳
+```
+
+真实端到端 smoke：
+
+```bash
+export DASHSCOPE_API_KEY="你的 key"
+export OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}"
+export OPENAI_MODEL="${OPENAI_MODEL:-qwen3-max}"
+export NEO4J_PASSWORD="你的密码"
+
+conda run -n GraduationDesign python scripts/run_batch_replay.py --max-turns 5
+```
+
+这条端到端 smoke 会走：
+
+- 真实 Neo4j 图谱检索
+- `brain/service.py` 的默认构造逻辑
+- `A1 -> A2 -> A3/A4 -> search -> report`
+- 虚拟病人自动回放
+
 ## 推荐下一步
 
 如果继续推进第二阶段，建议开发顺序如下：
 
 1. 继续补强 `brain/service.py` 的完整 A1-A4 闭环
 2. 在本地 Neo4j 正常启动后，用 `run_retriever_smoke.py` 做真实图谱联调
-3. 继续扩展 `simulator/generate_cases.py` 的病例覆盖面和行为风格
-4. 用 `run_batch_replay.py` 跑批量回放并观察离线指标
+3. 用 `run_batch_replay.py` 做真实端到端 smoke，并观察 `final_report` 与路径聚合结果
+4. 继续扩展 `simulator/generate_cases.py` 的病例覆盖面和行为风格
 5. 在 `benchmark.py` 中继续固化更多质量指标
 6. 最后再推进更深层的 rollout 与路径缓存

@@ -15,6 +15,7 @@ path_evaluation:
   consistency_weight: 0.3
   diversity_weight: 0.4
   agent_eval_weight: 0.3
+  agent_eval_mode: fallback
 
 a1:
   use_llm_extractor: true
@@ -28,7 +29,8 @@ a3:
   validation_limit: 10
 
 a4:
-  use_llm_deductive_judge: false
+  use_llm_deductive_judge: true
 
 fallback:
   enable_question_selector_mode: true
+  max_fail_count: 2

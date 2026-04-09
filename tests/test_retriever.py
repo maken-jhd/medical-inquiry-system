@@ -17,13 +17,15 @@ class FakeNeo4jClient:
         self.last_query = query
         self.last_params = params or {}
 
-        if "MATCH (feature)-[r]-(candidate)" in query:
+        if "MATCH (feature)-[r]->(candidate)" in query:
             return [
                 {
                     "node_id": "disease_pcp",
                     "label": "Disease",
                     "name": "肺孢子菌肺炎 (PCP)",
-                    "score": 3.0,
+                    "relation_count": 2.0,
+                    "candidate_weight": 1.0,
+                    "direction_confidence": 1.0,
                     "evidence_names": ["发热", "干咳"],
                     "evidence_node_ids": ["symptom_fever", "symptom_dry_cough"],
                 }
@@ -56,6 +58,7 @@ def test_retriever_returns_r1_candidates() -> None:
     assert candidates[0].node_id == "disease_pcp"
     assert candidates[0].name == "肺孢子菌肺炎 (PCP)"
     assert candidates[0].metadata["evidence_node_ids"] == ["symptom_fever", "symptom_dry_cough"]
+    assert candidates[0].metadata["direction_confidence"] == 1.0
 
 
 # 验证 R2 会根据主假设返回待验证证据。

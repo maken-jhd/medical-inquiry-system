@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Sequence
 
-from .types import A3VerificationResult, MctsAction, QuestionCandidate
+from .types import A3VerificationResult, HypothesisScore, MctsAction, QuestionCandidate
 
 
 @dataclass
@@ -29,14 +29,24 @@ class ActionBuilder:
         rows: Iterable[dict],
         hypothesis_id: str,
         topic_id: Optional[str] = None,
+        competing_hypotheses: Sequence[HypothesisScore] | None = None,
+        current_hypothesis: HypothesisScore | None = None,
     ) -> List[MctsAction]:
         actions: List[MctsAction] = []
+        alternatives = list(competing_hypotheses or [])
+        preferred_evidence = self._collect_preferred_evidence(current_hypothesis)
 
         for row in rows:
             priority = float(row.get("priority", 0.0))
+            contradiction_priority = float(row.get("contradiction_priority", 0.0))
+            relation_weight = float(row.get("relation_weight", 0.0))
+            alternative_overlap = self._estimate_alternative_overlap(row, alternatives)
+            recommended_bonus = self._estimate_recommended_bonus(row, preferred_evidence)
 
             if bool(row.get("is_red_flag", False)):
                 priority += self.config.red_flag_bonus
+
+            priority += recommended_bonus
 
             actions.append(
                 MctsAction(
@@ -50,15 +60,20 @@ class ActionBuilder:
                     prior_score=priority,
                     metadata={
                         "relation_type": row.get("relation_type"),
-                        "relation_weight": float(row.get("relation_weight", 0.0)),
+                        "relation_weight": relation_weight,
                         "node_weight": float(row.get("node_weight", 0.0)),
                         "similarity_confidence": float(row.get("similarity_confidence", 0.0)),
-                        "contradiction_priority": float(row.get("contradiction_priority", 0.0)),
+                        "contradiction_priority": contradiction_priority,
                         "question_type_hint": row.get("question_type_hint", "symptom"),
-                        "discriminative_gain": float(row.get("contradiction_priority", 0.0)),
-                        "novelty_score": max(0.0, 1.0 - float(row.get("relation_weight", 0.0))),
+                        "discriminative_gain": max(
+                            0.0,
+                            contradiction_priority * (1.0 - alternative_overlap * 0.35) + recommended_bonus * 0.5,
+                        ),
+                        "novelty_score": max(0.0, 1.0 - relation_weight * 0.7 - alternative_overlap * 0.2 + recommended_bonus * 0.2),
                         "patient_burden": 0.6 if row.get("question_type_hint") == "lab" else 0.25,
                         "is_red_flag": bool(row.get("is_red_flag", False)),
+                        "competing_hypothesis_count": len(alternatives),
+                        "recommended_evidence_bonus": recommended_bonus,
                     },
                 )
             )
@@ -113,3 +128,43 @@ class ActionBuilder:
             prior_score=max(candidate.priority, candidate.graph_weight, candidate.information_gain, 0.0),
             metadata=dict(candidate.metadata),
         )
+
+    # 估计某条证据与备选假设的重叠程度，越高表示越不具区分性。
+    def _estimate_alternative_overlap(
+        self,
+        row: dict,
+        competing_hypotheses: Sequence[HypothesisScore],
+    ) -> float:
+        if len(competing_hypotheses) == 0:
+            return 0.0
+
+        target_name = str(row.get("name", row.get("node_id", "")))
+        overlap_count = 0
+
+        for hypothesis in competing_hypotheses:
+            evidence_names = hypothesis.metadata.get("evidence_names", [])
+
+            if isinstance(evidence_names, list) and target_name in evidence_names:
+                overlap_count += 1
+
+        return min(overlap_count / len(competing_hypotheses), 1.0)
+
+    # 从当前主假设的 metadata 中提取推荐优先验证的证据名称。
+    def _collect_preferred_evidence(self, current_hypothesis: HypothesisScore | None) -> set[str]:
+        if current_hypothesis is None:
+            return set()
+
+        preferred = current_hypothesis.metadata.get("recommended_next_evidence", [])
+
+        if not isinstance(preferred, list):
+            return set()
+
+        return {str(item).strip() for item in preferred if len(str(item).strip()) > 0}
+
+    # 判断当前动作是否命中了主假设推荐的区分性证据。
+    def _estimate_recommended_bonus(self, row: dict, preferred_evidence: set[str]) -> float:
+        if len(preferred_evidence) == 0:
+            return 0.0
+
+        target_name = str(row.get("name", row.get("node_id", ""))).strip()
+        return 0.25 if target_name in preferred_evidence else 0.0

@@ -2,26 +2,30 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
-from .action_builder import ActionBuilder
-from .entity_linker import EntityLinker
-from .evidence_parser import EvidenceParser
-from .hypothesis_manager import HypothesisManager
+import yaml
+
+from .action_builder import ActionBuilder, ActionBuilderConfig
+from .entity_linker import EntityLinker, EntityLinkerConfig
+from .evidence_parser import EvidenceParser, EvidenceParserConfig
+from .hypothesis_manager import HypothesisManager, HypothesisManagerConfig
 from .llm_client import LlmClient
-from .mcts_engine import MctsEngine
+from .mcts_engine import MctsConfig, MctsEngine
 from .med_extractor import MedExtractor
 from .neo4j_client import Neo4jClient
 from .question_selector import QuestionSelector
 from .report_builder import ReportBuilder
-from .retriever import GraphRetriever
-from .router import ReasoningRouter
+from .retriever import GraphRetriever, RetrievalConfig
+from .router import ReasoningRouter, RouterConfig
 from .search_tree import SearchTree
-from .simulation_engine import SimulationEngine
+from .simulation_engine import SimulationConfig, SimulationEngine
 from .state_tracker import StateTracker
-from .stop_rules import StopRuleEngine
-from .trajectory_evaluator import TrajectoryEvaluator
+from .stop_rules import StopRuleConfig, StopRuleEngine
+from .trajectory_evaluator import TrajectoryEvaluator, TrajectoryEvaluatorConfig
 from .types import (
     A1ExtractionResult,
     A2HypothesisResult,
@@ -144,14 +148,15 @@ class ConsultationBrain:
     def update_from_pending_action(
         self,
         session_id: str,
+        patient_context: PatientContext,
         patient_text: str,
         turn_index: int,
-    ) -> tuple[A4DeductiveResult | None, object | None, list[SlotUpdate]]:
+    ) -> tuple[A4DeductiveResult | None, object | None, object | None, list[SlotUpdate]]:
         tracker = self.deps.state_tracker
         pending_action = tracker.get_pending_action(session_id)
 
         if pending_action is None:
-            return None, None, []
+            return None, None, None, []
 
         a4_result = self.deps.evidence_parser.interpret_answer_for_target(patient_text, pending_action)
         a4_updates = self.deps.evidence_parser.build_slot_updates_from_a4(
@@ -178,13 +183,25 @@ class ConsultationBrain:
         self._apply_hypothesis_feedback(session_id, pending_action, evidence_state)
         self._record_action_reward(session_id, pending_action, a4_result)
         tracker.clear_pending_action(session_id)
-
-        route_after_a4 = self.deps.router.route_after_question_answer(
-            a4_result,
-            pending_action,
-            tracker.get_session(session_id),
+        updated_state = tracker.get_session(session_id)
+        current_hypothesis = self._find_hypothesis_by_id(
+            updated_state.candidate_hypotheses,
+            pending_action.hypothesis_id,
         )
-        return a4_result, route_after_a4, a4_updates
+        alternatives = [
+            item
+            for item in updated_state.candidate_hypotheses
+            if current_hypothesis is None or item.node_id != current_hypothesis.node_id
+        ]
+        deductive_decision = self.deps.evidence_parser.judge_deductive_result(
+            patient_context,
+            pending_action,
+            a4_result,
+            current_hypothesis,
+            alternatives,
+        )
+        route_after_a4 = self.deps.router.decide_next_stage(deductive_decision, updated_state)
+        return a4_result, deductive_decision, route_after_a4, a4_updates
 
     # 运行 R1 + A2，生成主假设和备选假设并写回当前会话状态。
     def _run_a2(
@@ -222,91 +239,86 @@ class ConsultationBrain:
     ) -> SearchResult:
         tracker = self.deps.state_tracker
         state = tracker.get_session(session_id)
-        tree = tracker.get_bound_search_tree(session_id)
-
-        if tree is None:
-            tree = SearchTree()
-            root_signature = self.deps.mcts_engine.build_state_signature(state)
-            tree.add_node(
-                TreeNode(
-                    node_id=f"root::{root_signature}",
-                    state_signature=root_signature,
-                    parent_id=None,
-                    action_from_parent=None,
-                    stage="A2",
-                    depth=0,
-                    metadata={"session_id": session_id},
-                )
-            )
-            tracker.bind_search_tree(session_id, tree)
-
-        root_id = tree.root_id or next(iter(tree.nodes))
-        expandable_hypotheses = self.deps.hypothesis_manager.select_expandable_hypotheses(
-            state.candidate_hypotheses,
-            self.deps.mcts_engine.config.max_child_nodes,
-        )
-
-        selected_action: MctsAction | None = None
-        best_score = float("-inf")
+        tree = self._ensure_search_tree(session_id, state)
         trajectories: list[ReasoningTrajectory] = []
+        rollout_executed = 0
 
-        for hypothesis in expandable_hypotheses:
-            rows = self.deps.retriever.retrieve_r2_expected_evidence(hypothesis, state)
-            actions = self.deps.action_builder.build_verification_actions(
-                rows,
-                hypothesis_id=hypothesis.node_id,
-                topic_id=hypothesis.label,
-            )
+        for rollout_idx in range(self.deps.mcts_engine.config.num_rollouts):
+            leaf = self.deps.mcts_engine.select_leaf(tree)
 
-            if len(actions) == 0:
-                continue
+            if leaf is None:
+                break
 
-            state_signature = self.deps.mcts_engine.build_state_signature(state, hypothesis.node_id)
+            rollout_context = self._build_rollout_context_from_leaf(session_id, leaf)
             tracker.increment_state_visit(
                 session_id,
-                state_signature,
-                {"hypothesis_id": hypothesis.node_id},
+                leaf.state_signature,
+                {
+                    "leaf_node_id": leaf.node_id,
+                    "hypothesis_id": getattr(rollout_context["current_hypothesis"], "node_id", None),
+                    "rollout_idx": rollout_idx,
+                },
             )
-            simulation_outcomes = self.deps.simulation_engine.simulate_actions(actions, state, hypothesis)
-            current_action = self.deps.mcts_engine.select_action(
-                actions,
-                state,
-                simulation_outcomes,
-                state_signature=state_signature,
-            )
+            actions = self._expand_actions_for_leaf(leaf, rollout_context)
 
-            if current_action is None:
+            if len(actions) == 0:
+                tree.mark_terminal(leaf.node_id, {"terminal_reason": "no_expandable_actions"})
                 continue
 
-            trajectory = self.deps.simulation_engine.rollout_from_action(
-                current_action,
-                state,
-                patient_context,
-                max_depth=self.deps.mcts_engine.config.max_depth,
-                primary_hypothesis=hypothesis,
-            )
-            trajectories.append(trajectory)
-            tracker.save_trajectory(session_id, trajectory)
+            child_nodes = self.deps.mcts_engine.expand_node(tree, leaf.node_id, actions)
 
-            created_nodes = self.deps.mcts_engine.expand_node(tree, root_id, [current_action])
+            if len(child_nodes) == 0:
+                tree.mark_terminal(leaf.node_id, {"terminal_reason": "expand_failed"})
+                continue
 
-            if len(created_nodes) > 0:
-                self.deps.mcts_engine.backpropagate(tree, created_nodes[0].node_id, trajectory.score)
+            rollout_executed += 1
 
-            if trajectory.score > best_score:
-                selected_action = current_action
-                best_score = trajectory.score
+            for child in child_nodes:
+                trajectory = self.deps.simulation_engine.rollout_from_tree_node(
+                    child,
+                    rollout_context["state"],
+                    patient_context,
+                    router=self.deps.router,
+                    hypothesis_manager=self.deps.hypothesis_manager,
+                    retriever=self.deps.retriever,
+                    action_builder=self.deps.action_builder,
+                    max_depth=self.deps.mcts_engine.config.max_depth,
+                    current_hypothesis=rollout_context["current_hypothesis"],
+                    competing_hypotheses=rollout_context["alternatives"],
+                )
+                rollout_state = trajectory.metadata.pop("_rollout_state", None)
+                if isinstance(rollout_state, SessionState):
+                    child.metadata["rollout_state"] = rollout_state
+                child.metadata["rollout_depth"] = trajectory.metadata.get("rollout_depth", 0)
+                child.metadata["last_stage"] = trajectory.metadata.get("last_stage")
+                child.metadata["final_answer_id"] = trajectory.final_answer_id
+                child.metadata["final_answer_name"] = trajectory.final_answer_name
+
+                if bool(trajectory.metadata.get("path_terminal", False)):
+                    tree.mark_terminal(
+                        child.node_id,
+                        {"terminal_reason": "rollout_stop", "final_answer_id": trajectory.final_answer_id},
+                    )
+
+                trajectories.append(trajectory)
+                tracker.save_trajectory(session_id, trajectory)
+                self.deps.mcts_engine.backpropagate(tree, child.node_id, trajectory.score)
 
         grouped = self.deps.trajectory_evaluator.group_by_answer(trajectories)
-        final_scores = self.deps.trajectory_evaluator.score_groups(grouped)
+        final_scores = self.deps.trajectory_evaluator.score_groups(grouped, patient_context=patient_context)
         best_answer = self.deps.trajectory_evaluator.select_best_answer(final_scores)
+        selected_action = self.deps.mcts_engine.select_root_action(tree)
         search_result = SearchResult(
             selected_action=selected_action,
             trajectories=trajectories,
             final_answer_scores=final_scores,
             best_answer_id=best_answer.answer_id if best_answer is not None else None,
             best_answer_name=best_answer.answer_name if best_answer is not None else None,
-            metadata={"expandable_hypothesis_count": len(expandable_hypotheses)},
+            metadata={
+                "rollouts_requested": self.deps.mcts_engine.config.num_rollouts,
+                "rollouts_executed": rollout_executed,
+                "tree_node_count": len(tree.nodes),
+            },
         )
         state.metadata["last_search_result"] = search_result
         return search_result
@@ -348,16 +360,56 @@ class ConsultationBrain:
         tracker = self.deps.state_tracker
         turn_index = tracker.increment_turn(session_id)
         patient_context = self.ingest_patient_turn(session_id, patient_text)
-        a4_result, route_after_a4, a4_updates = self.update_from_pending_action(session_id, patient_text, turn_index)
-        applied_updates: list[SlotUpdate] = list(a4_updates)
-        should_run_a1 = (
-            tracker.get_session(session_id).turn_index == 1
-            or route_after_a4 is None
-            or getattr(route_after_a4, "stage", None) in {"A1", "FALLBACK"}
+        a4_result, deductive_decision, route_after_a4, a4_updates = self.update_from_pending_action(
+            session_id,
+            patient_context,
+            patient_text,
+            turn_index,
         )
+        applied_updates: list[SlotUpdate] = list(a4_updates)
+        state = tracker.get_session(session_id)
+        stage_after_a4 = getattr(route_after_a4, "stage", None)
 
         a1_result = A1ExtractionResult()
         linked_entities: list[LinkedEntity] = []
+        a2_result = A2HypothesisResult()
+        search_result = SearchResult()
+        route_after_slot_update = self.deps.router.route_after_slot_update(state)
+
+        if stage_after_a4 == "STOP":
+            stop_decision = StopDecision(
+                should_stop=True,
+                reason=route_after_a4.reason if route_after_a4 is not None else "A4 已满足终止条件。",
+                confidence=1.0,
+                metadata=route_after_a4.metadata if route_after_a4 is not None else {},
+            )
+            last_search_result = state.metadata.get("last_search_result")
+            final_report = self.deps.report_builder.build_final_reasoning_report(
+                state,
+                stop_decision,
+                last_search_result if isinstance(last_search_result, SearchResult) else None,
+            )
+            return {
+                "session_id": session_id,
+                "turn_index": turn_index,
+                "patient_text": patient_text,
+                "patient_context": asdict(patient_context),
+                "linked_entities": [],
+                "a1": asdict(a1_result),
+                "a2": asdict(a2_result),
+                "a3": asdict(A3VerificationResult()),
+                "a4": asdict(a4_result) if a4_result is not None else None,
+                "deductive_decision": asdict(deductive_decision) if deductive_decision is not None else None,
+                "route_after_a4": asdict(route_after_a4) if route_after_a4 is not None else None,
+                "route_after_slot_update": asdict(route_after_slot_update),
+                "updates": [asdict(item) for item in applied_updates],
+                "search_report": None,
+                "next_question": None,
+                "pending_action": None,
+                "final_report": final_report,
+            }
+
+        should_run_a1 = tracker.get_session(session_id).turn_index == 1 or stage_after_a4 == "A1"
 
         if should_run_a1:
             a1_result = self.deps.evidence_parser.run_a1_key_symptom_extraction(
@@ -375,9 +427,29 @@ class ConsultationBrain:
             linked_entities = self.deps.entity_linker.link_clinical_features(patient_context.clinical_features)
 
         route_after_slot_update = self.deps.router.route_after_slot_update(tracker.get_session(session_id))
-        a2_result = self._run_a2(session_id, patient_context, a1_result, linked_entities)
-        search_result = self.run_reasoning_search(session_id, patient_context)
-        selected_action = self.choose_next_question_from_search(session_id, search_result)
+        effective_stage = route_after_slot_update.stage if stage_after_a4 in {None, "A1"} else stage_after_a4
+
+        if effective_stage == "FALLBACK":
+            fallback_candidate = self.deps.question_selector.select_next_question(
+                self.deps.retriever.get_cold_start_questions(),
+                tracker.get_session(session_id),
+            )
+            selected_action = (
+                self.deps.action_builder.build_probe_action_from_question_candidate(fallback_candidate)
+                if fallback_candidate is not None
+                else None
+            )
+        else:
+            should_run_a2 = effective_stage in {"A2", "A3"} or len(tracker.get_session(session_id).candidate_hypotheses) == 0
+
+            if should_run_a2:
+                a2_result = self._run_a2(session_id, patient_context, a1_result, linked_entities)
+
+            if effective_stage in {"A2", "A3"} and len(tracker.get_session(session_id).candidate_hypotheses) > 0:
+                search_result = self.run_reasoning_search(session_id, patient_context)
+                selected_action = self.choose_next_question_from_search(session_id, search_result)
+            else:
+                selected_action = None
 
         stop_decision = self.deps.stop_rule_engine.check_sufficiency(
             tracker.get_session(session_id),
@@ -398,10 +470,15 @@ class ConsultationBrain:
                 "a2": asdict(a2_result),
                 "a3": asdict(A3VerificationResult()),
                 "a4": asdict(a4_result) if a4_result is not None else None,
+                "deductive_decision": asdict(deductive_decision) if deductive_decision is not None else None,
                 "route_after_a4": asdict(route_after_a4) if route_after_a4 is not None else None,
                 "route_after_slot_update": asdict(route_after_slot_update),
                 "updates": [asdict(item) for item in applied_updates],
-                "search_report": self.deps.report_builder.build_search_report(tracker.get_session(session_id), search_result),
+                "search_report": (
+                    self.deps.report_builder.build_search_report(tracker.get_session(session_id), search_result)
+                    if len(search_result.trajectories) > 0 or search_result.selected_action is not None
+                    else None
+                ),
                 "next_question": None,
                 "pending_action": None,
                 "final_report": final_report,
@@ -429,10 +506,15 @@ class ConsultationBrain:
             "a2": asdict(a2_result),
             "a3": asdict(a3_result),
             "a4": asdict(a4_result) if a4_result is not None else None,
+            "deductive_decision": asdict(deductive_decision) if deductive_decision is not None else None,
             "route_after_a4": asdict(route_after_a4) if route_after_a4 is not None else None,
             "route_after_slot_update": asdict(route_after_slot_update),
             "updates": [asdict(item) for item in applied_updates],
-            "search_report": self.deps.report_builder.build_search_report(tracker.get_session(session_id), search_result),
+            "search_report": (
+                self.deps.report_builder.build_search_report(tracker.get_session(session_id), search_result)
+                if len(search_result.trajectories) > 0 or search_result.selected_action is not None
+                else None
+            ),
             "next_question": a3_result.question_text,
             "pending_action": asdict(selected_action) if selected_action is not None else None,
             "final_report": None,
@@ -499,25 +581,180 @@ class ConsultationBrain:
 
         return names
 
+    # 确保当前会话绑定了一棵搜索树，并在首次搜索时创建根节点。
+    def _ensure_search_tree(self, session_id: str, state: SessionState) -> SearchTree:
+        tracker = self.deps.state_tracker
+        tree = tracker.get_bound_search_tree(session_id)
+
+        if tree is not None:
+            return tree
+
+        tree = SearchTree()
+        root_signature = self.deps.mcts_engine.build_state_signature(state)
+        tree.add_node(
+            TreeNode(
+                node_id=f"root::{root_signature}",
+                state_signature=root_signature,
+                parent_id=None,
+                action_from_parent=None,
+                stage="A2",
+                depth=0,
+                metadata={"session_id": session_id, "rollout_state": deepcopy(state)},
+            )
+        )
+        tracker.bind_search_tree(session_id, tree)
+        return tree
+
+    # 从叶子节点恢复 rollout 上下文，包括当前分支状态与主备选假设。
+    def _build_rollout_context_from_leaf(self, session_id: str, leaf: TreeNode) -> dict:
+        tracker = self.deps.state_tracker
+        base_state = leaf.metadata.get("rollout_state")
+
+        if isinstance(base_state, SessionState):
+            rollout_state = deepcopy(base_state)
+        else:
+            rollout_state = tracker.get_session_copy(session_id)
+
+        hypothesis_id = str(leaf.metadata.get("final_answer_id") or leaf.metadata.get("hypothesis_id") or "")
+        current_hypothesis = self._find_hypothesis_by_id(rollout_state.candidate_hypotheses, hypothesis_id)
+
+        if current_hypothesis is None and len(rollout_state.candidate_hypotheses) > 0:
+            current_hypothesis = sorted(
+                rollout_state.candidate_hypotheses,
+                key=lambda item: (-item.score, item.name),
+            )[0]
+
+        alternatives = [
+            item
+            for item in rollout_state.candidate_hypotheses
+            if current_hypothesis is None or item.node_id != current_hypothesis.node_id
+        ]
+        return {
+            "state": rollout_state,
+            "current_hypothesis": current_hypothesis,
+            "alternatives": alternatives,
+        }
+
+    # 根据当前叶子所处路径扩展下一批 A3 验证动作。
+    def _expand_actions_for_leaf(self, leaf: TreeNode, rollout_context: dict) -> list[MctsAction]:
+        _ = leaf
+        rollout_state: SessionState = rollout_context["state"]
+        current_hypothesis = rollout_context["current_hypothesis"]
+        alternatives = rollout_context["alternatives"]
+
+        if current_hypothesis is None:
+            return []
+
+        rows = self.deps.retriever.retrieve_r2_expected_evidence(current_hypothesis, rollout_state)
+        actions = self.deps.action_builder.build_verification_actions(
+            rows,
+            hypothesis_id=current_hypothesis.node_id,
+            topic_id=current_hypothesis.label,
+            competing_hypotheses=alternatives,
+            current_hypothesis=current_hypothesis,
+        )
+        return actions[: self.deps.mcts_engine.config.max_child_nodes]
+
+    # 根据节点 id 从当前候选假设中找到对应对象。
+    def _find_hypothesis_by_id(
+        self,
+        hypotheses: Sequence[object],
+        hypothesis_id: str | None,
+    ) -> object | None:
+        if hypothesis_id is None:
+            return None
+
+        for hypothesis in hypotheses:
+            if getattr(hypothesis, "node_id", None) == hypothesis_id:
+                return hypothesis
+
+        return None
+
 
 # 基于现有依赖的默认实现，快速构造一个可运行的问诊大脑。
 def build_default_brain(client: Neo4jClient) -> ConsultationBrain:
+    config = load_brain_config()
+    search_config = dict(config.get("search", {}))
+    kg_config = dict(config.get("kg", {}))
+    path_eval_config = dict(config.get("path_evaluation", {}))
+    a1_config = dict(config.get("a1", {}))
+    a2_config = dict(config.get("a2", {}))
+    a4_config = dict(config.get("a4", {}))
+    fallback_config = dict(config.get("fallback", {}))
     llm_client = LlmClient()
     deps = BrainDependencies(
         state_tracker=StateTracker(),
-        retriever=GraphRetriever(client),
+        retriever=GraphRetriever(
+            client,
+            RetrievalConfig(
+                kg_similarity_threshold=float(kg_config.get("entity_link_threshold", 0.72)),
+                disable_kg_below_threshold=bool(kg_config.get("disable_kg_below_threshold", True)),
+                r2_limit=int(config.get("a3", {}).get("validation_limit", 10)),
+            ),
+        ),
         med_extractor=MedExtractor(llm_client),
-        entity_linker=EntityLinker(client),
+        entity_linker=EntityLinker(
+            client,
+            EntityLinkerConfig(
+                entity_link_threshold=float(kg_config.get("entity_link_threshold", 0.72)),
+                top_k_entity_matches=int(kg_config.get("top_k_entity_matches", 5)),
+                disable_kg_below_threshold=bool(kg_config.get("disable_kg_below_threshold", True)),
+            ),
+        ),
         question_selector=QuestionSelector(),
-        stop_rule_engine=StopRuleEngine(),
+        stop_rule_engine=StopRuleEngine(
+            StopRuleConfig(
+                max_fail_count=int(fallback_config.get("max_fail_count", 2)),
+                max_rollouts=int(search_config.get("num_rollouts", 8)),
+                max_tree_depth=int(search_config.get("max_depth", 6)),
+            )
+        ),
         report_builder=ReportBuilder(),
-        evidence_parser=EvidenceParser(llm_client),
-        hypothesis_manager=HypothesisManager(llm_client),
-        action_builder=ActionBuilder(),
-        router=ReasoningRouter(),
-        mcts_engine=MctsEngine(),
-        simulation_engine=SimulationEngine(),
-        trajectory_evaluator=TrajectoryEvaluator(),
+        evidence_parser=EvidenceParser(
+            llm_client,
+            EvidenceParserConfig(
+                use_llm_extractor=bool(a1_config.get("use_llm_extractor", True)),
+                fallback_to_rules=bool(a1_config.get("fallback_to_rules", True)),
+                use_llm_deductive_judge=bool(a4_config.get("use_llm_deductive_judge", True)),
+            ),
+        ),
+        hypothesis_manager=HypothesisManager(
+            llm_client,
+            HypothesisManagerConfig(
+                expand_top_k_hypotheses=int(a2_config.get("expand_top_k_hypotheses", 3)),
+            ),
+        ),
+        action_builder=ActionBuilder(ActionBuilderConfig()),
+        router=ReasoningRouter(
+            RouterConfig(
+                fallback_fail_count=int(fallback_config.get("max_fail_count", 2)),
+            )
+        ),
+        mcts_engine=MctsEngine(
+            MctsConfig(
+                num_rollouts=int(search_config.get("num_rollouts", 8)),
+                max_depth=int(search_config.get("max_depth", 6)),
+                max_child_nodes=int(search_config.get("max_child_nodes", 4)),
+                exploration_constant=float(search_config.get("exploration_weight", 2.0)),
+                discount_factor=float(search_config.get("discount_factor", 1.0)),
+                max_kg_triplets=int(search_config.get("max_kg_triplets", 15)),
+            )
+        ),
+        simulation_engine=SimulationEngine(
+            SimulationConfig(
+                rollout_max_depth=int(search_config.get("max_depth", 6)),
+                rollout_discount=float(search_config.get("discount_factor", 0.9)),
+            )
+        ),
+        trajectory_evaluator=TrajectoryEvaluator(
+            TrajectoryEvaluatorConfig(
+                consistency_weight=float(path_eval_config.get("consistency_weight", 0.3)),
+                diversity_weight=float(path_eval_config.get("diversity_weight", 0.4)),
+                agent_eval_weight=float(path_eval_config.get("agent_eval_weight", 0.3)),
+                agent_eval_mode=str(path_eval_config.get("agent_eval_mode", "fallback")),
+            ),
+            llm_client=llm_client,
+        ),
         llm_client=llm_client,
     )
     return ConsultationBrain(deps)
@@ -527,3 +764,16 @@ def build_default_brain(client: Neo4jClient) -> ConsultationBrain:
 def build_default_brain_from_env() -> ConsultationBrain:
     client = Neo4jClient.from_env()
     return build_default_brain(client)
+
+
+# 读取第二阶段默认配置文件。
+def load_brain_config(config_path: str | Path | None = None) -> dict:
+    path = Path(config_path) if config_path is not None else Path(__file__).resolve().parents[1] / "configs" / "brain.yaml"
+
+    if not path.exists():
+        return {}
+
+    with path.open("r", encoding="utf-8") as handle:
+        payload = yaml.safe_load(handle) or {}
+
+    return payload if isinstance(payload, dict) else {}

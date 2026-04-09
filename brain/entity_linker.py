@@ -17,6 +17,16 @@ class EntityLinkerConfig:
     entity_link_threshold: float = 0.72
     top_k_entity_matches: int = 5
     disable_kg_below_threshold: bool = True
+    synonym_bonus_map: dict[str, list[str]] | None = None
+
+    # 初始化医学同义词加成表。
+    def __post_init__(self) -> None:
+        if self.synonym_bonus_map is None:
+            self.synonym_bonus_map = {
+                "发热": ["发烧", "低热", "高热"],
+                "干咳": ["咳嗽"],
+                "呼吸困难": ["气促", "喘不上气", "胸闷"],
+            }
 
 
 class EntityLinker:
@@ -73,6 +83,15 @@ class EntityLinker:
         )
         best = scored[0]
         similarity = self._compute_similarity(mention, str(best.get("canonical_name", "")), best.get("aliases", []))
+        top_matches = [
+            {
+                "node_id": item.get("node_id"),
+                "canonical_name": item.get("canonical_name"),
+                "similarity": self._compute_similarity(mention, str(item.get("canonical_name", "")), item.get("aliases", [])),
+                "label": item.get("label"),
+            }
+            for item in scored[: self.config.top_k_entity_matches]
+        ]
 
         return LinkedEntity(
             mention=mention,
@@ -81,18 +100,32 @@ class EntityLinker:
             similarity=similarity,
             is_trusted=similarity >= self.config.entity_link_threshold,
             label=best.get("label"),
-            metadata={"aliases": list(best.get("aliases", []))},
+            metadata={"aliases": list(best.get("aliases", [])), "top_matches": top_matches},
         )
 
     # 计算 mention 与候选标准名/别名的最佳相似度。
     def _compute_similarity(self, mention: str, canonical_name: str, aliases: list[str]) -> float:
         normalized_mention = self._normalize_text(mention)
         candidates = [canonical_name, *aliases]
-        scores = [
-            SequenceMatcher(None, normalized_mention, self._normalize_text(candidate)).ratio()
-            for candidate in candidates
-            if len(candidate) > 0
-        ]
+        scores: list[float] = []
+
+        for candidate in candidates:
+            if len(candidate) == 0:
+                continue
+
+            normalized_candidate = self._normalize_text(candidate)
+            score = SequenceMatcher(None, normalized_mention, normalized_candidate).ratio()
+
+            if normalized_mention == normalized_candidate:
+                score += 0.2
+
+            if candidate in aliases and mention == candidate:
+                score += 0.15
+
+            if self._is_medical_synonym(mention, candidate):
+                score += 0.1
+
+            scores.append(min(score, 1.0))
 
         if len(scores) == 0:
             return 0.0
@@ -102,3 +135,15 @@ class EntityLinker:
     # 统一文本形式，减少空格和大小写的影响。
     def _normalize_text(self, value: str) -> str:
         return value.strip().replace(" ", "").lower()
+
+    # 判断 mention 与候选名是否属于预置医学同义表。
+    def _is_medical_synonym(self, mention: str, candidate: str) -> bool:
+        synonym_bonus_map = self.config.synonym_bonus_map or {}
+
+        for canonical_name, aliases in synonym_bonus_map.items():
+            family = {canonical_name, *aliases}
+
+            if mention in family and candidate in family:
+                return True
+
+        return False

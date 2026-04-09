@@ -295,6 +295,8 @@ class A4DeductiveResult:
     certainty: EvidenceCertainty = "unknown"
     reasoning: str = ""
     supporting_span: str = ""
+    negation_span: str = ""
+    uncertain_span: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -314,6 +316,8 @@ class DeductiveDecision:
     contradiction_explanation: str = ""
     diagnostic_rationale: str = ""
     next_stage: ReasoningStage = "A3"
+    should_terminate_current_path: bool = False
+    should_spawn_alternative_hypotheses: bool = False
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 

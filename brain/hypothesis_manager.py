@@ -209,7 +209,13 @@ class HypothesisManager:
             primary_hypothesis=primary_hypothesis,
             alternatives=alternatives[: self.config.expand_top_k_hypotheses],
             reasoning=payload.get("reasoning", "已由 LLM 完成假设排序。"),
-            metadata={"source": "llm"},
+            metadata={
+                "source": "llm",
+                "supporting_features": payload.get("supporting_features", []),
+                "conflicting_features": payload.get("conflicting_features", []),
+                "why_primary_beats_alternatives": payload.get("why_primary_beats_alternatives", ""),
+                "recommended_next_evidence": payload.get("recommended_next_evidence", []),
+            },
         )
 
     # 将 LLM 返回的候选信息与现有图谱候选做对齐。

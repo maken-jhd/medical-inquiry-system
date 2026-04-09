@@ -1,6 +1,6 @@
 # tests
 
-`tests/` 目录用于存放第二阶段问诊大脑与虚拟病人相关的测试代码。当前测试以单元测试和最小行为测试为主，目标是保证脚手架代码在持续扩展时不发生基础回归。
+`tests/` 目录用于存放第二阶段问诊大脑与虚拟病人相关的测试代码。当前测试以单元测试和最小行为测试为主，目标是保证二阶段核心闭环在持续扩展时不发生基础回归。
 
 ## 当前目录定位
 
@@ -16,6 +16,8 @@
 - 虚拟病人自动对战测试
 - 回放指标统计测试
 
+当前测试数量为 `27`。
+
 ## 当前文件说明
 
 - [test_state_tracker.py](/Users/loki/Workspace/GraduationDesign/tests/test_state_tracker.py)
@@ -28,7 +30,7 @@
 
 - [test_retriever.py](/Users/loki/Workspace/GraduationDesign/tests/test_retriever.py)
   - 测试 `brain/retriever.py`
-  - 当前已覆盖 `R1 / R2` 的最小行为验证，后续建议继续补充与真实 Neo4j 查询结果一致性的验证
+  - 当前已覆盖 `R1 / R2` 的最小行为验证，包含方向语义融合后的 `R1` 基本路径
 
 - [test_question_selector.py](/Users/loki/Workspace/GraduationDesign/tests/test_question_selector.py)
   - 测试 `brain/question_selector.py`
@@ -44,11 +46,27 @@
 
 - [test_mcts_engine.py](/Users/loki/Workspace/GraduationDesign/tests/test_mcts_engine.py)
   - 测试 `brain/mcts_engine.py`
-  - 主要验证 `UCT` 选择器是否会优先选择更高综合收益的动作
+  - 主要验证 `UCT` 选择器是否会优先选择更高综合收益的动作，以及 tree policy 是否会沿树向下选择叶子
 
 - [test_simulation_engine.py](/Users/loki/Workspace/GraduationDesign/tests/test_simulation_engine.py)
   - 测试 `brain/simulation_engine.py`
-  - 主要验证局部 simulation 对不同关系类型动作的收益估计是否合理
+  - 主要验证局部 simulation 对不同关系类型动作的收益估计是否合理，以及 rollout 是否会展开多步路径
+
+- [test_evidence_parser.py](/Users/loki/Workspace/GraduationDesign/tests/test_evidence_parser.py)
+  - 测试 `brain/evidence_parser.py`
+  - 当前已覆盖 target-aware A4 解释、否定片段提取和 uncertain span 提取
+
+- [test_router_control_flow.py](/Users/loki/Workspace/GraduationDesign/tests/test_router_control_flow.py)
+  - 测试 `brain/router.py`
+  - 当前已覆盖 `STOP / A2` 等核心路由分支以及 A4 输出 metadata
+
+- [test_service_config.py](/Users/loki/Workspace/GraduationDesign/tests/test_service_config.py)
+  - 测试 `brain/service.py`
+  - 当前已覆盖 `configs/brain.yaml` 的读取入口
+
+- [test_report_builder.py](/Users/loki/Workspace/GraduationDesign/tests/test_report_builder.py)
+  - 测试 `brain/report_builder.py`
+  - 当前已覆盖 `trajectory_summary / why_this_answer_wins / evidence_for_best_answer` 等解释性字段
 
 - [test_generate_cases.py](/Users/loki/Workspace/GraduationDesign/tests/test_generate_cases.py)
   - 测试 `simulator/generate_cases.py`
@@ -64,6 +82,7 @@
 
 - 目标明确，优先覆盖基础模块
 - 更偏向“脚手架是否稳固”，而不是“完整系统是否最优”
+- 已覆盖最近这轮的树搜索、A4 路由、配置读取和解释性报告回归点
 - 适合在持续开发中快速发现基础回归
 
 当前还没有系统性覆盖的部分包括：

@@ -11,6 +11,8 @@ from .types import (
     A1ExtractionResult,
     A4DeductiveResult,
     ClinicalFeatureItem,
+    DeductiveDecision,
+    HypothesisScore,
     KeyFeature,
     MctsAction,
     PatientContext,
@@ -36,6 +38,7 @@ class EvidenceParserConfig:
     )
     use_llm_extractor: bool = True
     fallback_to_rules: bool = True
+    use_llm_deductive_judge: bool = True
 
 
 class EvidenceParser:
@@ -68,7 +71,29 @@ class EvidenceParser:
         action: MctsAction,
     ) -> A4DeductiveResult:
         target_name = action.target_node_name
-        existence, certainty = self._infer_existence_and_certainty(patient_text, target_name)
+        focused_spans = self._collect_target_relevant_spans(patient_text, target_name)
+        direct_reply = self._classify_direct_reply(patient_text)
+        negation_span = self._extract_target_span(
+            focused_spans or [patient_text],
+            [r"没有", r"并未", r"否认", r"无", r"不是", r"未见"],
+        )
+        uncertain_span = self._extract_target_span(
+            focused_spans or [patient_text],
+            [r"好像", r"可能", r"大概", r"有点", r"不太确定", r"说不上来", r"不清楚"],
+        )
+        supporting_span = self._extract_target_span(
+            focused_spans or [patient_text],
+            [r"有", r"是", r"会", r"存在", r"出现", r"明显", re.escape(target_name)],
+        )
+        existence, certainty = self._infer_target_aware_existence_and_certainty(
+            patient_text,
+            target_name,
+            focused_spans,
+            direct_reply,
+            negation_span,
+            uncertain_span,
+            supporting_span,
+        )
 
         if existence == "non_exist":
             reasoning = f"患者回答中出现了针对“{target_name}”的否定表达。"
@@ -79,16 +104,56 @@ class EvidenceParser:
         else:
             reasoning = f"当前回答不足以对“{target_name}”形成明确判断。"
 
+        contradiction_detected = bool(negation_span and supporting_span and negation_span != supporting_span)
+
         return A4DeductiveResult(
             existence=existence,
             certainty=certainty,
             reasoning=reasoning,
-            supporting_span=patient_text,
+            supporting_span=supporting_span,
+            negation_span=negation_span,
+            uncertain_span=uncertain_span,
             metadata={
                 "action_id": action.action_id,
                 "target_node_id": action.target_node_id,
                 "target_node_name": target_name,
+                "focused_spans": focused_spans,
+                "direct_reply": direct_reply,
+                "has_contradiction": contradiction_detected,
             },
+        )
+
+    # 基于回答解释结果与主备选假设，输出更贴近论文 A4 的演绎决策。
+    def judge_deductive_result(
+        self,
+        patient_context: PatientContext,
+        action: MctsAction,
+        answer_interpretation: A4DeductiveResult,
+        current_hypothesis: HypothesisScore | None,
+        alternatives: list[HypothesisScore],
+    ) -> DeductiveDecision:
+        if self.llm_client is not None and self.llm_client.is_available() and self.config.use_llm_deductive_judge:
+            try:
+                payload = self.llm_client.run_structured_prompt(
+                    "a4_deductive_judge",
+                    {
+                        "patient_context": patient_context,
+                        "action": action,
+                        "answer_interpretation": answer_interpretation,
+                        "current_hypothesis": current_hypothesis,
+                        "alternatives": alternatives[:3],
+                    },
+                    dict,
+                )
+                return self._coerce_judge_payload(payload, action, answer_interpretation)
+            except Exception:
+                pass
+
+        return self._build_rule_based_deductive_decision(
+            action,
+            answer_interpretation,
+            current_hypothesis,
+            alternatives,
         )
 
     # 将 A4 演绎分析结果转换为可写入状态机的槽位更新。
@@ -339,6 +404,153 @@ class EvidenceParser:
 
         return "unknown", "unknown"
 
+    # 将 LLM judge 的 JSON 负载转成 DeductiveDecision。
+    def _coerce_judge_payload(
+        self,
+        payload: dict,
+        action: MctsAction,
+        answer_interpretation: A4DeductiveResult,
+    ) -> DeductiveDecision:
+        next_stage = str(payload.get("next_stage", "A3"))
+        decision_type = str(payload.get("decision_type", "need_more_information"))
+
+        if decision_type not in {
+            "confirm_hypothesis",
+            "exclude_hypothesis",
+            "reverify_hypothesis",
+            "switch_hypothesis",
+            "need_more_information",
+        }:
+            decision_type = "need_more_information"
+
+        if next_stage not in {"A1", "A2", "A3", "A4", "STOP", "FALLBACK"}:
+            next_stage = "A3"
+
+        return DeductiveDecision(
+            existence=str(payload.get("existence", answer_interpretation.existence)),
+            certainty=str(payload.get("certainty", answer_interpretation.certainty)),
+            decision_type=decision_type,  # type: ignore[arg-type]
+            contradiction_explanation=str(payload.get("contradiction_explanation", "")),
+            diagnostic_rationale=str(payload.get("diagnostic_rationale", payload.get("reasoning", answer_interpretation.reasoning))),
+            next_stage=next_stage,  # type: ignore[arg-type]
+            should_terminate_current_path=bool(payload.get("should_terminate_current_path", next_stage == "STOP")),
+            should_spawn_alternative_hypotheses=bool(payload.get("should_spawn_alternative_hypotheses", False)),
+            metadata={
+                "next_topic_id": action.topic_id,
+                "next_hypothesis_id": action.hypothesis_id,
+                "supporting_span": answer_interpretation.supporting_span,
+                "negation_span": answer_interpretation.negation_span,
+                "uncertain_span": answer_interpretation.uncertain_span,
+                "judge_source": "llm",
+            },
+        )
+
+    # 在没有 LLM judge 时，基于回答解释与主备选假设做规则化演绎决策。
+    def _build_rule_based_deductive_decision(
+        self,
+        action: MctsAction,
+        answer_interpretation: A4DeductiveResult,
+        current_hypothesis: HypothesisScore | None,
+        alternatives: list[HypothesisScore],
+    ) -> DeductiveDecision:
+        margin = 0.0
+
+        if current_hypothesis is not None and len(alternatives) > 0:
+            margin = current_hypothesis.score - max(item.score for item in alternatives)
+
+        if answer_interpretation.existence == "exist" and answer_interpretation.certainty == "confident":
+            next_stage = "STOP" if current_hypothesis is not None and margin >= 1.0 else "A3"
+            return DeductiveDecision(
+                existence="exist",
+                certainty="confident",
+                decision_type="confirm_hypothesis",
+                diagnostic_rationale="目标证据被明确确认，当前路径对主假设形成强支持。",
+                next_stage=next_stage,
+                should_terminate_current_path=next_stage == "STOP",
+                should_spawn_alternative_hypotheses=False,
+                metadata={
+                    "next_topic_id": action.topic_id,
+                    "next_hypothesis_id": action.hypothesis_id,
+                    "supporting_span": answer_interpretation.supporting_span,
+                    "judge_source": "rule",
+                    "path_terminal": next_stage == "STOP",
+                },
+            )
+
+        if answer_interpretation.existence == "non_exist" and answer_interpretation.certainty == "confident":
+            return DeductiveDecision(
+                existence="non_exist",
+                certainty="confident",
+                decision_type="exclude_hypothesis",
+                contradiction_explanation=f"关键证据“{action.target_node_name}”被明确否定，当前假设需要被下调或切换。",
+                diagnostic_rationale="当前回答对主假设形成稳定反证。",
+                next_stage="A2",
+                should_terminate_current_path=False,
+                should_spawn_alternative_hypotheses=len(alternatives) > 0,
+                metadata={
+                    "next_topic_id": action.topic_id,
+                    "next_hypothesis_id": action.hypothesis_id,
+                    "negation_span": answer_interpretation.negation_span,
+                    "contradicted_feature": action.target_node_id,
+                    "judge_source": "rule",
+                },
+            )
+
+        if answer_interpretation.existence == "exist" and answer_interpretation.certainty == "doubt":
+            return DeductiveDecision(
+                existence="exist",
+                certainty="doubt",
+                decision_type="reverify_hypothesis",
+                diagnostic_rationale="回答对目标证据提供了模糊支持，建议继续 A3 做更细的验证。",
+                next_stage="A3",
+                should_terminate_current_path=False,
+                should_spawn_alternative_hypotheses=False,
+                metadata={
+                    "next_topic_id": action.topic_id,
+                    "next_hypothesis_id": action.hypothesis_id,
+                    "uncertain_span": answer_interpretation.uncertain_span,
+                    "judge_source": "rule",
+                },
+            )
+
+        if answer_interpretation.existence == "non_exist" and answer_interpretation.certainty == "doubt":
+            return DeductiveDecision(
+                existence="non_exist",
+                certainty="doubt",
+                decision_type="need_more_information",
+                contradiction_explanation=(
+                    f"“{action.target_node_name}”目前只表现出弱否定。"
+                    "需要判断这是患者忽略、表述模糊还是当前假设确实不成立。"
+                ),
+                diagnostic_rationale="建议继续 A3 做矛盾分析，同时保留备选假设。",
+                next_stage="A3",
+                should_terminate_current_path=False,
+                should_spawn_alternative_hypotheses=True,
+                metadata={
+                    "next_topic_id": action.topic_id,
+                    "next_hypothesis_id": action.hypothesis_id,
+                    "negation_span": answer_interpretation.negation_span,
+                    "uncertain_span": answer_interpretation.uncertain_span,
+                    "need_contradiction_analysis": True,
+                    "judge_source": "rule",
+                },
+            )
+
+        return DeductiveDecision(
+            existence=answer_interpretation.existence,
+            certainty=answer_interpretation.certainty,
+            decision_type="switch_hypothesis",
+            diagnostic_rationale="当前回答无法稳定支持现有路径，建议回到 A1/A2 重新整理线索。",
+            next_stage="A1" if current_hypothesis is None else "A2",
+            should_terminate_current_path=False,
+            should_spawn_alternative_hypotheses=len(alternatives) > 0,
+            metadata={
+                "next_topic_id": action.topic_id,
+                "next_hypothesis_id": action.hypothesis_id,
+                "judge_source": "rule",
+            },
+        )
+
     # 将输入统一转换为 PatientContext，便于上游既可以传原文也可以传结构化上下文。
     def _ensure_patient_context(self, patient_input: str | PatientContext) -> PatientContext:
         if isinstance(patient_input, PatientContext):
@@ -381,3 +593,85 @@ class EvidenceParser:
         window = text[start:end]
 
         return any(re.search(pattern, window) is not None for pattern in patterns)
+
+    # 聚焦包含目标词的分句，减少整句级否定对目标判断的污染。
+    def _collect_target_relevant_spans(self, patient_text: str, target_name: str) -> List[str]:
+        clauses = [
+            clause.strip()
+            for clause in re.split(r"[，。！？；;,.!\n]", patient_text)
+            if len(clause.strip()) > 0
+        ]
+        matched = [clause for clause in clauses if target_name in clause]
+
+        if len(matched) > 0:
+            return matched
+
+        if len(patient_text.strip()) <= 8:
+            return [patient_text.strip()]
+
+        return []
+
+    # 抽取回答是否是直接的“有/没有/不确定”短答。
+    def _classify_direct_reply(self, patient_text: str) -> str | None:
+        stripped_text = patient_text.strip().rstrip("。！？!?；;，,")
+
+        if stripped_text in {"有", "有的", "是的", "会", "存在"}:
+            return "positive"
+
+        if stripped_text in {"没有", "没有的", "不是", "不会", "无"}:
+            return "negative"
+
+        if stripped_text in {"不确定", "不太清楚", "说不上来", "没有特别注意到"}:
+            return "uncertain"
+
+        if any(phrase in stripped_text for phrase in {"没有特别注意到", "不太清楚", "说不上来", "不确定"}):
+            return "uncertain"
+
+        return None
+
+    # 从聚焦分句中提取首个包含指定模式的 span。
+    def _extract_target_span(self, spans: Sequence[str], patterns: Sequence[str]) -> str:
+        for span in spans:
+            if any(re.search(pattern, span) is not None for pattern in patterns):
+                return span
+
+        return ""
+
+    # 基于目标相关分句而不是整句做存在性与确定性判断。
+    def _infer_target_aware_existence_and_certainty(
+        self,
+        patient_text: str,
+        target_name: str,
+        focused_spans: Sequence[str],
+        direct_reply: str | None,
+        negation_span: str,
+        uncertain_span: str,
+        supporting_span: str,
+    ) -> tuple[str, str]:
+        if direct_reply == "positive":
+            return "exist", "confident"
+
+        if direct_reply == "negative":
+            return "non_exist", "confident"
+
+        if direct_reply == "uncertain":
+            return "unknown", "doubt"
+
+        focused_text = "；".join(focused_spans)
+
+        if len(focused_text) == 0:
+            return self._infer_existence_and_certainty(patient_text, target_name)
+
+        if len(uncertain_span) > 0 and len(negation_span) == 0:
+            return "exist", "doubt"
+
+        if len(negation_span) > 0 and len(uncertain_span) > 0:
+            return "non_exist", "doubt"
+
+        if len(negation_span) > 0:
+            return "non_exist", "confident"
+
+        if len(supporting_span) > 0:
+            return "exist", "confident"
+
+        return "unknown", "doubt"

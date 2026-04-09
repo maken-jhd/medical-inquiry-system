@@ -62,6 +62,8 @@ class ReasoningRouter:
     ) -> DeductiveDecision:
         hypothesis_id = action.hypothesis_id if action is not None else None
         topic_id = action.topic_id if action is not None else None
+        contradicted_feature = action.target_node_id if action is not None else None
+        contradicted_feature_name = action.target_node_name if action is not None else None
 
         if deductive_result.existence == "exist" and deductive_result.certainty == "confident":
             next_stage = "STOP" if self._hypothesis_margin_is_sufficient(session_state) else "A3"
@@ -71,7 +73,15 @@ class ReasoningRouter:
                 decision_type="confirm_hypothesis",
                 diagnostic_rationale="验证结果为存在且确信，支持当前假设。",
                 next_stage=next_stage,
-                metadata={"next_topic_id": topic_id, "next_hypothesis_id": hypothesis_id},
+                should_terminate_current_path=next_stage == "STOP",
+                should_spawn_alternative_hypotheses=False,
+                metadata={
+                    "next_topic_id": topic_id,
+                    "next_hypothesis_id": hypothesis_id,
+                    "path_terminal": next_stage == "STOP",
+                    "confirmed_feature": contradicted_feature,
+                    "confirmed_feature_name": contradicted_feature_name,
+                },
             )
 
         if deductive_result.existence == "non_exist" and deductive_result.certainty == "confident":
@@ -79,10 +89,19 @@ class ReasoningRouter:
                 existence=deductive_result.existence,
                 certainty=deductive_result.certainty,
                 decision_type="exclude_hypothesis",
-                contradiction_explanation="验证结果为不存在且确信，需要下调或排除当前假设。",
+                contradiction_explanation="验证结果为不存在且确信，该证据与当前主假设直接矛盾，需要切回 A2 重整假设。",
                 diagnostic_rationale="关键验证点被明确否定。",
                 next_stage="A2",
-                metadata={"next_topic_id": topic_id, "next_hypothesis_id": hypothesis_id},
+                should_terminate_current_path=False,
+                should_spawn_alternative_hypotheses=True,
+                metadata={
+                    "next_topic_id": topic_id,
+                    "next_hypothesis_id": hypothesis_id,
+                    "contradicted_feature": contradicted_feature,
+                    "contradicted_feature_name": contradicted_feature_name,
+                    "need_contradiction_analysis": False,
+                    "path_terminal": False,
+                },
             )
 
         if deductive_result.existence == "exist" and deductive_result.certainty == "doubt":
@@ -92,7 +111,14 @@ class ReasoningRouter:
                 decision_type="reverify_hypothesis",
                 diagnostic_rationale="验证点疑似存在，但仍需继续细化确认。",
                 next_stage="A3" if self.config.prefer_reverify_on_doubt else "A2",
-                metadata={"next_topic_id": topic_id, "next_hypothesis_id": hypothesis_id},
+                should_terminate_current_path=False,
+                should_spawn_alternative_hypotheses=False,
+                metadata={
+                    "next_topic_id": topic_id,
+                    "next_hypothesis_id": hypothesis_id,
+                    "next_topic_id_hint": contradicted_feature,
+                    "path_terminal": False,
+                },
             )
 
         if deductive_result.existence == "non_exist" and deductive_result.certainty == "doubt":
@@ -100,13 +126,21 @@ class ReasoningRouter:
                 existence=deductive_result.existence,
                 certainty=deductive_result.certainty,
                 decision_type="need_more_information",
-                contradiction_explanation="当前否定证据仍不稳固，需要补充一次矛盾分析。",
-                diagnostic_rationale="验证点可能不存在，但尚不足以直接排除。",
+                contradiction_explanation=(
+                    f"“{contradicted_feature_name or '当前验证点'}”目前呈现弱否定。"
+                    "这可能是轻症、患者忽略、或提问方式不够贴切导致，建议继续做矛盾分析并改问法复核。"
+                ),
+                diagnostic_rationale="验证点可能不存在，但尚不足以直接排除当前假设，优先继续 A3 复核。",
                 next_stage="A3",
+                should_terminate_current_path=False,
+                should_spawn_alternative_hypotheses=True,
                 metadata={
                     "next_topic_id": topic_id,
                     "next_hypothesis_id": hypothesis_id,
                     "need_contradiction_analysis": True,
+                    "contradicted_feature": contradicted_feature,
+                    "contradicted_feature_name": contradicted_feature_name,
+                    "path_terminal": False,
                 },
             )
 
@@ -116,7 +150,15 @@ class ReasoningRouter:
             decision_type="switch_hypothesis",
             diagnostic_rationale="当前证据不足以支持既有假设，建议回到上游重新整理线索。",
             next_stage="A1",
-            metadata={"next_topic_id": topic_id, "next_hypothesis_id": hypothesis_id},
+            should_terminate_current_path=False,
+            should_spawn_alternative_hypotheses=True,
+            metadata={
+                "next_topic_id": topic_id,
+                "next_hypothesis_id": hypothesis_id,
+                "contradicted_feature": contradicted_feature,
+                "contradicted_feature_name": contradicted_feature_name,
+                "path_terminal": False,
+            },
         )
 
     # 根据演绎决策决定下一步应进入的阶段。
@@ -133,7 +175,11 @@ class ReasoningRouter:
             reason=deductive_decision.diagnostic_rationale or deductive_decision.contradiction_explanation or "已根据 A4 结果更新下一阶段。",
             next_topic_id=deductive_decision.metadata.get("next_topic_id"),
             next_hypothesis_id=deductive_decision.metadata.get("next_hypothesis_id"),
-            metadata=dict(deductive_decision.metadata),
+            metadata={
+                **dict(deductive_decision.metadata),
+                "should_terminate_current_path": deductive_decision.should_terminate_current_path,
+                "should_spawn_alternative_hypotheses": deductive_decision.should_spawn_alternative_hypotheses,
+            },
         )
 
     # 在 simulation 完成后，根据收益高低决定继续验证还是回退。

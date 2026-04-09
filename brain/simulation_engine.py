@@ -2,16 +2,26 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Iterable, List, Optional
 
+from .action_builder import ActionBuilder
+from .hypothesis_manager import HypothesisManager
+from .retriever import GraphRetriever
+from .router import ReasoningRouter
 from .types import (
+    A4DeductiveResult,
+    EvidenceState,
     HypothesisCandidate,
     HypothesisScore,
     MctsAction,
+    PatientContext,
     ReasoningTrajectory,
     SessionState,
     SimulationOutcome,
+    SlotState,
+    TreeNode,
 )
 
 
@@ -22,7 +32,10 @@ class SimulationConfig:
     positive_branch_probability: float = 0.6
     positive_reward_multiplier: float = 1.0
     negative_reward_multiplier: float = 0.45
+    doubtful_reward_multiplier: float = 0.3
     rollout_max_depth: int = 3
+    rollout_discount: float = 0.9
+    doubtful_branch_probability: float = 0.15
     relation_bonus_map: dict[str, float] | None = None
 
     # 初始化默认的关系收益加成表。
@@ -67,16 +80,28 @@ class SimulationEngine:
         relation_bonus = float(self.config.relation_bonus_map.get(relation_type, 0.75))
         hypothesis_score = float(primary_hypothesis.score) if primary_hypothesis is not None else 0.0
         positive_probability = self._estimate_positive_probability(action, session_state)
+        doubtful_probability = min(self.config.doubtful_branch_probability, max(0.0, 1.0 - positive_probability))
+        negative_probability = max(0.05, 1.0 - positive_probability - doubtful_probability)
+        contradiction_priority = float(action.metadata.get("contradiction_priority", 0.0))
 
         positive_reward = (
             action.prior_score * relation_bonus * self.config.positive_reward_multiplier
             + hypothesis_score * 0.35
         )
         negative_reward = (
-            action.prior_score * 0.25 * self.config.negative_reward_multiplier
+            action.prior_score * (0.25 + contradiction_priority * 0.35) * self.config.negative_reward_multiplier
             + hypothesis_score * 0.10
         )
-        expected_reward = positive_probability * positive_reward + (1 - positive_probability) * negative_reward
+        doubtful_reward = (
+            action.prior_score * 0.20 * self.config.doubtful_reward_multiplier
+            + contradiction_priority * 0.10
+            + hypothesis_score * 0.05
+        )
+        expected_reward = (
+            positive_probability * positive_reward
+            + negative_probability * negative_reward
+            + doubtful_probability * doubtful_reward
+        )
 
         return SimulationOutcome(
             action_id=action.action_id,
@@ -86,6 +111,9 @@ class SimulationEngine:
             depth=2,
             metadata={
                 "positive_probability": positive_probability,
+                "negative_probability": negative_probability,
+                "doubtful_probability": doubtful_probability,
+                "doubtful_branch_reward": doubtful_reward,
                 "relation_type": relation_type,
             },
         )
@@ -99,12 +127,12 @@ class SimulationEngine:
         max_depth: int | None = None,
         primary_hypothesis: HypothesisCandidate | HypothesisScore | None = None,
     ) -> ReasoningTrajectory:
-        _ = patient_context
         depth = max_depth or self.config.rollout_max_depth
         outcome = self.simulate_action(action, state, primary_hypothesis)
         hypothesis_id = action.hypothesis_id or "UNKNOWN"
         hypothesis_name = primary_hypothesis.name if primary_hypothesis is not None else "UNKNOWN"
-        simulated_answer = "positive" if outcome.positive_branch_reward >= outcome.negative_branch_reward else "negative"
+        branch_payloads = self._build_branch_payloads(action, outcome)
+        selected_branch = sorted(branch_payloads, key=lambda item: (-item["weighted_reward"], item["branch"]))[0]
 
         steps = [
             {
@@ -116,8 +144,8 @@ class SimulationEngine:
                 "question_type_hint": action.metadata.get("question_type_hint", "symptom"),
             },
             {
-                "stage": "SIMULATION",
-                "branch_answer": simulated_answer,
+                "stage": "A4",
+                "branch_answer": selected_branch["branch"],
                 "expected_reward": outcome.expected_reward,
                 "depth": min(depth, self.config.rollout_max_depth),
             },
@@ -129,8 +157,130 @@ class SimulationEngine:
             final_answer_name=hypothesis_name,
             steps=steps,
             score=outcome.expected_reward,
-            metadata={"simulation_outcome": outcome.metadata},
+            metadata={"simulation_outcome": outcome.metadata, "branch_evaluations": branch_payloads},
         )
+
+    # 从搜索树节点出发执行多步 rollout，模拟 A3 -> A4 -> route -> A2/A3 的前瞻过程。
+    def rollout_from_tree_node(
+        self,
+        node: TreeNode,
+        state: SessionState,
+        patient_context: PatientContext,
+        router: ReasoningRouter,
+        hypothesis_manager: HypothesisManager,
+        retriever: GraphRetriever,
+        action_builder: ActionBuilder,
+        max_depth: int,
+        current_hypothesis: HypothesisCandidate | HypothesisScore | None = None,
+        competing_hypotheses: list[HypothesisScore] | None = None,
+    ) -> ReasoningTrajectory:
+        rollout_state = deepcopy(state)
+        hypothesis = self._resolve_hypothesis(node, rollout_state, current_hypothesis)
+        alternatives = list(competing_hypotheses or [])
+        action = self._extract_action(node)
+        total_reward = 0.0
+        step_depth = 0
+        visited_action_ids: set[str] = set()
+        steps: list[dict] = []
+        last_stage = "A3"
+
+        while action is not None and step_depth < max_depth:
+            step_depth += 1
+            visited_action_ids.add(action.action_id)
+            outcome = self.simulate_action(action, rollout_state, hypothesis)
+            branch_payloads = self._build_branch_payloads(action, outcome)
+            selected_branch = sorted(
+                branch_payloads,
+                key=lambda item: (-item["weighted_reward"], item["branch"]),
+            )[0]
+            branch_result: A4DeductiveResult = selected_branch["deductive_result"]
+            decision = router.build_deductive_decision(branch_result, action, rollout_state)
+            step_reward = selected_branch["reward"] * (self.config.rollout_discount ** (step_depth - 1))
+            context_bonus = self._estimate_context_bonus(action, patient_context)
+            total_reward += step_reward + context_bonus
+            last_stage = decision.next_stage
+
+            self._apply_rollout_state_update(
+                rollout_state,
+                action,
+                branch_result,
+                step_depth,
+                hypothesis_manager,
+            )
+
+            if action.target_node_id not in rollout_state.asked_node_ids:
+                rollout_state.asked_node_ids.append(action.target_node_id)
+
+            steps.extend(
+                [
+                    {
+                        "stage": "A3",
+                        "action_id": action.action_id,
+                        "action_name": action.target_node_name,
+                        "target_node_id": action.target_node_id,
+                        "target_node_name": action.target_node_name,
+                        "hypothesis_id": hypothesis.node_id if hypothesis is not None else action.hypothesis_id,
+                        "question_type_hint": action.metadata.get("question_type_hint", "symptom"),
+                    },
+                    {
+                        "stage": "A4",
+                        "answer_branch": selected_branch["branch"],
+                        "existence": branch_result.existence,
+                        "certainty": branch_result.certainty,
+                        "reasoning": branch_result.reasoning,
+                    },
+                    {
+                        "stage": "ROUTE",
+                        "decision_type": decision.decision_type,
+                        "next_stage": decision.next_stage,
+                        "path_terminal": decision.should_terminate_current_path,
+                        "contradiction_explanation": decision.contradiction_explanation,
+                    },
+                ]
+            )
+
+            if decision.next_stage == "STOP" or decision.should_terminate_current_path:
+                break
+
+            hypothesis, alternatives = self._advance_hypothesis_after_route(
+                hypothesis,
+                rollout_state,
+                alternatives,
+                decision,
+                hypothesis_manager,
+            )
+
+            if decision.next_stage not in {"A2", "A3"}:
+                break
+
+            action = self._select_follow_up_action(
+                hypothesis,
+                alternatives,
+                rollout_state,
+                retriever,
+                action_builder,
+                visited_action_ids,
+            )
+
+            if action is None:
+                break
+
+        final_hypothesis = hypothesis or self._resolve_hypothesis(node, rollout_state, current_hypothesis)
+        trajectory = ReasoningTrajectory(
+            trajectory_id=f"trajectory::{node.node_id}",
+            final_answer_id=final_hypothesis.node_id if final_hypothesis is not None else None,
+            final_answer_name=final_hypothesis.name if final_hypothesis is not None else None,
+            steps=steps,
+            score=total_reward / max(step_depth, 1),
+            metadata={
+                "rollout_depth": step_depth,
+                "last_stage": last_stage,
+                "path_terminal": last_stage == "STOP",
+                "starting_hypothesis_id": current_hypothesis.node_id if current_hypothesis is not None else None,
+                "_rollout_state": rollout_state,
+            },
+        )
+        return trajectory
 
     # 根据动作类型、红旗程度和历史提问情况估算阳性回答概率。
     def _estimate_positive_probability(
@@ -154,3 +304,209 @@ class SimulationEngine:
             probability += 0.05
 
         return min(max(probability, 0.1), 0.9)
+
+    # 为单个动作构造 positive / negative / doubtful 三个回答分支。
+    def _build_branch_payloads(
+        self,
+        action: MctsAction,
+        outcome: SimulationOutcome,
+    ) -> list[dict]:
+        positive_probability = float(outcome.metadata.get("positive_probability", self.config.positive_branch_probability))
+        negative_probability = float(outcome.metadata.get("negative_probability", 1.0 - positive_probability))
+        doubtful_probability = float(outcome.metadata.get("doubtful_probability", self.config.doubtful_branch_probability))
+        doubtful_reward = float(
+            outcome.metadata.get("doubtful_branch_reward", outcome.expected_reward * self.config.doubtful_reward_multiplier)
+        )
+
+        return [
+            {
+                "branch": "positive",
+                "probability": positive_probability,
+                "reward": outcome.positive_branch_reward,
+                "weighted_reward": positive_probability * outcome.positive_branch_reward,
+                "deductive_result": A4DeductiveResult(
+                    existence="exist",
+                    certainty="confident",
+                    reasoning=f"模拟回答明确支持“{action.target_node_name}”存在。",
+                    supporting_span=f"模拟正向回答：存在 {action.target_node_name}",
+                ),
+            },
+            {
+                "branch": "negative",
+                "probability": negative_probability,
+                "reward": outcome.negative_branch_reward,
+                "weighted_reward": negative_probability * outcome.negative_branch_reward,
+                "deductive_result": A4DeductiveResult(
+                    existence="non_exist",
+                    certainty="confident",
+                    reasoning=f"模拟回答明确否定“{action.target_node_name}”。",
+                    negation_span=f"模拟反向回答：无 {action.target_node_name}",
+                ),
+            },
+            {
+                "branch": "doubtful",
+                "probability": doubtful_probability,
+                "reward": doubtful_reward,
+                "weighted_reward": doubtful_probability * doubtful_reward,
+                "deductive_result": A4DeductiveResult(
+                    existence="exist",
+                    certainty="doubt",
+                    reasoning=f"模拟回答对“{action.target_node_name}”提供了模糊支持，仍需复核。",
+                    supporting_span=f"模拟模糊回答：可能有 {action.target_node_name}",
+                    uncertain_span=f"模拟模糊回答：不太确定 {action.target_node_name}",
+                ),
+            },
+        ]
+
+    # 从树节点元数据中提取当前动作。
+    def _extract_action(self, node: TreeNode) -> MctsAction | None:
+        action = node.metadata.get("action")
+        return action if isinstance(action, MctsAction) else None
+
+    # 根据节点元数据或当前状态解析 rollout 的当前假设。
+    def _resolve_hypothesis(
+        self,
+        node: TreeNode,
+        state: SessionState,
+        current_hypothesis: HypothesisCandidate | HypothesisScore | None,
+    ) -> HypothesisCandidate | HypothesisScore | None:
+        if current_hypothesis is not None:
+            return current_hypothesis
+
+        hypothesis_id = str(node.metadata.get("hypothesis_id") or "")
+
+        for hypothesis in state.candidate_hypotheses:
+            if hypothesis.node_id == hypothesis_id:
+                return hypothesis
+
+        if len(state.candidate_hypotheses) > 0:
+            return sorted(state.candidate_hypotheses, key=lambda item: (-item.score, item.name))[0]
+
+        return None
+
+    # 将 rollout 分支结果回写到临时状态中，供下一层动作扩展使用。
+    def _apply_rollout_state_update(
+        self,
+        state: SessionState,
+        action: MctsAction,
+        deductive_result: A4DeductiveResult,
+        turn_index: int,
+        hypothesis_manager: HypothesisManager,
+    ) -> None:
+        slot_status = "unknown"
+        slot_certainty = "unknown"
+
+        if deductive_result.existence == "exist":
+            slot_status = "true"
+        elif deductive_result.existence == "non_exist":
+            slot_status = "false"
+
+        if deductive_result.certainty == "confident":
+            slot_certainty = "certain"
+        elif deductive_result.certainty == "doubt":
+            slot_certainty = "uncertain"
+
+        state.slots[action.target_node_id] = SlotState(
+            node_id=action.target_node_id,
+            status=slot_status,
+            certainty=slot_certainty,
+            evidence=[deductive_result.supporting_span or deductive_result.negation_span or deductive_result.reasoning],
+            source_turns=[turn_index],
+            metadata={
+                "source_stage": "SIMULATION",
+                "action_id": action.action_id,
+                "normalized_name": action.target_node_name,
+            },
+        )
+        state.evidence_states[action.target_node_id] = EvidenceState(
+            node_id=action.target_node_id,
+            existence=deductive_result.existence,
+            certainty=deductive_result.certainty,
+            reasoning=deductive_result.reasoning,
+            source_turns=[turn_index],
+            metadata={
+                "action_id": action.action_id,
+                "hypothesis_id": action.hypothesis_id,
+                "relation_type": action.metadata.get("relation_type"),
+            },
+        )
+
+        related_ids = [action.hypothesis_id] if action.hypothesis_id is not None else None
+        state.candidate_hypotheses = hypothesis_manager.apply_evidence_feedback(
+            state.candidate_hypotheses,
+            state.evidence_states[action.target_node_id],
+            related_ids,
+        )
+
+    # 根据路由结果推进主假设与备选假设。
+    def _advance_hypothesis_after_route(
+        self,
+        current_hypothesis: HypothesisCandidate | HypothesisScore | None,
+        state: SessionState,
+        alternatives: list[HypothesisScore],
+        decision: object,
+        hypothesis_manager: HypothesisManager,
+    ) -> tuple[HypothesisCandidate | HypothesisScore | None, list[HypothesisScore]]:
+        ranked = hypothesis_manager.select_expandable_hypotheses(state.candidate_hypotheses, top_k=3)
+        ranked_alternatives = [
+            item
+            for item in ranked
+            if current_hypothesis is None or item.node_id != current_hypothesis.node_id
+        ]
+
+        next_stage = getattr(decision, "next_stage", "A3")
+
+        if next_stage == "A2":
+            next_hypothesis = ranked_alternatives[0] if len(ranked_alternatives) > 0 else current_hypothesis
+            remaining = ranked_alternatives[1:] if len(ranked_alternatives) > 1 else []
+            return next_hypothesis, remaining
+
+        return current_hypothesis, ranked_alternatives or alternatives
+
+    # 从当前假设出发选择下一条最值得继续验证的动作。
+    def _select_follow_up_action(
+        self,
+        current_hypothesis: HypothesisCandidate | HypothesisScore | None,
+        alternatives: list[HypothesisScore],
+        state: SessionState,
+        retriever: GraphRetriever,
+        action_builder: ActionBuilder,
+        visited_action_ids: set[str],
+    ) -> MctsAction | None:
+        if current_hypothesis is None:
+            return None
+
+        rows = retriever.retrieve_r2_expected_evidence(current_hypothesis, state, top_k=4)
+        actions = action_builder.build_verification_actions(
+            rows,
+            hypothesis_id=current_hypothesis.node_id,
+            topic_id=current_hypothesis.label,
+            competing_hypotheses=alternatives,
+            current_hypothesis=current_hypothesis,
+        )
+
+        for action in actions:
+            if action.action_id in visited_action_ids:
+                continue
+
+            if action.target_node_id in state.asked_node_ids:
+                continue
+
+            return action
+
+        return None
+
+    # 给 rollout 注入患者上下文信息，避免 patient_context 形参完全闲置。
+    def _estimate_context_bonus(self, action: MctsAction, patient_context: PatientContext) -> float:
+        raw_text = patient_context.raw_text
+        normalized_feature_names = {item.normalized_name for item in patient_context.clinical_features}
+        target_name = action.target_node_name
+        question_type_hint = str(action.metadata.get("question_type_hint", "symptom"))
+
+        if target_name in raw_text or target_name in normalized_feature_names:
+            return 0.1
+
+        if question_type_hint == "risk" and len(patient_context.general_info.epidemiology) > 0:
+            return 0.05
+
+        return 0.0

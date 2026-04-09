@@ -73,11 +73,19 @@ class LlmClient:
             ),
             "a2_hypothesis_generation": (
                 "请根据患者一般信息、临床特征和图谱候选疾病生成主假设与备选假设。"
-                "输出字段必须包含 primary_hypothesis、alternatives、reasoning。"
+                "输出字段必须包含 primary_hypothesis、alternatives、reasoning、"
+                "supporting_features、conflicting_features、why_primary_beats_alternatives、recommended_next_evidence。"
             ),
             "a4_deductive_judge": (
-                "请根据目标验证点和患者回答，判断该证据是否存在以及确定性。"
-                "输出字段必须包含 existence、certainty、reasoning。"
+                "请根据目标验证点、患者回答、当前主假设和备选假设，给出诊断性演绎判断。"
+                "输出字段必须包含 existence、certainty、decision_type、next_stage、"
+                "diagnostic_rationale、contradiction_explanation、"
+                "should_terminate_current_path、should_spawn_alternative_hypotheses、reasoning。"
+            ),
+            "trajectory_agent_verifier": (
+                "请作为临床推理评审者，结合患者上下文、候选最终答案和最佳推理路径，"
+                "给出该答案的代理评审分数。"
+                "输出字段必须包含 score、reasoning。score 取值范围为 0 到 1。"
             ),
         }
         prefix = prompt_blocks.get(prompt_name, "请完成结构化医学推理，并输出 JSON。")

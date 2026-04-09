@@ -1,7 +1,8 @@
 """测试 UCT 选择器的基础动作排序行为。"""
 
 from brain.mcts_engine import MctsEngine
-from brain.types import ActionStats, MctsAction, SessionState, SimulationOutcome, StateVisitStats
+from brain.search_tree import SearchTree
+from brain.types import ActionStats, MctsAction, SessionState, SimulationOutcome, StateVisitStats, TreeNode
 
 
 # 验证 UCT 选择器会优先选择 simulation 收益更高的动作。
@@ -42,3 +43,56 @@ def test_mcts_engine_prefers_higher_simulation_reward() -> None:
 
     assert selected is not None
     assert selected.action_id == "a2"
+
+
+# 验证 tree policy 会沿树向下选择高价值路径，而不是直接把所有叶子摊平排序。
+def test_mcts_engine_select_leaf_descends_by_tree_policy() -> None:
+    engine = MctsEngine()
+    tree = SearchTree()
+    root = TreeNode(node_id="root", state_signature="root", parent_id=None, action_from_parent=None, stage="A2", depth=0)
+    child_a = TreeNode(
+        node_id="root::a",
+        state_signature="a",
+        parent_id="root",
+        action_from_parent="a",
+        stage="A3",
+        depth=1,
+        visit_count=3,
+        total_value=1.2,
+        average_value=0.4,
+        metadata={"prior_score": 0.1},
+    )
+    child_b = TreeNode(
+        node_id="root::b",
+        state_signature="b",
+        parent_id="root",
+        action_from_parent="b",
+        stage="A3",
+        depth=1,
+        visit_count=2,
+        total_value=1.8,
+        average_value=0.9,
+        metadata={"prior_score": 0.8},
+    )
+    grandchild = TreeNode(
+        node_id="root::b::c",
+        state_signature="c",
+        parent_id="root::b",
+        action_from_parent="c",
+        stage="A3",
+        depth=2,
+        metadata={"prior_score": 0.6},
+    )
+    tree.add_node(root)
+    tree.add_node(child_a)
+    tree.add_node(child_b)
+    tree.add_node(grandchild)
+    tree.add_edge("root", "root::a")
+    tree.add_edge("root", "root::b")
+    tree.add_edge("root::b", "root::b::c")
+    root.visit_count = 5
+
+    selected_leaf = engine.select_leaf(tree)
+
+    assert selected_leaf is not None
+    assert selected_leaf.node_id == "root::b::c"

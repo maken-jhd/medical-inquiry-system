@@ -30,6 +30,7 @@ def test_router_stops_when_positive_evidence_and_margin_is_sufficient() -> None:
     )
 
     assert decision.stage == "STOP"
+    assert decision.metadata["should_terminate_current_path"] is True
 
 
 # 验证不存在且确信会回到 A2 重新审视假设。
@@ -52,3 +53,4 @@ def test_router_returns_to_a2_when_negative_evidence_is_confident() -> None:
     )
 
     assert decision.stage == "A2"
+    assert decision.metadata["should_spawn_alternative_hypotheses"] is True

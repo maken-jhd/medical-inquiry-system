@@ -141,6 +141,7 @@ class GraphRetriever:
     ) -> List[HypothesisCandidate]:
         feature_names = self._collect_positive_feature_names(linked_features, patient_context, session_state)
         limit = top_k or self.config.r1_limit
+        link_similarity_map = self._build_link_similarity_map(linked_features)
 
         if len(feature_names) == 0:
             return []
@@ -150,23 +151,42 @@ class GraphRetriever:
 
         rows = self.client.run_query(
             """
-            MATCH (feature)-[r]-(candidate)
-            WHERE type(r) IN $relation_types
-              AND any(label IN labels(feature) WHERE label IN $feature_labels)
-              AND (
-                    coalesce(feature.name, '') IN $feature_names
-                 OR coalesce(feature.canonical_name, '') IN $feature_names
-                 OR any(alias IN coalesce(feature.aliases, []) WHERE alias IN $feature_names)
-              )
-              AND any(label IN labels(candidate) WHERE label IN $candidate_labels)
-            WITH candidate, feature, count(r) AS relation_count
+            CALL () {
+              MATCH (feature)-[r]->(candidate)
+              WHERE type(r) IN $relation_types
+                AND any(label IN labels(feature) WHERE label IN $feature_labels)
+                AND (
+                      coalesce(feature.name, '') IN $feature_names
+                   OR coalesce(feature.canonical_name, '') IN $feature_names
+                   OR any(alias IN coalesce(feature.aliases, []) WHERE alias IN $feature_names)
+                )
+                AND any(label IN labels(candidate) WHERE label IN $candidate_labels)
+              RETURN candidate, feature, r, 1.0 AS direction_confidence
+              UNION
+              MATCH (candidate)-[r]->(feature)
+              WHERE type(r) IN $relation_types
+                AND any(label IN labels(feature) WHERE label IN $feature_labels)
+                AND (
+                      coalesce(feature.name, '') IN $feature_names
+                   OR coalesce(feature.canonical_name, '') IN $feature_names
+                   OR any(alias IN coalesce(feature.aliases, []) WHERE alias IN $feature_names)
+                )
+                AND any(label IN labels(candidate) WHERE label IN $candidate_labels)
+              RETURN candidate, feature, r, 0.65 AS direction_confidence
+            }
+            WITH candidate,
+                 feature,
+                 collect(direction_confidence) AS direction_confidences,
+                 count(r) AS relation_count
             RETURN candidate.id AS node_id,
                    labels(candidate)[0] AS label,
                    coalesce(candidate.canonical_name, candidate.name) AS name,
-                   relation_count + coalesce(candidate.weight, 0.0) AS score,
+                   relation_count AS relation_count,
+                   coalesce(candidate.weight, 0.0) AS candidate_weight,
+                   reduce(total = 0.0, item IN direction_confidences | total + item) / size(direction_confidences) AS direction_confidence,
                    collect(DISTINCT coalesce(feature.canonical_name, feature.name)) AS evidence_names,
                    collect(DISTINCT feature.id) AS evidence_node_ids
-            ORDER BY score DESC, name
+            ORDER BY relation_count DESC, candidate_weight DESC, name
             LIMIT $limit
             """,
             {
@@ -181,16 +201,27 @@ class GraphRetriever:
         candidates: List[HypothesisCandidate] = []
 
         for row in rows:
+            evidence_names = row.get("evidence_names", [])
+            link_similarity = self._estimate_link_similarity(evidence_names, link_similarity_map)
+            direction_confidence = float(row.get("direction_confidence", 1.0))
+            score = (
+                float(row.get("relation_count", 0.0)) * 0.5
+                + float(row.get("candidate_weight", 0.0)) * 0.25
+                + direction_confidence * 0.15
+                + link_similarity * 0.10
+            )
             candidates.append(
                 HypothesisCandidate(
                     node_id=row["node_id"],
                     name=row["name"],
                     label=row["label"],
-                    score=float(row["score"]),
-                    reasoning=f"R1 根据核心特征 {', '.join(row.get('evidence_names', [])[:4])} 检索到该候选。",
+                    score=score,
+                    reasoning=f"R1 根据核心特征 {', '.join(evidence_names[:4])} 检索到该候选。",
                     metadata={
-                        "evidence_names": row.get("evidence_names", []),
+                        "evidence_names": evidence_names,
                         "evidence_node_ids": row.get("evidence_node_ids", []),
+                        "direction_confidence": direction_confidence,
+                        "entity_link_similarity": link_similarity,
                     },
                 )
             )
@@ -393,6 +424,44 @@ class GraphRetriever:
             return False
 
         return max(scores) < self.config.kg_similarity_threshold
+
+    # 汇总已链接实体的相似度，供 R1 候选分数融合。
+    def _build_link_similarity_map(
+        self,
+        linked_features: Sequence[LinkedEntity | ClinicalFeatureItem | KeyFeature],
+    ) -> dict[str, float]:
+        similarity_map: dict[str, float] = {}
+
+        for feature in linked_features:
+            if not isinstance(feature, LinkedEntity):
+                continue
+
+            if feature.canonical_name:
+                similarity_map[feature.canonical_name] = max(
+                    feature.similarity,
+                    similarity_map.get(feature.canonical_name, 0.0),
+                )
+
+            similarity_map[feature.mention] = max(feature.similarity, similarity_map.get(feature.mention, 0.0))
+
+        return similarity_map
+
+    # 估计候选假设所依赖特征的实体链接可信度。
+    def _estimate_link_similarity(
+        self,
+        evidence_names: Sequence[str],
+        similarity_map: dict[str, float],
+    ) -> float:
+        scores = [
+            similarity_map[name]
+            for name in evidence_names
+            if name in similarity_map
+        ]
+
+        if len(scores) == 0:
+            return 0.0
+
+        return sum(scores) / len(scores)
 
     # 将 R1 候选转换为系统使用的假设分数对象。
     def _build_hypothesis_scores(self, candidates: Iterable[HypothesisCandidate]) -> List[HypothesisScore]:

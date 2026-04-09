@@ -88,12 +88,40 @@ class MctsEngine:
 
     # 在搜索树中选择当前最值得继续向下扩展的叶子节点。
     def select_leaf(self, tree: SearchTree) -> Optional[TreeNode]:
-        leaf_nodes = [node for node in tree.get_leaf_nodes() if not node.terminal]
-
-        if len(leaf_nodes) == 0:
+        if tree.root_id is None:
             return None
 
-        return sorted(leaf_nodes, key=lambda item: (-item.average_value, item.depth, item.node_id))[0]
+        current = tree.get_node(tree.root_id)
+
+        while True:
+            if current.terminal:
+                return None
+
+            if len(current.children_ids) == 0:
+                return current
+
+            children = [
+                tree.get_node(child_id)
+                for child_id in current.children_ids
+                if not tree.get_node(child_id).terminal
+            ]
+
+            if len(children) == 0:
+                tree.mark_terminal(current.node_id, {"terminal_reason": "all_children_terminal"})
+                return None
+
+            parent_visit_count = max(current.visit_count, 1)
+            current = sorted(
+                children,
+                key=lambda item: (
+                    -self.score_tree_node(item, parent_visit_count),
+                    item.depth,
+                    item.node_id,
+                ),
+            )[0]
+
+            if current.visit_count == 0 or len(current.children_ids) == 0:
+                return current
 
     # 将候选动作扩展为搜索树中的子节点。
     def expand_node(
@@ -110,6 +138,11 @@ class MctsEngine:
                 break
 
             child_id = f"{parent.node_id}::{action.action_id}"
+
+            if child_id in tree.nodes:
+                created.append(tree.get_node(child_id))
+                continue
+
             child = TreeNode(
                 node_id=child_id,
                 state_signature=child_id,
@@ -120,7 +153,10 @@ class MctsEngine:
                 metadata={
                     "action": action,
                     "hypothesis_id": action.hypothesis_id,
+                    "topic_id": action.topic_id,
                     "target_node_id": action.target_node_id,
+                    "target_node_name": action.target_node_name,
+                    "prior_score": action.prior_score,
                 },
             )
             tree.add_node(child)
@@ -157,3 +193,39 @@ class MctsEngine:
             log(parent_visit_count + 2) / visit_count
         )
         return blended_value + exploration
+
+    # 按树节点访问统计计算用于 tree policy 的 UCT 分数。
+    def score_tree_node(self, node: TreeNode, parent_visit_count: int) -> float:
+        prior_score = float(node.metadata.get("prior_score", 0.0)) * self.config.prior_weight
+
+        if node.visit_count == 0:
+            exploration = self.config.exploration_constant * sqrt(log(parent_visit_count + 2))
+            return prior_score + exploration + self.config.unvisited_bonus
+
+        exploration = self.config.exploration_constant * sqrt(
+            log(parent_visit_count + 2) / node.visit_count
+        )
+        return node.average_value + prior_score + exploration
+
+    # 从根节点的子节点中选择当前平均价值最高的动作。
+    def select_root_action(self, tree: SearchTree) -> Optional[MctsAction]:
+        if tree.root_id is None:
+            return None
+
+        root = tree.get_node(tree.root_id)
+        children = [tree.get_node(child_id) for child_id in root.children_ids]
+
+        if len(children) == 0:
+            return None
+
+        best_child = sorted(
+            children,
+            key=lambda item: (
+                -item.average_value,
+                -item.visit_count,
+                -float(item.metadata.get("prior_score", 0.0)),
+                item.node_id,
+            ),
+        )[0]
+        action = best_child.metadata.get("action")
+        return action if isinstance(action, MctsAction) else None
