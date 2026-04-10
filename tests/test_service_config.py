@@ -17,6 +17,8 @@ def test_load_brain_config_reads_yaml_file(tmp_path: Path) -> None:
                 "  agent_eval_mode: llm_verifier",
                 "a4:",
                 "  use_llm_deductive_judge: true",
+                "repair:",
+                "  enable_tree_reroot: false",
                 "stop:",
                 "  min_turn_index_before_final_answer: 3",
             ]
@@ -29,4 +31,5 @@ def test_load_brain_config_reads_yaml_file(tmp_path: Path) -> None:
     assert config["search"]["num_rollouts"] == 5
     assert config["path_evaluation"]["agent_eval_mode"] == "llm_verifier"
     assert config["a4"]["use_llm_deductive_judge"] is True
+    assert config["repair"]["enable_tree_reroot"] is False
     assert config["stop"]["min_turn_index_before_final_answer"] == 3

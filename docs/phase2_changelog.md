@@ -533,7 +533,301 @@
 
 - 降低了跨轮复用旧树时把历史 root action 误带进新状态的风险
 - 对问诊这种强状态依赖任务来说，这一步比单纯“复用一棵树”更稳健
-## 十二、当前仍未彻底解决的问题
+
+## 十二、阶段 10：repair 行为可观测化与 focused replay 验证
+
+### 阶段目标
+
+- 不再只从最终 `completed / max_turn_reached` 判断 repair 是否生效
+- 让每一轮真实回放都能直接观察：
+  - verifier 为什么拒停
+  - root best action 是什么
+  - repair 后实际选了什么动作
+  - 是否发生 reroot
+  - 是否仍在重复追问
+
+### 核心改动
+
+#### 1. repair 可观测字段显式输出
+
+- `brain/types.py`
+  - `SearchResult` 增加：
+    - `root_best_action`
+    - `repair_selected_action`
+    - `verifier_repair_context`
+- `brain/report_builder.py`
+  - `search_report` 与 `final_report` 现在都会保留：
+    - `selected_action`
+    - `root_best_action`
+    - `repair_selected_action`
+    - `repair_context`
+- `brain/service.py`
+  - 新增 `_build_observable_repair_context()`
+  - 将 `reject_reason / recommended_next_evidence / alternative_candidates / repair_mode / rerooted / previous_selected_action / new_selected_action` 统一写回可观测上下文
+
+解决的问题：
+
+- 失败 replay 不再需要靠人工猜测“系统到底为什么改问这个问题”
+- 可以明确区分：
+  - tree 本来想问什么
+  - repair 最终改问了什么
+  - 改问背后对应的是哪类拒停原因
+
+#### 2. 单病例 smoke 摘要脚本增强
+
+- `scripts/run_single_case_smoke.py`
+  - 新增 `--summary-only`
+  - 新增 `--output-file`
+  - 输出 turn 级紧凑摘要：
+    - `reject_reason`
+    - `recommended_next_evidence`
+    - `alternative_candidates`
+    - `selected_action`
+    - `root_best_action`
+    - `repair_selected_action`
+    - `route_after_a4_stage`
+    - `best_answer_name`
+    - `stop_reason`
+    - `same_question_as_previous`
+
+解决的问题：
+
+- 真实 replay 不再只能看超长原始 `search_report`
+- 每个 turn 的 repair 行为都可以直接落盘，适合后续论文和误差分析
+
+### focused replay 的真实验证结果
+
+本轮使用真实 Neo4j + DashScope `qwen3-max` 运行了两例问题病例：
+
+- [single_case_smoke_pcp_typical_001_v2.jsonl](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_replay/single_case_smoke_pcp_typical_001_v2.jsonl)
+- [single_case_smoke_concealing_risk_001_v2.jsonl](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_replay/single_case_smoke_concealing_risk_001_v2.jsonl)
+
+#### 1. `concealing_risk_001`
+
+观察到：
+
+- `turn_0` 时：
+  - `root_best_action = CD4+ T淋巴细胞计数 < 200/μL`
+  - `repair_selected_action = 淋巴结肿大`
+  - `reject_reason = missing_key_support`
+- `turn_2` 时：
+  - `root_best_action = 皮疹`
+  - `repair_selected_action = 关节疼痛`
+- `turn_3` 时：
+  - `root_best_action = 皮疹`
+  - `repair_selected_action = 咽痛`
+- 各轮 `same_question_as_previous = false`
+
+说明：
+
+- verifier 拒停后，系统已经不再机械追问 root best action
+- repair flow 在真实链路中确实能把问题切换到其他区分性节点
+- 当前至少已经摆脱了“拒停后原地重复同一个 node”的旧问题
+
+#### 2. `pcp_typical_001`
+
+观察到：
+
+- `turn_1` 时：
+  - `root_best_action = 动脉血氧分压 (PaO2) < 70 mmHg`
+  - `repair_selected_action = CD4+ T淋巴细胞计数 < 200/μL`
+  - `rerooted = true`
+  - `reroot_reason = state_signature_changed`
+- `turn_2` 与 `turn_3` 时：
+  - 问题继续在 `CD4 / PaO2 / 肺泡-动脉氧分压差` 这些支持性实验室证据之间切换
+  - `same_question_as_previous = false`
+  - 但 `alternative_candidates` 仍为空
+
+说明：
+
+- repair 策略已经能避免重复同一个问题
+- reroot 也确实在真实路径里发生
+- 但当前 repair 仍主要是“围绕主假设补支持证据”
+- 还没有充分体现“切向强 alternative 的区分性提问”
+
+### 这一阶段的结论
+
+这一轮 focused replay 最重要的结论不是“准确率提高了多少”，而是：
+
+- 系统已经从“verifier 拒停后原地踏步”推进到“verifier 拒停后能够换一个问题继续问”
+
+但同时也明确暴露出下一步最应该优化的位置：
+
+- `repair-aware A3`
+- 即让 repair action 不只是换一个未问过的问题
+- 而是更明确地根据：
+  - `missing_key_support`
+  - `strong_alternative_not_ruled_out`
+  - `trajectory_insufficient`
+  选择真正更有修复价值的问题
+
+### 基于 focused replay 的后续修复：repair-aware A3
+
+在完成上述 focused replay 后，又进一步对 `A3` 做了面向 repair 的补强，核心是让 verifier 指出的“证据缺口”能够更直接地影响下一问的构造与排序。
+
+#### 1. 动作构造层增强
+
+- `brain/action_builder.py`
+  - 将 `recommended_next_evidence` 的利用从近似 exact match，升级为：
+    - 文本归一化
+    - 医学关键词标签
+    - 证据家族匹配
+  - 新增 metadata：
+    - `recommended_match_score`
+    - `alternative_overlap`
+    - `evidence_tags`
+
+解决的问题：
+
+- verifier 推荐“询问免疫状态 / 获取胸部CT / 检测 β-D-葡聚糖”时，不再因为名称写法不同而完全匹配不上图谱节点
+- repair scoring 能更清楚地区分“这个动作是否真的在补 verifier 指出的缺口”
+
+#### 2. service repair 选问逻辑增强
+
+- `brain/service.py`
+  - `missing_key_support` 下会同时考虑：
+    - 推荐证据匹配度
+    - question type 多样性
+    - 证据家族是否与上一问过于接近
+  - `strong_alternative_not_ruled_out` 下：
+    - 不再只从当前 top1 hypothesis 取动作
+    - 会把强备选 hypothesis 的动作也纳入 repair 候选池
+
+解决的问题：
+
+- 下一问不再只是“挑一个没问过的动作”
+- 而是更接近“挑一个最能修复当前 verifier 缺口的动作”
+
+#### 3. 新一轮真实 replay 信号
+
+在完成上述修复后，再次运行：
+
+- [single_case_smoke_pcp_typical_001_v3.jsonl](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_replay/single_case_smoke_pcp_typical_001_v3.jsonl)
+- [single_case_smoke_concealing_risk_001_v3.jsonl](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_replay/single_case_smoke_concealing_risk_001_v3.jsonl)
+
+观察到：
+
+- `turn_0`：
+  - `root_best_action = 胸部CT磨玻璃影`
+  - `repair_selected_action = CD4+ T淋巴细胞计数 < 200/μL`
+- `turn_1`：
+  - 在 CD4 未确认后，下一问切回 `胸部CT磨玻璃影`
+- `turn_2`：
+  - `root_best_action = 动脉血氧分压 (PaO2) < 70 mmHg`
+  - `repair_selected_action = (1,3)-β-D-葡聚糖检测 (G试验)`
+- `turn_3`：
+  - `root_best_action = 动脉血氧分压 (PaO2) < 70 mmHg`
+  - `repair_selected_action = 胸部CT检查`
+
+这和上一版 [single_case_smoke_pcp_typical_001_v2.jsonl](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_replay/single_case_smoke_pcp_typical_001_v2.jsonl) 相比，最大的变化是：
+
+- 不再主要在 `CD4 / PaO2 / 肺泡-动脉氧分压差` 之间打转
+- 开始切向：
+  - 免疫状态
+  - 影像学证据
+  - 病原 / 真菌学证据
+
+这一信号说明：
+
+- repair-aware A3 已经把真实链路中的下一问选择，从“补同类支持证据”推进到了“补不同类型的关键缺口证据”
+- 同时在 `concealing_risk_001` 中，原先已经成立的“从 `CD4` 切到 `淋巴结肿大 / 关节疼痛`”这类 repair 行为仍然保留，没有明显回退
+
+## 十三、阶段 11：focused repair ablation
+
+### 阶段目标
+
+- 不再只看“最终是否拒停”
+- 通过小规模对照实验判断：
+  - verifier-driven reshuffle 是否真的改变 hypothesis 竞争关系
+  - best repair action 是否真的负责把问题从 root best 改到修复性问题
+  - reroot 是否真的有助于维持搜索树与当前状态一致
+
+### 实验设置
+
+本轮只跑 focused cases，避免在全量病例上消耗过多外部模型调用：
+
+- `pcp_typical_001`
+- `concealing_risk_001`
+- 每例 `max_turns = 3`
+- 使用真实 Neo4j 与 DashScope `qwen3-max`
+
+输出目录：
+
+- [ablation_baseline_v1](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_replay/ablation_baseline_v1)
+- [ablation_no_reshuffle_v1](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_replay/ablation_no_reshuffle_v1)
+- [ablation_no_best_repair_action_v1](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_replay/ablation_no_best_repair_action_v1)
+- [ablation_no_reroot_v1](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_replay/ablation_no_reroot_v1)
+
+### 新增实验开关
+
+- `configs/brain.yaml`
+  - `repair.enable_verifier_hypothesis_reshuffle`
+  - `repair.enable_best_repair_action`
+  - `repair.enable_tree_reroot`
+- `scripts/run_focused_repair_replay.py`
+  - 新增 `--disable-verifier-reshuffle`
+  - 新增 `--disable-best-repair-action`
+  - 新增 `--disable-reroot`
+  - 每组输出 `focused_metrics.json`
+
+### 指标对照
+
+| 组别 | stop reason | repair turns | repair override turns | rerooted turns | repeated question turns |
+| --- | --- | ---: | ---: | ---: | ---: |
+| baseline | `verifier_rejected_stop: 2` | 8 | 6 | 6 | 0 |
+| no verifier reshuffle | `verifier_rejected_stop: 2` | 8 | 5 | 6 | 0 |
+| no best repair action | `verifier_rejected_stop: 2` | 7 | 0 | 6 | 0 |
+| no reroot | `no_answer_score: 2` | 1 | 1 | 0 | 0 |
+
+### 关键观察
+
+#### 1. best repair action 是当前最直接的动作切换来源
+
+关闭 `best repair action` 后：
+
+- `repair_override_turns` 从 baseline 的 `6` 下降到 `0`
+- 说明 root action filtering 本身可以避免重复节点，但不能负责“把 root best 改成修复性问题”
+- 对应问题序列也更像继续沿 root 排名走，而不是按 verifier 缺口修补
+
+#### 2. reroot 对保持搜索树与状态一致很关键
+
+关闭 `reroot` 后：
+
+- `rerooted_turns` 变为 `0`
+- `repair_turns` 从 baseline 的 `8` 降到 `1`
+- 最终 `stop_reason` 退化为 `no_answer_score`
+
+说明：
+
+- 在强状态依赖的问诊场景里，完全复用旧树会让后续搜索报告失去足够有效的 answer score
+- 当前 evidence 更新后仍需要按状态签名换根，否则 verifier repair 很难稳定进入后续评分与问法选择
+
+#### 3. verifier-driven reshuffle 在本轮 focused cases 中影响较小
+
+关闭 `verifier-driven reshuffle` 后：
+
+- 总体 stop reason 与 reroot 次数没有明显变化
+- `repair_override_turns` 只从 `6` 变成 `5`
+
+原因分析：
+
+- 本轮两例的主要拒停原因都是 `missing_key_support`
+- `alternative_candidates` 大多为空或难以映射到当前 KG hypothesis
+- 因此 reshuffle 的效果没有像 `strong_alternative_not_ruled_out` 场景那样充分显现
+
+这提示后续如果要验证 reshuffle 的价值，需要补充更适合的 focused case，例如 verifier 明确指出“强备选诊断未排除”的病例。
+
+### ablation 阶段结论
+
+本轮小规模 ablation 支持一个更清晰的结论：
+
+- `best repair action` 是“拒停后换成修复性问题”的直接来源
+- `reroot` 是“让旧树不污染新状态、让后续仍有有效评分”的必要机制
+- `verifier-driven reshuffle` 在当前两例中信号较弱，需要构造更强 alternative 场景继续验证
+
+这一结果对论文写作很有价值，因为它能把“verifier 自己在起作用”与“repair 分流 / reroot / A3 选问策略在起作用”拆开说明。
+
+## 十四、当前仍未彻底解决的问题
 
 虽然第二阶段已经从脚手架推进到了真实 smoke 可跑，但以下问题仍然需要继续记录和补强：
 
@@ -571,7 +865,7 @@
 - 当前病例集可以做 smoke
 - 但还不足以形成稳定、可信的论文实验结论
 
-## 十三、适合直接写进论文的表述点
+## 十五、适合直接写进论文的表述点
 
 为了方便后续论文撰写，可以直接从本 changelog 中提炼下面几类内容：
 
@@ -597,7 +891,7 @@
 - 但还不能据此宣称诊断质量已经达到最终目标
 - 这为论文中如实陈述系统能力边界提供了依据
 
-## 十四、当前阶段结论
+## 十六、当前阶段结论
 
 到目前为止，第二阶段已经完成了一个重要转折：
 

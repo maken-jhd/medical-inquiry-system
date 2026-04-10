@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
@@ -33,6 +33,7 @@ from .types import (
     A4DeductiveResult,
     EvidenceState,
     FinalAnswerScore,
+    HypothesisScore,
     LinkedEntity,
     MctsAction,
     PatientContext,
@@ -65,6 +66,16 @@ class BrainDependencies:
     simulation_engine: SimulationEngine | None = None
     trajectory_evaluator: TrajectoryEvaluator | None = None
     llm_client: LlmClient | None = None
+    repair_policy: "RepairPolicyConfig" = field(default_factory=lambda: RepairPolicyConfig())
+
+
+@dataclass
+class RepairPolicyConfig:
+    """控制 verifier repair 与 reroot 的开关，便于做小规模 ablation。"""
+
+    enable_verifier_hypothesis_reshuffle: bool = True
+    enable_best_repair_action: bool = True
+    enable_tree_reroot: bool = True
 
 
 class ConsultationBrain:
@@ -326,6 +337,7 @@ class ConsultationBrain:
                 "rollouts_requested": self.deps.mcts_engine.config.num_rollouts,
                 "rollouts_executed": rollout_executed,
                 "tree_node_count": len(tree.nodes),
+                "tree_refresh": dict(state.metadata.get("last_tree_refresh", {})),
             },
         )
         state.metadata["last_search_result"] = search_result
@@ -437,14 +449,21 @@ class ConsultationBrain:
 
         if repair_context is not None:
             self._apply_verifier_repair_strategy(session_id, repair_context)
-            search_result.verifier_repair_context = dict(repair_context)
-            selected_action = self._choose_repair_action(session_id, search_result, repair_context)
-            search_result.repair_selected_action = selected_action
+            if bool(self.deps.repair_policy.enable_best_repair_action):
+                selected_action = self._choose_repair_action(session_id, search_result, repair_context)
+                search_result.repair_selected_action = selected_action
+            else:
+                selected_action = default_search_action
         elif default_search_action is not None:
             selected_action = default_search_action
 
         if self._has_search_signal(search_result):
             search_result.selected_action = selected_action
+            search_result.verifier_repair_context = self._build_observable_repair_context(
+                search_result,
+                repair_context,
+                selected_action,
+            )
 
         if self._should_emit_final_report(search_result, selected_action, stop_decision, accept_decision):
             final_report = (
@@ -581,18 +600,40 @@ class ConsultationBrain:
         top_hypothesis_id = self._get_top_hypothesis_id(state)
         root_signature = self.deps.mcts_engine.build_state_signature(state, top_hypothesis_id)
         force_tree_refresh = bool(state.metadata.pop("force_tree_refresh", False))
+        enable_tree_reroot = bool(self.deps.repair_policy.enable_tree_reroot)
+        rerooted = False
+        reroot_reason = ""
 
         if tree is not None and tree.root_id is not None:
             root = tree.get_node(tree.root_id)
             root_top_hypothesis_id = str(root.metadata.get("top_hypothesis_id") or "") or None
 
             if not force_tree_refresh and root.state_signature == root_signature and root_top_hypothesis_id == top_hypothesis_id:
+                state.metadata["last_tree_refresh"] = {
+                    "rerooted": False,
+                    "reason": "",
+                    "root_signature": root_signature,
+                    "top_hypothesis_id": top_hypothesis_id,
+                }
+                return tree
+
+            if not enable_tree_reroot:
+                state.metadata["last_tree_refresh"] = {
+                    "rerooted": False,
+                    "reason": "reroot_disabled",
+                    "root_signature": root.state_signature,
+                    "top_hypothesis_id": root_top_hypothesis_id,
+                }
                 return tree
 
         if force_tree_refresh:
-            state.metadata["tree_refresh_reason"] = state.metadata.get("tree_refresh_reason", "forced_refresh")
+            rerooted = True
+            reroot_reason = state.metadata.get("tree_refresh_reason", "forced_refresh")
+            state.metadata["tree_refresh_reason"] = reroot_reason
         elif tree is not None:
-            state.metadata["tree_refresh_reason"] = state.metadata.get("tree_refresh_reason", "state_signature_changed")
+            rerooted = True
+            reroot_reason = state.metadata.get("tree_refresh_reason", "state_signature_changed")
+            state.metadata["tree_refresh_reason"] = reroot_reason
 
         tree = SearchTree()
         tree.add_node(
@@ -611,6 +652,12 @@ class ConsultationBrain:
             )
         )
         tracker.bind_search_tree(session_id, tree)
+        state.metadata["last_tree_refresh"] = {
+            "rerooted": rerooted,
+            "reason": reroot_reason,
+            "root_signature": root_signature,
+            "top_hypothesis_id": top_hypothesis_id,
+        }
         return tree
 
     # 从当前状态中读取 top1 hypothesis id，辅助搜索树决定是否需要换根。
@@ -762,7 +809,7 @@ class ConsultationBrain:
         current_top_hypothesis_id = self._get_top_hypothesis_id(state)
         reject_reason = str(repair_context.get("reject_reason", "missing_key_support"))
 
-        if len(state.candidate_hypotheses) > 0:
+        if bool(self.deps.repair_policy.enable_verifier_hypothesis_reshuffle) and len(state.candidate_hypotheses) > 0:
             updated = self.deps.hypothesis_manager.apply_verifier_repair(
                 state.candidate_hypotheses,
                 current_answer_id=repair_context.get("current_answer_id"),
@@ -775,7 +822,9 @@ class ConsultationBrain:
         refreshed_state = self.deps.state_tracker.get_session(session_id)
         new_top_hypothesis_id = self._get_top_hypothesis_id(refreshed_state)
         refreshed_state.metadata["verifier_repair_context"] = dict(repair_context)
-        refreshed_state.metadata["force_tree_refresh"] = bool(repair_context.get("force_tree_refresh", True))
+        refreshed_state.metadata["force_tree_refresh"] = bool(
+            self.deps.repair_policy.enable_tree_reroot and repair_context.get("force_tree_refresh", True)
+        )
 
         if current_top_hypothesis_id != new_top_hypothesis_id:
             refreshed_state.metadata["tree_refresh_reason"] = "top_hypothesis_changed_after_verifier"
@@ -790,6 +839,7 @@ class ConsultationBrain:
         repair_context: dict,
     ) -> MctsAction | None:
         state = self.deps.state_tracker.get_session(session_id)
+        reject_reason = str(repair_context.get("reject_reason", "missing_key_support"))
         current_hypothesis = sorted(
             state.candidate_hypotheses,
             key=lambda item: (-item.score, item.name),
@@ -798,19 +848,37 @@ class ConsultationBrain:
         if current_hypothesis is None:
             return self.choose_next_question_from_search(session_id, search_result)
 
-        alternatives = [
-            item
-            for item in state.candidate_hypotheses
-            if item.node_id != current_hypothesis.node_id
-        ][: self.deps.hypothesis_manager.config.expand_top_k_hypotheses]
-        rows = self.deps.retriever.retrieve_r2_expected_evidence(current_hypothesis, state)
-        actions = self.deps.action_builder.build_verification_actions(
-            rows,
-            hypothesis_id=current_hypothesis.node_id,
-            topic_id=current_hypothesis.label,
-            competing_hypotheses=alternatives,
+        repair_hypotheses = self._select_repair_hypotheses(
+            state,
             current_hypothesis=current_hypothesis,
+            repair_context=repair_context,
         )
+        actions: list[MctsAction] = []
+        seen_action_keys: set[tuple[str, str]] = set()
+
+        for hypothesis in repair_hypotheses:
+            alternatives = [
+                item
+                for item in state.candidate_hypotheses
+                if item.node_id != hypothesis.node_id
+            ][: self.deps.hypothesis_manager.config.expand_top_k_hypotheses]
+            rows = self.deps.retriever.retrieve_r2_expected_evidence(hypothesis, state)
+
+            for action in self.deps.action_builder.build_verification_actions(
+                rows,
+                hypothesis_id=hypothesis.node_id,
+                topic_id=hypothesis.label,
+                competing_hypotheses=alternatives,
+                current_hypothesis=hypothesis,
+            ):
+                action_key = (action.hypothesis_id or "", action.target_node_id)
+
+                if action_key in seen_action_keys:
+                    continue
+
+                seen_action_keys.add(action_key)
+                actions.append(action)
+
         available_actions = [
             item
             for item in actions
@@ -821,15 +889,79 @@ class ConsultationBrain:
             return self.choose_next_question_from_search(session_id, search_result)
 
         recent_question_type = self._get_recent_question_type(state)
+        recent_evidence_tags = self._get_recent_evidence_tags(state)
         ranked = sorted(
             available_actions,
             key=lambda item: (
-                -self._score_repair_action(item, repair_context, recent_question_type),
+                -self._score_repair_action(
+                    item,
+                    repair_context,
+                    recent_question_type=recent_question_type,
+                    recent_evidence_tags=recent_evidence_tags,
+                ),
                 -item.prior_score,
                 item.target_node_name,
             ),
         )
         return ranked[0]
+
+    # 在 repair 阶段决定当前要从哪些 hypothesis 上取下一批候选动作。
+    def _select_repair_hypotheses(
+        self,
+        state: SessionState,
+        current_hypothesis: HypothesisScore,
+        repair_context: dict,
+    ) -> list[HypothesisScore]:
+        reject_reason = str(repair_context.get("reject_reason", "missing_key_support"))
+        ranked = sorted(state.candidate_hypotheses, key=lambda item: (-item.score, item.name))
+        selected: list[HypothesisScore] = [current_hypothesis]
+
+        if reject_reason != "strong_alternative_not_ruled_out":
+            return selected
+
+        alternative_candidates = self._normalize_alternative_candidates(repair_context.get("alternative_candidates", []))
+
+        for hypothesis in ranked:
+            if hypothesis.node_id == current_hypothesis.node_id:
+                continue
+
+            if self._matches_repair_alternative(hypothesis, alternative_candidates):
+                selected.append(hypothesis)
+
+        if len(selected) == 1:
+            for hypothesis in ranked:
+                if hypothesis.node_id == current_hypothesis.node_id:
+                    continue
+
+                selected.append(hypothesis)
+
+                if len(selected) >= 3:
+                    break
+
+        return selected[:3]
+
+    # 判断某个 hypothesis 是否命中了 verifier 指出的强备选候选。
+    def _matches_repair_alternative(
+        self,
+        hypothesis: HypothesisScore,
+        alternative_candidates: list[dict],
+    ) -> bool:
+        normalized_name = self._normalize_match_text(hypothesis.name)
+
+        for item in alternative_candidates:
+            answer_id = str(item.get("answer_id") or "").strip()
+            answer_name = self._normalize_match_text(str(item.get("answer_name") or ""))
+
+            if len(answer_id) > 0 and answer_id == hypothesis.node_id:
+                return True
+
+            if len(answer_name) == 0:
+                continue
+
+            if answer_name == normalized_name or answer_name in normalized_name or normalized_name in answer_name:
+                return True
+
+        return False
 
     # 按 verifier 揭示的缺口类型计算 repair score。
     def _score_repair_action(
@@ -837,23 +969,58 @@ class ConsultationBrain:
         action: MctsAction,
         repair_context: dict,
         recent_question_type: str | None,
+        recent_evidence_tags: list[str],
     ) -> float:
         reject_reason = str(repair_context.get("reject_reason", "missing_key_support"))
         discriminative_gain = float(action.metadata.get("discriminative_gain", 0.0))
         novelty_score = float(action.metadata.get("novelty_score", 0.0))
         recommended_bonus = float(action.metadata.get("recommended_evidence_bonus", 0.0))
+        recommended_match_score = float(action.metadata.get("recommended_match_score", 0.0))
+        alternative_overlap = float(action.metadata.get("alternative_overlap", 0.0))
         patient_burden = float(action.metadata.get("patient_burden", 0.0))
         question_type_hint = str(action.metadata.get("question_type_hint", "symptom"))
+        evidence_tags = self._normalize_string_list(action.metadata.get("evidence_tags", []))
         score = action.prior_score
+        type_diversity_bonus = 0.35 if recent_question_type is not None and question_type_hint != recent_question_type else 0.0
+        same_type_penalty = 0.2 if recent_question_type is not None and question_type_hint == recent_question_type else 0.0
+        shared_evidence_family = len(set(recent_evidence_tags) & set(evidence_tags)) > 0
+        family_diversity_bonus = 0.35 if len(recent_evidence_tags) > 0 and not shared_evidence_family else 0.0
+        family_repeat_penalty = 0.3 if shared_evidence_family else 0.0
 
         if reject_reason == "missing_key_support":
-            return score + recommended_bonus * 2.8 + discriminative_gain * 0.9 - patient_burden * 0.15
+            return (
+                score
+                + recommended_match_score * 2.6
+                + recommended_bonus * 1.2
+                + discriminative_gain * 0.8
+                + type_diversity_bonus
+                + family_diversity_bonus
+                - same_type_penalty * 0.5
+                - family_repeat_penalty
+                - patient_burden * 0.15
+            )
 
         if reject_reason == "strong_alternative_not_ruled_out":
-            return score + discriminative_gain * 1.6 + recommended_bonus * 1.2 - patient_burden * 0.1
+            current_answer_id = str(repair_context.get("current_answer_id") or "")
+            alternative_hypothesis_bonus = 0.55 if len(current_answer_id) > 0 and action.hypothesis_id != current_answer_id else 0.0
+            return (
+                score
+                + discriminative_gain * 1.75
+                + (1.0 - alternative_overlap) * 0.75
+                + recommended_match_score * 1.35
+                + alternative_hypothesis_bonus
+                + family_diversity_bonus
+                - patient_burden * 0.1
+            )
 
-        type_diversity_bonus = 0.45 if recent_question_type is not None and question_type_hint != recent_question_type else 0.0
-        return score + novelty_score * 1.7 + type_diversity_bonus - patient_burden * 0.08
+        return (
+            score
+            + novelty_score * 1.85
+            + type_diversity_bonus * 1.4
+            + family_diversity_bonus
+            - same_type_penalty * 0.4
+            - patient_burden * 0.08
+        )
 
     # 返回最近一次真实追问的 question type，用于 trajectory_insufficient 下切换问法。
     def _get_recent_question_type(self, state: SessionState) -> str | None:
@@ -870,6 +1037,22 @@ class ConsultationBrain:
                     return str(metadata.get("question_type_hint", "symptom"))
 
         return None
+
+    # 返回最近一次追问的证据类别标签，用于 repair-aware A3 避免围绕同一家族打转。
+    def _get_recent_evidence_tags(self, state: SessionState) -> list[str]:
+        for key in ("last_answered_action", "last_selected_action"):
+            action = state.metadata.get(key)
+
+            if isinstance(action, MctsAction):
+                return self._normalize_string_list(action.metadata.get("evidence_tags", []))
+
+            if isinstance(action, dict):
+                metadata = action.get("metadata", {})
+
+                if isinstance(metadata, dict):
+                    return self._normalize_string_list(metadata.get("evidence_tags", []))
+
+        return []
 
     # 将 verifier 拒停原因映射为更明确的 repair 阶段语义。
     def _map_reject_reason_to_stage(self, reject_reason: str) -> str:
@@ -894,6 +1077,22 @@ class ConsultationBrain:
             values.append(text)
 
         return values
+
+    # 对名称做轻量归一化，用于 hypothesis / verifier 候选名匹配。
+    def _normalize_match_text(self, text: str) -> str:
+        return (
+            text.strip()
+            .lower()
+            .replace(" ", "")
+            .replace("（", "(")
+            .replace("）", ")")
+            .replace("，", ",")
+            .replace("。", "")
+            .replace("、", "")
+            .replace("-", "")
+            .replace("_", "")
+            .replace("/", "")
+        )
 
     # 把 verifier 的替代诊断列表标准化为 dict 列表。
     def _normalize_alternative_candidates(self, payload: object) -> list[dict]:
@@ -938,6 +1137,49 @@ class ConsultationBrain:
 
         return merged
 
+    # 把 verifier repair 相关信息整理成统一、便于复盘的观测结构。
+    def _build_observable_repair_context(
+        self,
+        search_result: SearchResult,
+        repair_context: dict | None,
+        selected_action: MctsAction | None,
+    ) -> dict:
+        tree_refresh = dict(search_result.metadata.get("tree_refresh", {}))
+        root_action = search_result.root_best_action
+        current_context = dict(repair_context or {})
+        previous_action = root_action
+
+        if previous_action is None and search_result.selected_action is not None and search_result.repair_selected_action is None:
+            previous_action = search_result.selected_action
+
+        if len(current_context) == 0:
+            return {
+                "repair_mode": "none",
+                "rerooted": bool(tree_refresh.get("rerooted", False)),
+                "reroot_reason": tree_refresh.get("reason", ""),
+                "previous_selected_action": None,
+                "new_selected_action": None,
+                "reject_reason": "",
+                "recommended_next_evidence": [],
+                "alternative_candidates": [],
+            }
+
+        reject_reason = str(current_context.get("reject_reason", "")).strip()
+        repair_mode = {
+            "missing_key_support": "repair_supporting_evidence",
+            "strong_alternative_not_ruled_out": "repair_hypothesis_competition",
+            "trajectory_insufficient": "repair_path_diversification",
+        }.get(reject_reason, "repair_generic")
+
+        return {
+            **current_context,
+            "repair_mode": repair_mode,
+            "rerooted": bool(tree_refresh.get("rerooted", False)),
+            "reroot_reason": tree_refresh.get("reason", ""),
+            "previous_selected_action": asdict(previous_action) if previous_action is not None else None,
+            "new_selected_action": asdict(selected_action) if selected_action is not None else None,
+        }
+
     # 判断当前搜索是否已经产生了可供 verifier 或下一问消费的有效信号。
     def _has_search_signal(self, search_result: SearchResult) -> bool:
         return (
@@ -963,9 +1205,25 @@ class ConsultationBrain:
         return stop_decision.should_stop and selected_action is None
 
 
+# 将运行期覆盖配置递归合并到默认配置中。
+def _merge_brain_config(base: dict, overrides: dict | None) -> dict:
+    if overrides is None:
+        return dict(base)
+
+    merged = deepcopy(base)
+
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge_brain_config(merged[key], value)
+        else:
+            merged[key] = value
+
+    return merged
+
+
 # 基于现有依赖的默认实现，快速构造一个可运行的问诊大脑。
-def build_default_brain(client: Neo4jClient) -> ConsultationBrain:
-    config = load_brain_config()
+def build_default_brain(client: Neo4jClient, config_overrides: dict | None = None) -> ConsultationBrain:
+    config = _merge_brain_config(load_brain_config(), config_overrides)
     search_config = dict(config.get("search", {}))
     kg_config = dict(config.get("kg", {}))
     path_eval_config = dict(config.get("path_evaluation", {}))
@@ -974,6 +1232,7 @@ def build_default_brain(client: Neo4jClient) -> ConsultationBrain:
     a4_config = dict(config.get("a4", {}))
     fallback_config = dict(config.get("fallback", {}))
     stop_config = dict(config.get("stop", {}))
+    repair_config = dict(config.get("repair", {}))
     llm_client = LlmClient()
     deps = BrainDependencies(
         state_tracker=StateTracker(),
@@ -1054,14 +1313,21 @@ def build_default_brain(client: Neo4jClient) -> ConsultationBrain:
             llm_client=llm_client,
         ),
         llm_client=llm_client,
+        repair_policy=RepairPolicyConfig(
+            enable_verifier_hypothesis_reshuffle=bool(
+                repair_config.get("enable_verifier_hypothesis_reshuffle", True)
+            ),
+            enable_best_repair_action=bool(repair_config.get("enable_best_repair_action", True)),
+            enable_tree_reroot=bool(repair_config.get("enable_tree_reroot", True)),
+        ),
     )
     return ConsultationBrain(deps)
 
 
 # 从环境变量读取 Neo4j 配置，并构造一个默认问诊大脑。
-def build_default_brain_from_env() -> ConsultationBrain:
+def build_default_brain_from_env(config_overrides: dict | None = None) -> ConsultationBrain:
     client = Neo4jClient.from_env()
-    return build_default_brain(client)
+    return build_default_brain(client, config_overrides=config_overrides)
 
 
 # 读取第二阶段默认配置文件。

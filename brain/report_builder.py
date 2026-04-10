@@ -67,6 +67,7 @@ class ReportBuilder:
                 if search_result.repair_selected_action is not None
                 else None
             ),
+            "repair_context": dict(search_result.verifier_repair_context),
             "verifier_repair_context": dict(search_result.verifier_repair_context),
             "best_answer_id": search_result.best_answer_id,
             "best_answer_name": search_result.best_answer_name,
@@ -102,6 +103,7 @@ class ReportBuilder:
                     if search_result.repair_selected_action is not None
                     else None
                 ),
+                "repair_context": dict(search_result.verifier_repair_context),
                 "verifier_repair_context": dict(search_result.verifier_repair_context),
                 "answer_group_scores": [asdict(item) for item in search_result.final_answer_scores],
                 "best_trajectory": asdict(best_trajectory) if best_trajectory is not None else None,

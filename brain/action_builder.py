@@ -40,8 +40,12 @@ class ActionBuilder:
             priority = float(row.get("priority", 0.0))
             contradiction_priority = float(row.get("contradiction_priority", 0.0))
             relation_weight = float(row.get("relation_weight", 0.0))
+            question_type_hint = str(row.get("question_type_hint", "symptom"))
             alternative_overlap = self._estimate_alternative_overlap(row, alternatives)
-            recommended_bonus = self._estimate_recommended_bonus(row, preferred_evidence)
+            recommended_bonus, recommended_match_score, evidence_tags = self._estimate_recommended_bonus(
+                row,
+                preferred_evidence,
+            )
 
             if bool(row.get("is_red_flag", False)):
                 priority += self.config.red_flag_bonus
@@ -64,16 +68,22 @@ class ActionBuilder:
                         "node_weight": float(row.get("node_weight", 0.0)),
                         "similarity_confidence": float(row.get("similarity_confidence", 0.0)),
                         "contradiction_priority": contradiction_priority,
-                        "question_type_hint": row.get("question_type_hint", "symptom"),
+                        "question_type_hint": question_type_hint,
                         "discriminative_gain": max(
                             0.0,
-                            contradiction_priority * (1.0 - alternative_overlap * 0.35) + recommended_bonus * 0.5,
+                            contradiction_priority * (1.0 - alternative_overlap * 0.35) + recommended_match_score * 0.45,
                         ),
-                        "novelty_score": max(0.0, 1.0 - relation_weight * 0.7 - alternative_overlap * 0.2 + recommended_bonus * 0.2),
-                        "patient_burden": 0.6 if row.get("question_type_hint") == "lab" else 0.25,
+                        "novelty_score": max(
+                            0.0,
+                            1.0 - relation_weight * 0.7 - alternative_overlap * 0.2 + recommended_match_score * 0.15,
+                        ),
+                        "patient_burden": 0.6 if question_type_hint == "lab" else 0.25,
                         "is_red_flag": bool(row.get("is_red_flag", False)),
                         "competing_hypothesis_count": len(alternatives),
+                        "alternative_overlap": alternative_overlap,
                         "recommended_evidence_bonus": recommended_bonus,
+                        "recommended_match_score": recommended_match_score,
+                        "evidence_tags": sorted(evidence_tags),
                     },
                 )
             )
@@ -162,9 +172,77 @@ class ActionBuilder:
         return {str(item).strip() for item in preferred if len(str(item).strip()) > 0}
 
     # 判断当前动作是否命中了主假设推荐的区分性证据。
-    def _estimate_recommended_bonus(self, row: dict, preferred_evidence: set[str]) -> float:
+    def _estimate_recommended_bonus(self, row: dict, preferred_evidence: set[str]) -> tuple[float, float, set[str]]:
         if len(preferred_evidence) == 0:
-            return 0.0
+            evidence_tags = self._infer_evidence_tags(
+                str(row.get("name", row.get("node_id", ""))),
+                str(row.get("question_type_hint", "symptom")),
+            )
+            return 0.0, 0.0, evidence_tags
 
         target_name = str(row.get("name", row.get("node_id", ""))).strip()
-        return 0.25 if target_name in preferred_evidence else 0.0
+        question_type_hint = str(row.get("question_type_hint", "symptom"))
+        evidence_tags = self._infer_evidence_tags(target_name, question_type_hint)
+        normalized_target = self._normalize_evidence_text(target_name)
+        best_match_score = 0.0
+
+        for preferred in preferred_evidence:
+            normalized_preferred = self._normalize_evidence_text(preferred)
+            preferred_tags = self._infer_evidence_tags(preferred)
+            match_score = 0.0
+
+            if normalized_target == normalized_preferred:
+                match_score = 1.0
+            elif len(normalized_target) > 0 and len(normalized_preferred) > 0:
+                if normalized_target in normalized_preferred or normalized_preferred in normalized_target:
+                    match_score = 0.85
+
+            if match_score < 0.85 and len(evidence_tags) > 0 and len(preferred_tags) > 0:
+                overlap = len(evidence_tags & preferred_tags)
+
+                if overlap > 0:
+                    union = len(evidence_tags | preferred_tags)
+                    match_score = max(match_score, 0.55 + overlap / max(union, 1) * 0.35)
+
+            best_match_score = max(best_match_score, match_score)
+
+        return best_match_score * 0.45, best_match_score, evidence_tags
+
+    # 归一化医学证据文本，便于不同表述之间做轻量匹配。
+    def _normalize_evidence_text(self, text: str) -> str:
+        return (
+            text.strip()
+            .lower()
+            .replace(" ", "")
+            .replace("（", "(")
+            .replace("）", ")")
+            .replace("，", ",")
+            .replace("。", "")
+            .replace("、", "")
+            .replace("-", "")
+            .replace("_", "")
+            .replace("/", "")
+        )
+
+    # 根据医学关键词把证据压缩成可比较的语义标签。
+    def _infer_evidence_tags(self, text: str, question_type_hint: str | None = None) -> set[str]:
+        normalized = self._normalize_evidence_text(text)
+        tags: set[str] = set()
+        tag_rules = {
+            "immune_status": ("hiv", "cd4", "免疫", "艾滋", "高危性行为", "机会性感染", "免疫抑制"),
+            "imaging": ("ct", "影像", "x线", "胸片", "磨玻璃"),
+            "oxygenation": ("低氧", "血氧", "pao2", "氧分压", "肺泡", "氧合"),
+            "respiratory": ("发热", "干咳", "咳嗽", "呼吸困难", "气促"),
+            "pathogen": ("βd葡聚糖", "病原", "痰", "balf", "肺孢子菌"),
+            "systemic": ("皮疹", "咽痛", "关节疼痛", "腹泻", "淋巴结"),
+            "risk": ("高危", "性行为", "接触史", "暴露"),
+        }
+
+        for tag, keywords in tag_rules.items():
+            if any(keyword in normalized for keyword in keywords):
+                tags.add(tag)
+
+        if question_type_hint is not None and len(question_type_hint.strip()) > 0:
+            tags.add(f"type:{question_type_hint.strip()}")
+
+        return tags

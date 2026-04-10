@@ -81,6 +81,7 @@ def test_report_builder_includes_reasoning_summary_fields() -> None:
     assert report["root_best_action"]["target_node_name"] == "CD4+ T淋巴细胞计数 < 200/μL"
     assert report["repair_selected_action"]["target_node_name"] == "低氧血症"
     assert report["verifier_repair_context"]["reject_reason"] == "missing_key_support"
+    assert report["repair_context"]["reject_reason"] == "missing_key_support"
 
 
 # 验证 build_search_report 会显式区分 root best action 与 repair selected action。
@@ -121,3 +122,4 @@ def test_report_builder_exposes_action_selection_layers_in_search_report() -> No
     assert report["root_best_action"]["target_node_name"] == "CD4+ T淋巴细胞计数 < 200/μL"
     assert report["repair_selected_action"]["target_node_name"] == "皮疹"
     assert report["verifier_repair_context"]["reject_reason"] == "trajectory_insufficient"
+    assert report["repair_context"]["reject_reason"] == "trajectory_insufficient"
