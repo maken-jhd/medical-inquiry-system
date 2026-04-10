@@ -10,6 +10,13 @@ from .llm_client import LlmClient
 from .types import FinalAnswerScore, PatientContext, ReasoningTrajectory
 
 
+ALLOWED_REJECT_REASONS = {
+    "missing_key_support",
+    "strong_alternative_not_ruled_out",
+    "trajectory_insufficient",
+}
+
+
 @dataclass
 class TrajectoryEvaluatorConfig:
     """保存轨迹聚合评分阶段的权重配置。"""
@@ -147,6 +154,8 @@ class TrajectoryEvaluator:
                     "verifier_risk_flags": llm_result["risk_flags"],
                     "verifier_recommended_next_evidence": llm_result["recommended_next_evidence"],
                     "verifier_alternative_candidates": llm_result["alternative_candidates"],
+                    "verifier_reject_reason_source": llm_result["reject_reason_source"],
+                    "verifier_schema_valid": llm_result["schema_valid"],
                 }
 
         if self.config.agent_eval_mode != "fallback":
@@ -193,6 +202,9 @@ class TrajectoryEvaluator:
         except Exception:
             return None
 
+        if not isinstance(payload, dict):
+            return None
+
         try:
             score = float(payload.get("score", 0.0))
         except Exception:
@@ -203,25 +215,50 @@ class TrajectoryEvaluator:
         if should_accept_stop is None:
             should_accept_stop = payload.get("should_accept")
 
+        should_accept_stop_value = self._coerce_bool(should_accept_stop, default=score >= 0.75)
+        missing_evidence = self._normalize_string_list(payload.get("missing_evidence", []))
         recommended_next_evidence = self._normalize_string_list(payload.get("recommended_next_evidence", []))
         alternative_candidates = self._normalize_alternative_candidates(payload.get("alternative_candidates", []))
-        reject_reason = self._infer_reject_reason(
+        reject_reason, reject_reason_source, schema_valid = self._normalize_reject_reason(
             payload,
             trajectory_count=len(trajectories),
             alternative_candidates=alternative_candidates,
-            missing_evidence=self._normalize_string_list(payload.get("missing_evidence", [])),
+            missing_evidence=missing_evidence,
         )
 
         return {
             "score": max(min(score, 1.0), 0.0),
-            "should_accept_stop": bool(should_accept_stop if should_accept_stop is not None else score >= 0.75),
+            "should_accept_stop": should_accept_stop_value,
             "reject_reason": reject_reason,
             "reasoning": str(payload.get("reasoning", "")),
-            "missing_evidence": self._normalize_string_list(payload.get("missing_evidence", [])),
+            "missing_evidence": missing_evidence,
             "risk_flags": self._normalize_string_list(payload.get("risk_flags", [])),
             "recommended_next_evidence": recommended_next_evidence,
             "alternative_candidates": alternative_candidates,
+            "reject_reason_source": reject_reason_source,
+            "schema_valid": schema_valid,
         }
+
+    # verifier 是 repair policy 的控制信号，因此优先消费显式枚举，只有异常时才退回启发式推断。
+    def _normalize_reject_reason(
+        self,
+        payload: dict,
+        trajectory_count: int,
+        alternative_candidates: list[dict],
+        missing_evidence: list[str],
+    ) -> tuple[str, str, bool]:
+        raw_reason = str(payload.get("reject_reason", "")).strip()
+
+        if raw_reason in ALLOWED_REJECT_REASONS:
+            return raw_reason, "llm_schema", True
+
+        inferred_reason = self._infer_reject_reason(
+            payload,
+            trajectory_count=trajectory_count,
+            alternative_candidates=alternative_candidates,
+            missing_evidence=missing_evidence,
+        )
+        return inferred_reason, "fallback_inferred", False
 
     # 对 verifier 输出中的候选替代诊断做标准化，统一为 dict 列表。
     def _normalize_alternative_candidates(self, payload: object) -> list[dict]:
@@ -273,6 +310,24 @@ class TrajectoryEvaluator:
 
         return values
 
+    # 将模型可能返回的布尔文本标准化，避免 "false" 被 Python bool() 当成 True。
+    def _coerce_bool(self, payload: object, default: bool) -> bool:
+        if isinstance(payload, bool):
+            return payload
+
+        if isinstance(payload, (int, float)):
+            return bool(payload)
+
+        text = str(payload).strip().lower()
+
+        if text in {"true", "1", "yes", "y", "是", "接受", "accept"}:
+            return True
+
+        if text in {"false", "0", "no", "n", "否", "拒绝", "reject"}:
+            return False
+
+        return default
+
     # 当 verifier 未显式返回 reject_reason 时，根据缺口特征做保守推断。
     def _infer_reject_reason(
         self,
@@ -282,13 +337,7 @@ class TrajectoryEvaluator:
         missing_evidence: list[str],
     ) -> str:
         raw_reason = str(payload.get("reject_reason", "")).strip()
-        allowed = {
-            "missing_key_support",
-            "strong_alternative_not_ruled_out",
-            "trajectory_insufficient",
-        }
-
-        if raw_reason in allowed:
+        if raw_reason in ALLOWED_REJECT_REASONS:
             return raw_reason
 
         if len(alternative_candidates) > 0:

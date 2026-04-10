@@ -61,6 +61,26 @@ class FakeVerifierClient:
         }
 
 
+class InvalidReasonVerifierClient:
+    """模拟 verifier 未遵守 reject_reason 枚举时的兼容兜底。"""
+
+    def is_available(self) -> bool:
+        return True
+
+    def run_structured_prompt(self, prompt_name: str, variables: dict, schema: type) -> dict:
+        _ = prompt_name, variables, schema
+        return {
+            "score": 0.42,
+            "should_accept_stop": "false",
+            "reject_reason": "needs_more_work",
+            "reasoning": "强替代诊断尚未排除，需要继续鉴别。",
+            "missing_evidence": [],
+            "risk_flags": ["替代诊断未排除"],
+            "recommended_next_evidence": ["核酸检测"],
+            "alternative_candidates": [{"answer_name": "新型冠状病毒感染", "reason": "需要排除"}],
+        }
+
+
 # 验证当启用 llm_verifier 模式时，agent evaluation 会消费 verifier 分数。
 def test_trajectory_evaluator_supports_llm_verifier_mode() -> None:
     evaluator = TrajectoryEvaluator(
@@ -86,3 +106,30 @@ def test_trajectory_evaluator_supports_llm_verifier_mode() -> None:
     assert scores[0].metadata["verifier_reject_reason"] == "missing_key_support"
     assert scores[0].metadata["verifier_recommended_next_evidence"] == ["低氧血症"]
     assert scores[0].metadata["verifier_alternative_candidates"][0]["answer_name"] == "结核病"
+    assert scores[0].metadata["verifier_reject_reason_source"] == "llm_schema"
+    assert scores[0].metadata["verifier_schema_valid"] is True
+
+
+# 验证 verifier schema 不合规时会记录 fallback 来源，并正确解析字符串布尔值。
+def test_trajectory_evaluator_marks_invalid_verifier_reject_reason_schema() -> None:
+    evaluator = TrajectoryEvaluator(
+        TrajectoryEvaluatorConfig(agent_eval_mode="llm_verifier"),
+        llm_client=InvalidReasonVerifierClient(),  # type: ignore[arg-type]
+    )
+    trajectories = [
+        ReasoningTrajectory(
+            trajectory_id="t1",
+            final_answer_id="d1",
+            final_answer_name="肺孢子菌肺炎",
+            steps=[{"action_name": "发热"}],
+            score=0.5,
+        )
+    ]
+
+    grouped = evaluator.group_by_answer(trajectories)
+    scores = evaluator.score_groups(grouped, patient_context=PatientContext(raw_text="发热"))
+
+    assert scores[0].metadata["verifier_should_accept"] is False
+    assert scores[0].metadata["verifier_reject_reason"] == "strong_alternative_not_ruled_out"
+    assert scores[0].metadata["verifier_reject_reason_source"] == "fallback_inferred"
+    assert scores[0].metadata["verifier_schema_valid"] is False

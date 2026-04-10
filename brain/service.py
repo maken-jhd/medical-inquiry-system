@@ -797,6 +797,8 @@ class ConsultationBrain:
             "recommended_next_evidence": recommended_next_evidence,
             "alternative_candidates": alternative_candidates,
             "verifier_reasoning": str(metadata.get("verifier_reasoning", "")),
+            "verifier_reject_reason_source": str(metadata.get("verifier_reject_reason_source", "")),
+            "verifier_schema_valid": bool(metadata.get("verifier_schema_valid", False)),
             "force_tree_refresh": True,
             "repair_stage": self._map_reject_reason_to_stage(reject_reason),
             "current_answer_id": best_answer_score.answer_id,
@@ -857,19 +859,20 @@ class ConsultationBrain:
         seen_action_keys: set[tuple[str, str]] = set()
 
         for hypothesis in repair_hypotheses:
+            action_hypothesis = self._attach_repair_recommendations_to_hypothesis(hypothesis, repair_context)
             alternatives = [
                 item
                 for item in state.candidate_hypotheses
-                if item.node_id != hypothesis.node_id
+                if item.node_id != action_hypothesis.node_id
             ][: self.deps.hypothesis_manager.config.expand_top_k_hypotheses]
-            rows = self.deps.retriever.retrieve_r2_expected_evidence(hypothesis, state)
+            rows = self.deps.retriever.retrieve_r2_expected_evidence(action_hypothesis, state)
 
             for action in self.deps.action_builder.build_verification_actions(
                 rows,
-                hypothesis_id=hypothesis.node_id,
-                topic_id=hypothesis.label,
+                hypothesis_id=action_hypothesis.node_id,
+                topic_id=action_hypothesis.label,
                 competing_hypotheses=alternatives,
-                current_hypothesis=hypothesis,
+                current_hypothesis=action_hypothesis,
             ):
                 action_key = (action.hypothesis_id or "", action.target_node_id)
 
@@ -904,6 +907,39 @@ class ConsultationBrain:
             ),
         )
         return ranked[0]
+
+    # 将 verifier repair_context 中的推荐证据临时注入 A3 动作构造，避免局部 repair 选择丢失缺口信号。
+    def _attach_repair_recommendations_to_hypothesis(
+        self,
+        hypothesis: HypothesisScore,
+        repair_context: dict,
+    ) -> HypothesisScore:
+        verifier_evidence = self._normalize_string_list(repair_context.get("recommended_next_evidence", []))
+
+        if len(verifier_evidence) == 0:
+            return hypothesis
+
+        metadata = dict(hypothesis.metadata)
+        hypothesis_evidence = self._normalize_string_list(metadata.get("hypothesis_recommended_next_evidence", []))
+
+        if len(hypothesis_evidence) == 0:
+            hypothesis_evidence = self._normalize_string_list(metadata.get("recommended_next_evidence", []))
+
+        metadata.update(
+            {
+                "hypothesis_recommended_next_evidence": hypothesis_evidence,
+                "verifier_recommended_next_evidence": verifier_evidence,
+                "recommended_next_evidence": self._merge_unique_strings(hypothesis_evidence, verifier_evidence),
+            }
+        )
+        return HypothesisScore(
+            node_id=hypothesis.node_id,
+            label=hypothesis.label,
+            name=hypothesis.name,
+            score=hypothesis.score,
+            evidence_node_ids=list(hypothesis.evidence_node_ids),
+            metadata=metadata,
+        )
 
     # 在 repair 阶段决定当前要从哪些 hypothesis 上取下一批候选动作。
     def _select_repair_hypotheses(
@@ -976,49 +1012,67 @@ class ConsultationBrain:
         novelty_score = float(action.metadata.get("novelty_score", 0.0))
         recommended_bonus = float(action.metadata.get("recommended_evidence_bonus", 0.0))
         recommended_match_score = float(action.metadata.get("recommended_match_score", 0.0))
+        verifier_recommended_match_score = float(action.metadata.get("verifier_recommended_match_score", 0.0))
+        hypothesis_recommended_match_score = float(action.metadata.get("hypothesis_recommended_match_score", 0.0))
+        joint_recommended_match_score = float(action.metadata.get("joint_recommended_match_score", 0.0))
         alternative_overlap = float(action.metadata.get("alternative_overlap", 0.0))
         patient_burden = float(action.metadata.get("patient_burden", 0.0))
         question_type_hint = str(action.metadata.get("question_type_hint", "symptom"))
         evidence_tags = self._normalize_string_list(action.metadata.get("evidence_tags", []))
+        semantic_evidence_tags = {item for item in evidence_tags if not item.startswith("type:")}
+        recent_semantic_evidence_tags = {item for item in recent_evidence_tags if not item.startswith("type:")}
         score = action.prior_score
         type_diversity_bonus = 0.35 if recent_question_type is not None and question_type_hint != recent_question_type else 0.0
         same_type_penalty = 0.2 if recent_question_type is not None and question_type_hint == recent_question_type else 0.0
-        shared_evidence_family = len(set(recent_evidence_tags) & set(evidence_tags)) > 0
-        family_diversity_bonus = 0.35 if len(recent_evidence_tags) > 0 and not shared_evidence_family else 0.0
+        shared_evidence_family = len(recent_semantic_evidence_tags & semantic_evidence_tags) > 0
+        family_diversity_bonus = 0.35 if len(recent_semantic_evidence_tags) > 0 and not shared_evidence_family else 0.0
         family_repeat_penalty = 0.3 if shared_evidence_family else 0.0
 
         if reject_reason == "missing_key_support":
+            recommended_gap_score = max(
+                recommended_match_score,
+                joint_recommended_match_score,
+                verifier_recommended_match_score * 0.9,
+                hypothesis_recommended_match_score * 0.75,
+            )
             return (
                 score
-                + recommended_match_score * 2.6
-                + recommended_bonus * 1.2
-                + discriminative_gain * 0.8
-                + type_diversity_bonus
-                + family_diversity_bonus
+                + recommended_gap_score * 2.9
+                + joint_recommended_match_score * 1.8
+                + verifier_recommended_match_score * 1.25
+                + hypothesis_recommended_match_score * 0.85
+                + recommended_bonus * 1.35
+                + discriminative_gain * 0.65
+                + type_diversity_bonus * 0.55
+                + family_diversity_bonus * 0.85
                 - same_type_penalty * 0.5
-                - family_repeat_penalty
+                - family_repeat_penalty * 0.85
                 - patient_burden * 0.15
             )
 
         if reject_reason == "strong_alternative_not_ruled_out":
             current_answer_id = str(repair_context.get("current_answer_id") or "")
-            alternative_hypothesis_bonus = 0.55 if len(current_answer_id) > 0 and action.hypothesis_id != current_answer_id else 0.0
+            alternative_hypothesis_bonus = 1.05 if len(current_answer_id) > 0 and action.hypothesis_id != current_answer_id else 0.0
             return (
                 score
-                + discriminative_gain * 1.75
-                + (1.0 - alternative_overlap) * 0.75
-                + recommended_match_score * 1.35
+                + discriminative_gain * 2.45
+                + (1.0 - alternative_overlap) * 1.05
+                + recommended_match_score * 1.1
+                + joint_recommended_match_score * 0.65
                 + alternative_hypothesis_bonus
-                + family_diversity_bonus
+                + family_diversity_bonus * 0.75
+                - same_type_penalty * 0.35
+                - family_repeat_penalty * 1.75
                 - patient_burden * 0.1
             )
 
         return (
             score
-            + novelty_score * 1.85
-            + type_diversity_bonus * 1.4
-            + family_diversity_bonus
-            - same_type_penalty * 0.4
+            + novelty_score * 2.15
+            + type_diversity_bonus * 2.1
+            + family_diversity_bonus * 1.75
+            - same_type_penalty * 1.25
+            - family_repeat_penalty * 1.9
             - patient_burden * 0.08
         )
 

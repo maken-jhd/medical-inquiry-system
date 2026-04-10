@@ -82,3 +82,5 @@ def test_hypothesis_manager_applies_verifier_reshuffle() -> None:
     assert reranked[0].node_id == "disease_pcp"
     assert reranked[0].metadata["verifier_alternative_reason"] == "红旗证据尚未排除"
     assert reranked[0].metadata["recommended_next_evidence"] == ["低氧血症"]
+    assert reranked[0].metadata["hypothesis_recommended_next_evidence"] == []
+    assert reranked[0].metadata["verifier_recommended_next_evidence"] == ["低氧血症"]

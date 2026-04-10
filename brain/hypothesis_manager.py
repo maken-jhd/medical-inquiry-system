@@ -176,13 +176,19 @@ class HypothesisManager:
                 score_delta += max(self.config.verifier_alt_bonus - index * 0.05, self.config.verifier_alt_bonus * 0.5)
                 metadata["verifier_alternative_reason"] = matched_alternative.get("reason", "")
 
-            merged_evidence = self._merge_recommended_evidence(
+            hypothesis_preferred_evidence = self._merge_recommended_evidence(
                 metadata.get("recommended_next_evidence", []),
+                [],
+            )
+            merged_evidence = self._merge_recommended_evidence(
+                hypothesis_preferred_evidence,
                 preferred_evidence,
             )
             metadata.update(
                 {
                     "recommended_next_evidence": merged_evidence,
+                    "hypothesis_recommended_next_evidence": hypothesis_preferred_evidence,
+                    "verifier_recommended_next_evidence": preferred_evidence,
                     "verifier_reject_reason": reject_reason,
                     "verifier_adjustment": score_delta,
                     "verifier_role": "alternative" if matched_alternative is not None else metadata.get("verifier_role", "current"),

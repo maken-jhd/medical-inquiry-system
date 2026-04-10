@@ -827,6 +827,48 @@
 
 这一结果对论文写作很有价值，因为它能把“verifier 自己在起作用”与“repair 分流 / reroot / A3 选问策略在起作用”拆开说明。
 
+### 追加验证：三病例 focused replay
+
+在上述两病例 ablation 后，继续加入 `pcp_vague_001`，形成三病例 focused replay：
+
+- `pcp_typical_001`
+- `pcp_vague_001`
+- `concealing_risk_001`
+
+输出目录：
+
+- [focused_3case_baseline_v1](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_replay/focused_3case_baseline_v1)
+- [focused_3case_no_best_repair_action_v1](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_replay/focused_3case_no_best_repair_action_v1)
+- [focused_3case_no_reshuffle_v1](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_replay/focused_3case_no_reshuffle_v1)
+- [focused_3case_no_reroot_v1](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_replay/focused_3case_no_reroot_v1)
+
+指标对照：
+
+| 组别 | stop reason | repair turns | repair override turns | hypothesis switch turns | rerooted turns | repeated question turns |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| baseline | `verifier_rejected_stop: 3` | 11 | 9 | 4 | 9 | 0 |
+| no best repair action | `verifier_rejected_stop: 3` | 12 | 0 | 0 | 9 | 0 |
+| no verifier reshuffle | `verifier_rejected_stop: 3` | 11 | 7 | 0 | 9 | 0 |
+| no reroot | `no_answer_score: 3` | 2 | 2 | 1 | 0 | 0 |
+
+这组三病例结果比两病例更清楚：
+
+- 关闭 `best repair action` 后，`repair override turns` 从 `9` 直接降到 `0`，说明 repair-aware A3 是动作改写的直接来源。
+- 关闭 `verifier-driven reshuffle` 后，`hypothesis switch turns` 从 `4` 降到 `0`，说明 reshuffle 在加入 `pcp_vague_001` 这种更容易混淆的病例后，确实帮助系统切换到不同 hypothesis。
+- 关闭 `reroot` 后，三例最终都退化为 `no_answer_score`，说明旧树复用会削弱后续 answer score 生成，reroot 不是单纯 metadata，而是维持后续评分和修复流程的必要机制。
+
+典型行为例子：
+
+- baseline 下，`pcp_vague_001` 的实际动作从 root best 的 `胸部CT磨玻璃影 / 肺孢子菌肺炎 (PCP)` 切到 `低氧血症 / 另一个候选 hypothesis`，说明 repair 不只是换同一 hypothesis 下的节点，也会发生 hypothesis 层面的切换。
+- 关闭 `best repair action` 后，`pcp_typical_001` 与 `pcp_vague_001` 都更像沿 root best 连续追问氧合相关实验室证据，例如 `PaO2`、`肺泡-动脉氧分压差`、`肺泡-动脉血氧分压差`。
+- 关闭 `reroot` 后，repair context 大量消失，最终 `best_answer_name` 为空，说明旧树复用会让状态更新后的搜索报告失去足够有效的可评估路径。
+
+因此，三病例 ablation 进一步支持：
+
+- `best repair action` 负责“换问题”
+- `verifier-driven reshuffle` 负责“更容易换 hypothesis”
+- `reroot` 负责“让换题后的搜索仍能生成有效评分”
+
 ## 十四、当前仍未彻底解决的问题
 
 虽然第二阶段已经从脚手架推进到了真实 smoke 可跑，但以下问题仍然需要继续记录和补强：
@@ -902,3 +944,37 @@
 如果用一句话总结当前状态，可以写成：
 
 - 第二阶段已完成从问诊脚手架到 Med-MCTS 风格原型系统的关键过渡，当前重点已从工程连通性转向诊断质量与评估严谨性的持续提升。
+
+## 十七、repair-aware A3 与标准 ablation 脚本化
+
+本轮围绕“verifier 拒停后是否能换成更有鉴别价值的问题”继续收紧，而不是继续扩大框架。
+
+### 1. repair-aware A3 打分增强
+
+- `strong_alternative_not_ruled_out` 分支进一步提高非当前 top1 hypothesis 动作的奖励，并提高 `discriminative_gain` 权重
+- `trajectory_insufficient` 分支进一步鼓励 question type 与 evidence family 多样性，并显式惩罚同一 evidence family 的相似追问
+- `missing_key_support` 分支更强绑定 verifier 推荐证据、原 hypothesis 推荐证据，以及两者共同命中的缺口证据
+- `ActionBuilder` 为每个 A3 action 增加 `verifier_recommended_match_score`、`hypothesis_recommended_match_score`、`joint_recommended_match_score`
+- `HypothesisManager.apply_verifier_repair()` 保留 `hypothesis_recommended_next_evidence` 与 `verifier_recommended_next_evidence`，方便后续区分“原假设建议”与“verifier 拒停建议”
+
+### 2. verifier 输出硬结构化
+
+- `trajectory_agent_verifier` prompt 明确要求输出固定 JSON object
+- `reject_reason` 固定为 `missing_key_support | strong_alternative_not_ruled_out | trajectory_insufficient`
+- `alternative_candidates` 固定为 `{answer_id, answer_name, reason}` 对象数组
+- `TrajectoryEvaluator` 新增 `verifier_reject_reason_source` 与 `verifier_schema_valid`，当 LLM 未遵守枚举时仍保留 fallback 推断，但会显式标记来源
+- 修复了字符串 `"false"` 被 Python `bool()` 误判为 `True` 的 verifier 接受逻辑风险
+
+### 3. focused ablation 标准实验入口
+
+- 新增 `scripts/run_focused_ablation.py`
+- 支持 `baseline`、`no_best_repair_action`、`no_reshuffle`、`no_reroot` 四组变体
+- 输出每个变体的 `focused_repair_summary.jsonl` 与 `focused_metrics.json`
+- 额外输出总表 `ablation_summary.jsonl` 与 `ablation_metrics.json`
+- 汇总指标包括 `repair_turns`、`repair_override_turns`、`hypothesis_switch_turns`、`rerooted_turns`、`repeated_turns`、`semantic_repeat_turns`、`root_vs_repair_diff_rate`
+
+### 4. 当前验证
+
+- 通过 `python -m py_compile brain/action_builder.py brain/service.py brain/hypothesis_manager.py brain/trajectory_evaluator.py brain/llm_client.py scripts/run_focused_ablation.py`
+- 通过 `conda run -n GraduationDesign python -m pytest -q`
+- 当前测试结果：`46 passed`

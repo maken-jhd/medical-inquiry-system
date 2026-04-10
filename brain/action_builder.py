@@ -34,7 +34,12 @@ class ActionBuilder:
     ) -> List[MctsAction]:
         actions: List[MctsAction] = []
         alternatives = list(competing_hypotheses or [])
-        preferred_evidence = self._collect_preferred_evidence(current_hypothesis)
+        preferred_evidence = self._collect_preferred_evidence(current_hypothesis, "recommended_next_evidence")
+        verifier_preferred_evidence = self._collect_preferred_evidence(current_hypothesis, "verifier_recommended_next_evidence")
+        hypothesis_preferred_evidence = self._collect_preferred_evidence(
+            current_hypothesis,
+            "hypothesis_recommended_next_evidence",
+        )
 
         for row in rows:
             priority = float(row.get("priority", 0.0))
@@ -45,6 +50,18 @@ class ActionBuilder:
             recommended_bonus, recommended_match_score, evidence_tags = self._estimate_recommended_bonus(
                 row,
                 preferred_evidence,
+            )
+            _, verifier_recommended_match_score, _ = self._estimate_recommended_bonus(
+                row,
+                verifier_preferred_evidence,
+            )
+            _, hypothesis_recommended_match_score, _ = self._estimate_recommended_bonus(
+                row,
+                hypothesis_preferred_evidence,
+            )
+            joint_recommended_match_score = self._estimate_joint_recommended_match(
+                verifier_recommended_match_score,
+                hypothesis_recommended_match_score,
             )
 
             if bool(row.get("is_red_flag", False)):
@@ -71,7 +88,9 @@ class ActionBuilder:
                         "question_type_hint": question_type_hint,
                         "discriminative_gain": max(
                             0.0,
-                            contradiction_priority * (1.0 - alternative_overlap * 0.35) + recommended_match_score * 0.45,
+                            contradiction_priority * (1.0 - alternative_overlap * 0.45)
+                            + recommended_match_score * 0.35
+                            + joint_recommended_match_score * 0.25,
                         ),
                         "novelty_score": max(
                             0.0,
@@ -83,6 +102,9 @@ class ActionBuilder:
                         "alternative_overlap": alternative_overlap,
                         "recommended_evidence_bonus": recommended_bonus,
                         "recommended_match_score": recommended_match_score,
+                        "verifier_recommended_match_score": verifier_recommended_match_score,
+                        "hypothesis_recommended_match_score": hypothesis_recommended_match_score,
+                        "joint_recommended_match_score": joint_recommended_match_score,
                         "evidence_tags": sorted(evidence_tags),
                     },
                 )
@@ -160,19 +182,29 @@ class ActionBuilder:
         return min(overlap_count / len(competing_hypotheses), 1.0)
 
     # 从当前主假设的 metadata 中提取推荐优先验证的证据名称。
-    def _collect_preferred_evidence(self, current_hypothesis: HypothesisScore | None) -> set[str]:
+    def _collect_preferred_evidence(self, current_hypothesis: HypothesisScore | None, metadata_key: str) -> list[str]:
         if current_hypothesis is None:
-            return set()
+            return []
 
-        preferred = current_hypothesis.metadata.get("recommended_next_evidence", [])
+        preferred = current_hypothesis.metadata.get(metadata_key, [])
 
         if not isinstance(preferred, list):
-            return set()
+            return []
 
-        return {str(item).strip() for item in preferred if len(str(item).strip()) > 0}
+        values: list[str] = []
+
+        for item in preferred:
+            text = str(item).strip()
+
+            if len(text) == 0 or text in values:
+                continue
+
+            values.append(text)
+
+        return values
 
     # 判断当前动作是否命中了主假设推荐的区分性证据。
-    def _estimate_recommended_bonus(self, row: dict, preferred_evidence: set[str]) -> tuple[float, float, set[str]]:
+    def _estimate_recommended_bonus(self, row: dict, preferred_evidence: Sequence[str]) -> tuple[float, float, set[str]]:
         if len(preferred_evidence) == 0:
             evidence_tags = self._infer_evidence_tags(
                 str(row.get("name", row.get("node_id", ""))),
@@ -204,9 +236,55 @@ class ActionBuilder:
                     union = len(evidence_tags | preferred_tags)
                     match_score = max(match_score, 0.55 + overlap / max(union, 1) * 0.35)
 
+            if match_score < 0.65:
+                token_overlap = self._estimate_token_overlap(normalized_target, normalized_preferred)
+                match_score = max(match_score, token_overlap * 0.65)
+
             best_match_score = max(best_match_score, match_score)
 
         return best_match_score * 0.45, best_match_score, evidence_tags
+
+    # 同时命中 verifier 缺口与当前 hypothesis 推荐证据时，额外视为高价值修补动作。
+    def _estimate_joint_recommended_match(self, verifier_match_score: float, hypothesis_match_score: float) -> float:
+        if verifier_match_score > 0.0 and hypothesis_match_score > 0.0:
+            return min(verifier_match_score, hypothesis_match_score)
+
+        return max(verifier_match_score, hypothesis_match_score)
+
+    # 轻量估计推荐证据文本与候选节点之间的词片段重叠。
+    def _estimate_token_overlap(self, normalized_target: str, normalized_preferred: str) -> float:
+        if len(normalized_target) == 0 or len(normalized_preferred) == 0:
+            return 0.0
+
+        target_tokens = self._evidence_tokens(normalized_target)
+        preferred_tokens = self._evidence_tokens(normalized_preferred)
+
+        if len(target_tokens) == 0 or len(preferred_tokens) == 0:
+            return 0.0
+
+        overlap = len(target_tokens & preferred_tokens)
+        return overlap / max(min(len(target_tokens), len(preferred_tokens)), 1)
+
+    # 从短医学文本中抽取可复用的轻量 token，增强“CT 结果”与“胸部CT磨玻璃影”这类匹配。
+    def _evidence_tokens(self, normalized_text: str) -> set[str]:
+        token_rules = {
+            "ct": ("ct", "胸部ct", "影像", "磨玻璃"),
+            "xray": ("x线", "胸片"),
+            "oxygen": ("低氧", "血氧", "氧分压", "pao2", "氧合"),
+            "hiv": ("hiv", "艾滋", "cd4", "病毒载量"),
+            "pcr": ("核酸", "pcr"),
+            "pcp": ("肺孢子", "pcp", "βd葡聚糖", "bdg"),
+            "tb": ("结核", "盗汗", "抗酸", "分枝杆菌"),
+            "risk": ("高危", "性行为", "暴露", "接触史"),
+            "respiratory": ("咳嗽", "干咳", "呼吸困难", "气促"),
+        }
+        tokens: set[str] = set()
+
+        for token, keywords in token_rules.items():
+            if any(keyword in normalized_text for keyword in keywords):
+                tokens.add(token)
+
+        return tokens
 
     # 归一化医学证据文本，便于不同表述之间做轻量匹配。
     def _normalize_evidence_text(self, text: str) -> str:
@@ -229,11 +307,14 @@ class ActionBuilder:
         normalized = self._normalize_evidence_text(text)
         tags: set[str] = set()
         tag_rules = {
-            "immune_status": ("hiv", "cd4", "免疫", "艾滋", "高危性行为", "机会性感染", "免疫抑制"),
-            "imaging": ("ct", "影像", "x线", "胸片", "磨玻璃"),
+            "immune_status": ("hiv", "cd4", "t淋巴", "免疫", "艾滋", "机会性感染", "免疫抑制"),
+            "imaging": ("ct", "影像", "x线", "胸片", "磨玻璃", "双肺"),
             "oxygenation": ("低氧", "血氧", "pao2", "氧分压", "肺泡", "氧合"),
             "respiratory": ("发热", "干咳", "咳嗽", "呼吸困难", "气促"),
-            "pathogen": ("βd葡聚糖", "病原", "痰", "balf", "肺孢子菌"),
+            "pathogen": ("βd葡聚糖", "bdg", "病原", "痰", "balf", "病原学"),
+            "pcp_specific": ("肺孢子", "pneumocystis", "pcp", "βd葡聚糖", "bdg"),
+            "viral": ("核酸", "pcr", "新冠", "covid", "病毒载量", "hivrna"),
+            "tuberculosis": ("结核", "盗汗", "抗酸", "分枝杆菌", "tb"),
             "systemic": ("皮疹", "咽痛", "关节疼痛", "腹泻", "淋巴结"),
             "risk": ("高危", "性行为", "接触史", "暴露"),
         }

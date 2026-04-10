@@ -312,6 +312,123 @@ def test_service_can_switch_to_alternative_hypothesis_action_when_verifier_reque
     assert action.target_node_name == "新冠核酸阳性"
 
 
+# 验证 strong_alternative_not_ruled_out 会更敢于切到非当前 top1 的鉴别证据。
+def test_service_strong_alternative_prioritizes_non_current_discriminative_action() -> None:
+    tracker = StateTracker()
+    state = tracker.create_session("s7")
+    state.candidate_hypotheses = [
+        HypothesisScore(node_id="pcp", label="Disease", name="肺孢子菌肺炎 (PCP)", score=1.0),
+        HypothesisScore(node_id="tb", label="Disease", name="肺结核", score=0.92),
+    ]
+    rows = {
+        "pcp": [
+            {
+                "node_id": "lab_ldh",
+                "label": "LabFinding",
+                "name": "乳酸脱氢酶升高",
+                "relation_type": "HAS_LAB_FINDING",
+                "relation_weight": 0.9,
+                "node_weight": 1.0,
+                "similarity_confidence": 1.0,
+                "contradiction_priority": 0.75,
+                "question_type_hint": "lab",
+                "priority": 3.4,
+                "is_red_flag": False,
+                "topic_id": "Disease",
+            }
+        ],
+        "tb": [
+            {
+                "node_id": "symptom_night_sweat",
+                "label": "Symptom",
+                "name": "盗汗",
+                "relation_type": "MANIFESTS_AS",
+                "relation_weight": 0.75,
+                "node_weight": 1.0,
+                "similarity_confidence": 1.0,
+                "contradiction_priority": 0.98,
+                "question_type_hint": "symptom",
+                "priority": 2.85,
+                "is_red_flag": False,
+                "topic_id": "Disease",
+            }
+        ],
+    }
+    brain = _build_brain(rows, tracker)
+
+    action = brain._choose_repair_action(
+        "s7",
+        SearchResult(),
+        {
+            "reject_reason": "strong_alternative_not_ruled_out",
+            "current_answer_id": "pcp",
+            "alternative_candidates": [{"answer_id": "tb", "answer_name": "肺结核"}],
+            "recommended_next_evidence": ["盗汗", "痰抗酸染色"],
+        },
+    )
+
+    assert action is not None
+    assert action.hypothesis_id == "tb"
+    assert action.target_node_name == "盗汗"
+
+
+# 验证 trajectory_insufficient 会惩罚同一 evidence family 的相似追问，而不是只看节点是否不同。
+def test_service_trajectory_insufficient_penalizes_same_evidence_family() -> None:
+    tracker = StateTracker()
+    state = tracker.create_session("s8")
+    state.candidate_hypotheses = [
+        HypothesisScore(node_id="pcp", label="Disease", name="肺孢子菌肺炎 (PCP)", score=1.0),
+    ]
+    state.metadata["last_answered_action"] = MctsAction(
+        action_id="verify::pcp::lab_pao2",
+        action_type="verify_evidence",
+        target_node_id="lab_pao2",
+        target_node_label="LabFinding",
+        target_node_name="动脉血氧分压下降",
+        metadata={"question_type_hint": "lab", "evidence_tags": ["oxygenation", "type:lab"]},
+    )
+    rows = [
+        {
+            "node_id": "symptom_low_oxygen",
+            "label": "Symptom",
+            "name": "血氧饱和度下降",
+            "relation_type": "MANIFESTS_AS",
+            "relation_weight": 0.75,
+            "node_weight": 1.0,
+            "similarity_confidence": 1.0,
+            "contradiction_priority": 0.9,
+            "question_type_hint": "symptom",
+            "priority": 2.75,
+            "is_red_flag": False,
+            "topic_id": "Disease",
+        },
+        {
+            "node_id": "sign_ct",
+            "label": "Sign",
+            "name": "胸部CT磨玻璃影",
+            "relation_type": "DIAGNOSED_BY",
+            "relation_weight": 0.8,
+            "node_weight": 1.0,
+            "similarity_confidence": 1.0,
+            "contradiction_priority": 0.86,
+            "question_type_hint": "detail",
+            "priority": 2.55,
+            "is_red_flag": False,
+            "topic_id": "Disease",
+        },
+    ]
+    brain = _build_brain(rows, tracker)
+
+    action = brain._choose_repair_action(
+        "s8",
+        SearchResult(),
+        {"reject_reason": "trajectory_insufficient", "recommended_next_evidence": []},
+    )
+
+    assert action is not None
+    assert action.target_node_name == "胸部CT磨玻璃影"
+
+
 # 验证关闭 verifier-driven reshuffle 后，repair 只记录上下文，不应改写 hypothesis 分数。
 def test_service_can_disable_verifier_hypothesis_reshuffle() -> None:
     tracker = StateTracker()

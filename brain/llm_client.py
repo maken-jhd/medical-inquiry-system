@@ -85,10 +85,16 @@ class LlmClient:
             "trajectory_agent_verifier": (
                 "请作为临床推理评审者，结合患者上下文、候选最终答案和最佳推理路径，"
                 "给出该答案的代理评审分数。"
-                "输出字段必须包含 score、should_accept_stop、reject_reason、reasoning、"
-                "missing_evidence、risk_flags、recommended_next_evidence、alternative_candidates。"
-                "其中 reject_reason 只能取 missing_key_support、strong_alternative_not_ruled_out、trajectory_insufficient 之一。"
-                "score 取值范围为 0 到 1。"
+                "必须严格输出一个 JSON object，且只使用以下字段："
+                "score、should_accept_stop、reject_reason、reasoning、missing_evidence、risk_flags、"
+                "recommended_next_evidence、alternative_candidates。"
+                "score 取值范围为 0 到 1；should_accept_stop 必须是布尔值。"
+                "reject_reason 必须始终填写，且只能精确取 missing_key_support、"
+                "strong_alternative_not_ruled_out、trajectory_insufficient 之一；"
+                "即使 should_accept_stop 为 true，也请选择最接近的枚举值，不要输出其他字符串。"
+                "recommended_next_evidence 必须是字符串数组，表示下一步最值得验证的临床证据。"
+                "alternative_candidates 必须是对象数组，每个对象包含 answer_id、answer_name、reason；"
+                "answer_id 不确定时可为 null，但 answer_name 和 reason 必须给出。"
             ),
         }
         prefix = prompt_blocks.get(prompt_name, "请完成结构化医学推理，并输出 JSON。")
