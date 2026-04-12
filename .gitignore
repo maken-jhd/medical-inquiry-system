@@ -8,6 +8,7 @@
 !scripts/run_acceptance_sweep.sh
 !scripts/run_verifier_acceptance_sweep.sh
 !scripts/run_focused_acceptance_validation.sh
+!scripts/run_streamlit_realtime.sh
 
 # macOS 系统自动生成的隐藏文件
 .DS_Store
@@ -21,3 +22,6 @@ __pycache__/
 
 output_graph_test_errors.jsonl
 output_graph_test.jsonl
+
+# 本机演示前端私密配置，避免提交 API Key
+configs/frontend.local.yaml

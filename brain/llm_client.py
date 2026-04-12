@@ -72,6 +72,14 @@ class LlmClient:
                 "请从患者上下文中提取最关键的临床特征。"
                 "输出字段必须包含 key_features、uncertain_features、noise_features、reasoning_summary。"
             ),
+            "intake_opening_response": (
+                "患者当前输入没有明确症状、风险因素或检查结果，"
+                "请生成一句简短、自然、专业的医生式回应，并主动询问本次就诊主要不适。"
+                "必须严格输出 JSON object，且只包含字段：acknowledgement、question、reasoning。"
+                "acknowledgement 用中文，长度不超过 30 字；"
+                "question 用中文，必须鼓励患者描述主要症状、持续时间和最担心的问题，长度不超过 80 字；"
+                "reasoning 用中文，说明为什么需要先采集主诉。"
+            ),
             "a2_hypothesis_generation": (
                 "请根据患者一般信息、临床特征和图谱候选疾病生成主假设与备选假设。"
                 "输出字段必须包含 primary_hypothesis、alternatives、reasoning、"

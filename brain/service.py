@@ -177,6 +177,20 @@ class ConsultationBrain:
         if pending_action is None:
             return None, None, None, []
 
+        if pending_action.action_type == "collect_chief_complaint":
+            tracker.get_session(session_id).metadata["last_answered_action"] = pending_action
+            tracker.clear_pending_action(session_id)
+            return (
+                None,
+                None,
+                RouteDecision(
+                    stage="A1",
+                    reason="患者已补充主诉信息，重新进入 A1 关键线索提取。",
+                    metadata={"source": "chief_complaint_intake"},
+                ),
+                [],
+            )
+
         a4_result = self.deps.evidence_parser.interpret_answer_for_target(patient_text, pending_action)
         a4_updates = self.deps.evidence_parser.build_slot_updates_from_a4(
             pending_action,
@@ -484,7 +498,12 @@ class ConsultationBrain:
         route_after_slot_update = self.deps.router.route_after_slot_update(tracker.get_session(session_id))
         effective_stage = route_after_slot_update.stage if stage_after_a4 in {None, "A1"} else stage_after_a4
 
-        if effective_stage == "FALLBACK":
+        if self._should_collect_chief_complaint(patient_context, a1_result, a4_result):
+            selected_action = self._build_chief_complaint_intake_action(patient_text)
+            search_result.selected_action = selected_action
+            search_result.root_best_action = selected_action
+            search_result.metadata["fallback_reason"] = "no_clinical_information_in_patient_text"
+        elif effective_stage == "FALLBACK":
             fallback_candidate = self.deps.question_selector.select_next_question(
                 self.deps.retriever.get_cold_start_questions(),
                 tracker.get_session(session_id),
@@ -527,6 +546,14 @@ class ConsultationBrain:
         elif default_search_action is not None:
             selected_action = default_search_action
 
+        if selected_action is None and not accept_decision.should_stop:
+            selected_action = self._choose_cold_start_probe_action(session_id)
+
+            if selected_action is not None and not self._has_search_signal(search_result):
+                search_result.selected_action = selected_action
+                search_result.root_best_action = selected_action
+                search_result.metadata["fallback_reason"] = "no_a2_a3_action_available"
+
         if self._has_search_signal(search_result):
             search_result.selected_action = selected_action
             search_result.verifier_repair_context = self._build_observable_repair_context(
@@ -566,10 +593,12 @@ class ConsultationBrain:
                 "final_report": final_report,
             }
 
-        a3_result = self.deps.action_builder.build_a3_verification_result(
-            selected_action,
-            rationale="已结合 R2 检索、UCT 评分与局部 rollout 选择当前动作。",
+        a3_rationale = (
+            "当前输入尚未包含明确症状、风险因素或检查结果，系统先进行主诉澄清。"
+            if selected_action is not None and selected_action.action_type == "collect_chief_complaint"
+            else "已结合 R2 检索、UCT 评分与局部 rollout 选择当前动作。"
         )
+        a3_result = self.deps.action_builder.build_a3_verification_result(selected_action, rationale=a3_rationale)
 
         if selected_action is not None:
             tracker.mark_question_asked(session_id, selected_action.target_node_id)
@@ -1777,6 +1806,98 @@ class ConsultationBrain:
             "previous_selected_action": asdict(previous_action) if previous_action is not None else None,
             "new_selected_action": asdict(selected_action) if selected_action is not None else None,
         }
+
+    # 当输入线索过少导致 A2/A3 暂无候选动作时，退回全局冷启动问题，避免会话空转。
+    def _choose_cold_start_probe_action(self, session_id: str) -> MctsAction | None:
+        state = self.deps.state_tracker.get_session(session_id)
+        fallback_candidate = self.deps.question_selector.select_next_question(
+            self.deps.retriever.get_cold_start_questions(),
+            state,
+        )
+
+        if fallback_candidate is None:
+            return None
+
+        return self.deps.action_builder.build_probe_action_from_question_candidate(fallback_candidate)
+
+    # 判断当前输入是否只是问候或闲聊，没有足够临床信息可进入 A2/A3。
+    def _should_collect_chief_complaint(
+        self,
+        patient_context: PatientContext,
+        a1_result: A1ExtractionResult,
+        a4_result: A4DeductiveResult | None,
+    ) -> bool:
+        if a4_result is not None:
+            return False
+
+        if len(a1_result.key_features) > 0:
+            return False
+
+        if len(patient_context.clinical_features) > 0:
+            return False
+
+        general_info = patient_context.general_info
+        if general_info.age is not None or general_info.sex is not None or general_info.pregnancy_status is not None:
+            return False
+
+        if len(general_info.past_history) > 0 or len(general_info.epidemiology) > 0:
+            return False
+
+        return True
+
+    # 构造主诉采集动作；优先用 LLM 生成自然回应，失败时回退固定话术。
+    def _build_chief_complaint_intake_action(self, patient_text: str) -> MctsAction:
+        payload = self._build_chief_complaint_prompt_payload(patient_text)
+        acknowledgement = str(payload.get("acknowledgement") or "你好，我在。").strip()
+        question = str(
+            payload.get("question")
+            or "请先告诉我这次主要哪里不舒服、持续了多久，以及你最担心的问题是什么？"
+        ).strip()
+        reasoning = str(payload.get("reasoning") or "当前输入缺少可推理的临床线索，需要先采集主诉。").strip()
+        question_text = f"{acknowledgement}\n\n{question}"
+
+        return MctsAction(
+            action_id="intake::chief_complaint",
+            action_type="collect_chief_complaint",
+            target_node_id="__chief_complaint__",
+            target_node_label="Intake",
+            target_node_name="主要不适 / 就诊原因",
+            topic_id="A1",
+            prior_score=1.0,
+            metadata={
+                "question_type_hint": "detail",
+                "question_text": question_text,
+                "intake_reasoning": reasoning,
+                "evidence_tags": ["intake", "type:detail"],
+            },
+        )
+
+    # 生成主诉采集话术；LLM 不可用时返回安全固定话术。
+    def _build_chief_complaint_prompt_payload(self, patient_text: str) -> dict:
+        default_payload = {
+            "acknowledgement": "你好，我在。",
+            "question": "请先告诉我这次主要哪里不舒服、持续了多久，以及你最担心的问题是什么？",
+            "reasoning": "当前输入缺少可推理的临床线索，需要先采集主诉。",
+        }
+
+        llm_client = self.deps.llm_client
+        is_available = getattr(llm_client, "is_available", lambda: False)
+        if llm_client is None or not is_available():
+            return default_payload
+
+        try:
+            payload = llm_client.run_structured_prompt(
+                "intake_opening_response",
+                {"patient_text": patient_text},
+                dict,
+            )
+        except Exception:
+            return default_payload
+
+        if not isinstance(payload, dict):
+            return default_payload
+
+        return {**default_payload, **payload}
 
     # 判断当前搜索是否已经产生了可供 verifier 或下一问消费的有效信号。
     def _has_search_signal(self, search_result: SearchResult) -> bool:

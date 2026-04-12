@@ -1,0 +1,22 @@
+# Streamlit 演示前端运行配置。
+# 这里放非敏感默认值；本机私密配置请写入 configs/frontend.local.yaml。
+
+neo4j:
+  uri: bolt://localhost:7687
+  user: neo4j
+  password: admin123456
+  database: neo4j
+
+llm:
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  model: qwen3-max
+  # 不建议把真实 API Key 写入版本库。
+  # 如需实时模式，请在 configs/frontend.local.yaml 中填写 api_key，
+  # 或继续使用 DASHSCOPE_API_KEY / OPENAI_API_KEY 环境变量。
+  api_key: ""
+
+brain:
+  acceptance_profile: guarded_lenient
+  verifier_acceptance_profile: guarded_lenient
+  agent_eval_mode: llm_verifier
+

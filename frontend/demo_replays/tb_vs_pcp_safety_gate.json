@@ -1,0 +1,249 @@
+{
+  "id": "tb_vs_pcp_safety_gate",
+  "title": "示例 2：PCP 与结核混淆时的安全拒停",
+  "description": "患者有 HIV 风险背景和呼吸道症状，早期候选诊断偏向 PCP；后续关键反证触发 guarded acceptance，系统拒绝过早停止并继续鉴别。",
+  "mode": "replay",
+  "summary": {
+    "best_answer": "肺孢子菌肺炎 (PCP)",
+    "accepted_correct": false,
+    "highlight": "安全闸门识别胸部 CT 磨玻璃影缺失，阻止将 PCP 过早作为最终结论。"
+  },
+  "turns": [
+    {
+      "turn_index": 1,
+      "patient_text": "我最近低热、咳嗽、晚上出汗，体重也掉了一些。之前查过 HIV 阳性。",
+      "system_question": "我想进一步确认：胸部 CT 是否存在磨玻璃影？",
+      "is_final": false,
+      "state": {
+        "turn_index": 1,
+        "is_running": true,
+        "has_final_report": false,
+        "primary_hypothesis": "肺孢子菌肺炎 (PCP)",
+        "has_pending_action": true,
+        "pending_action_name": "胸部CT磨玻璃影"
+      },
+      "a1": {
+        "features": [
+          {"name": "低热", "status": "存在", "certainty": "有把握", "reasoning": "患者主动描述低热。"},
+          {"name": "咳嗽", "status": "存在", "certainty": "有把握", "reasoning": "患者主动描述咳嗽。"},
+          {"name": "盗汗", "status": "存在", "certainty": "有把握", "reasoning": "晚上出汗提示结核等竞争诊断。"},
+          {"name": "体重下降", "status": "存在", "certainty": "有把握", "reasoning": "体重下降提示慢性感染或消耗性疾病。"},
+          {"name": "HIV 感染", "status": "存在", "certainty": "有把握", "reasoning": "患者明确提到 HIV 阳性。"}
+        ],
+        "reasoning": "A1 同时抽取到 PCP 风险背景与结核提示线索。"
+      },
+      "a2": {
+        "candidates": [
+          {"name": "肺孢子菌肺炎 (PCP)", "score": 0.80, "score_text": "0.80", "reasoning": "HIV 背景和呼吸道症状支持 PCP。", "is_primary": true},
+          {"name": "HIV合并结核分枝杆菌感染", "score": 0.74, "score_text": "0.74", "reasoning": "盗汗、体重下降和慢性病程强烈提示结核。", "is_primary": false},
+          {"name": "原发性肺部感染", "score": 0.42, "score_text": "0.42", "reasoning": "普通肺部感染仍可解释部分症状。", "is_primary": false}
+        ],
+        "reasoning": "A2 发现 PCP 与结核分数接近，需要通过影像和病原学区分。"
+      },
+      "a3": {
+        "question_text": "我想进一步确认：胸部 CT 是否存在磨玻璃影？",
+        "selected_action_name": "胸部CT磨玻璃影",
+        "question_type": "imaging",
+        "question_type_label": "影像学",
+        "reasoning": "磨玻璃影是 PCP 的定义性支持证据；若明确不存在，将显著削弱 PCP。",
+        "root_best_action_name": "胸部CT磨玻璃影",
+        "repair_selected_action_name": "",
+        "is_repair_override": false,
+        "evidence_tags": ["imaging", "type:symptom"]
+      },
+      "a4": {
+        "has_result": false,
+        "existence_label": "暂无上一轮回答",
+        "certainty_label": "暂无",
+        "route_label": "A3 继续验证证据",
+        "reasoning": "第一轮尚无上一轮待验证动作。"
+      },
+      "search": {
+        "rollouts": 8,
+        "tree_node_count": 13,
+        "trajectory_count": 8,
+        "best_answer": "肺孢子菌肺炎 (PCP)",
+        "consistency": 0.66,
+        "diversity": 0.43,
+        "agent_evaluation": 0.72,
+        "verifier_result": "复核器认为暂可考虑 PCP，但需要安全闸门复核",
+        "final_answer_scores": [
+          {"answer_name": "肺孢子菌肺炎 (PCP)", "final_score": 0.70, "consistency": 0.66, "diversity": 0.43, "agent_evaluation": 0.72},
+          {"answer_name": "HIV合并结核分枝杆菌感染", "final_score": 0.65, "consistency": 0.61, "diversity": 0.40, "agent_evaluation": 0.68}
+        ]
+      },
+      "safety": {
+        "verifier_should_accept": false,
+        "verifier_score": 0.70,
+        "verifier_reject_reason": "strong_alternative_not_ruled_out",
+        "guarded_acceptance_blocked": false,
+        "guarded_block_reason": "",
+        "tree_rerooted": false,
+        "reroot_reason": "",
+        "repair_mode": "repair_alternative_disambiguation",
+        "missing_evidence_families": ["imaging", "pathogen"],
+        "recommended_next_evidence": ["胸部 CT 磨玻璃影", "结核接触史", "痰抗酸染色 / Xpert"],
+        "alternative_candidates": [
+          {"answer_name": "HIV合并结核分枝杆菌感染", "strength": "strong", "reason": "盗汗、体重下降和慢性病程提示强竞争诊断。"}
+        ]
+      }
+    },
+    {
+      "turn_index": 2,
+      "patient_text": "没有，医生说不像磨玻璃影，更像上肺有一些斑片和空洞。",
+      "system_question": "我想进一步确认：是否有结核接触史或既往结核相关检查阳性？",
+      "is_final": false,
+      "state": {
+        "turn_index": 2,
+        "is_running": true,
+        "has_final_report": false,
+        "primary_hypothesis": "HIV合并结核分枝杆菌感染",
+        "has_pending_action": true,
+        "pending_action_name": "结核接触史 / 结核相关检查"
+      },
+      "a1": {
+        "features": [],
+        "reasoning": "本轮主要解释上一轮影像问题。"
+      },
+      "a2": {
+        "candidates": [
+          {"name": "HIV合并结核分枝杆菌感染", "score": 0.84, "score_text": "0.84", "reasoning": "影像不支持 PCP，且盗汗、体重下降、空洞更支持结核。", "is_primary": true},
+          {"name": "肺孢子菌肺炎 (PCP)", "score": 0.38, "score_text": "0.38", "reasoning": "关键影像证据缺失，PCP 被显著下调。", "is_primary": false},
+          {"name": "原发性肺部感染", "score": 0.43, "score_text": "0.43", "reasoning": "仍需结合病原学鉴别。", "is_primary": false}
+        ],
+        "reasoning": "A2 发生 verifier-driven reshuffle，主假设从 PCP 转向结核。"
+      },
+      "a3": {
+        "question_text": "我想进一步确认：是否有结核接触史或既往结核相关检查阳性？",
+        "selected_action_name": "结核接触史 / 结核相关检查",
+        "question_type": "history",
+        "question_type_label": "病史",
+        "reasoning": "PCP 出现关键反证后，系统转向验证结核相关证据。",
+        "root_best_action_name": "动脉血氧分压 (PaO2) < 70 mmHg",
+        "repair_selected_action_name": "结核接触史 / 结核相关检查",
+        "is_repair_override": true,
+        "evidence_tags": ["tuberculosis", "risk"]
+      },
+      "a4": {
+        "has_result": true,
+        "existence": "non_exist",
+        "existence_label": "不存在",
+        "certainty": "confident",
+        "route_label": "A2 重新排序候选诊断",
+        "reasoning": "患者明确否认胸部 CT 磨玻璃影，并提供更像结核的空洞影线索；这构成 PCP 的关键反证。",
+        "evidence_families": ["imaging"],
+        "entered_confirmed_family": false,
+        "provisional_family_candidate": false
+      },
+      "search": {
+        "rollouts": 8,
+        "tree_node_count": 21,
+        "trajectory_count": 14,
+        "best_answer": "HIV合并结核分枝杆菌感染",
+        "consistency": 0.73,
+        "diversity": 0.45,
+        "agent_evaluation": 0.77,
+        "verifier_result": "复核器建议继续追问",
+        "final_answer_scores": [
+          {"answer_name": "HIV合并结核分枝杆菌感染", "final_score": 0.76, "consistency": 0.73, "diversity": 0.45, "agent_evaluation": 0.77},
+          {"answer_name": "肺孢子菌肺炎 (PCP)", "final_score": 0.39, "consistency": 0.30, "diversity": 0.32, "agent_evaluation": 0.40}
+        ]
+      },
+      "safety": {
+        "verifier_should_accept": true,
+        "verifier_score": 0.78,
+        "verifier_reject_reason": "strong_alternative_not_ruled_out",
+        "guarded_acceptance_blocked": true,
+        "guarded_block_reason": "hard_negative_key_evidence",
+        "tree_rerooted": true,
+        "reroot_reason": "top_hypothesis_changed_after_verifier",
+        "repair_mode": "repair_alternative_disambiguation",
+        "missing_evidence_families": ["tuberculosis", "pathogen"],
+        "recommended_next_evidence": ["结核接触史", "痰抗酸染色", "Xpert MTB/RIF"],
+        "alternative_candidates": [
+          {"answer_name": "HIV合并结核分枝杆菌感染", "strength": "strong", "reason": "影像空洞、盗汗和体重下降共同支持结核。"}
+        ],
+        "root_best_action": "动脉血氧分压 (PaO2) < 70 mmHg",
+        "repair_selected_action": "结核接触史 / 结核相关检查"
+      }
+    },
+    {
+      "turn_index": 3,
+      "patient_text": "之前同住的人得过结核，我自己的痰检查医生说也有可疑。",
+      "system_question": "我想进一步确认：是否有痰抗酸染色、Xpert MTB/RIF 或结核核酸检测阳性？",
+      "is_final": false,
+      "state": {
+        "turn_index": 3,
+        "is_running": true,
+        "has_final_report": false,
+        "primary_hypothesis": "HIV合并结核分枝杆菌感染",
+        "has_pending_action": true,
+        "pending_action_name": "结核病原学检测"
+      },
+      "a1": {
+        "features": [
+          {"name": "结核接触史", "status": "存在", "certainty": "有把握", "reasoning": "患者提到同住者结核。"}
+        ],
+        "reasoning": "A1 提取到强结核风险因素。"
+      },
+      "a2": {
+        "candidates": [
+          {"name": "HIV合并结核分枝杆菌感染", "score": 0.90, "score_text": "0.90", "reasoning": "结核接触史、盗汗、体重下降和空洞影共同支持。", "is_primary": true},
+          {"name": "肺孢子菌肺炎 (PCP)", "score": 0.30, "score_text": "0.30", "reasoning": "PCP 的核心影像证据被否定。", "is_primary": false}
+        ],
+        "reasoning": "A2 稳定转向结核。"
+      },
+      "a3": {
+        "question_text": "我想进一步确认：是否有痰抗酸染色、Xpert MTB/RIF 或结核核酸检测阳性？",
+        "selected_action_name": "Xpert MTB/RIF / 痰抗酸染色",
+        "question_type": "lab",
+        "question_type_label": "实验室 / 检查",
+        "reasoning": "下一步需要病原学证据来支持结核最终诊断。",
+        "root_best_action_name": "Xpert MTB/RIF / 痰抗酸染色",
+        "repair_selected_action_name": "",
+        "is_repair_override": false,
+        "evidence_tags": ["pathogen", "tuberculosis", "type:lab"]
+      },
+      "a4": {
+        "has_result": true,
+        "existence": "exist",
+        "existence_label": "存在",
+        "certainty": "doubt",
+        "route_label": "A3 继续验证证据",
+        "reasoning": "患者支持结核接触史和可疑检查，但病原学尚未明确。",
+        "evidence_families": ["tuberculosis"],
+        "entered_confirmed_family": false,
+        "provisional_family_candidate": true
+      },
+      "search": {
+        "rollouts": 8,
+        "tree_node_count": 27,
+        "trajectory_count": 18,
+        "best_answer": "HIV合并结核分枝杆菌感染",
+        "consistency": 0.80,
+        "diversity": 0.47,
+        "agent_evaluation": 0.83,
+        "verifier_result": "复核器建议继续追问，补病原学证据",
+        "final_answer_scores": [
+          {"answer_name": "HIV合并结核分枝杆菌感染", "final_score": 0.81, "consistency": 0.80, "diversity": 0.47, "agent_evaluation": 0.83},
+          {"answer_name": "肺孢子菌肺炎 (PCP)", "final_score": 0.28, "consistency": 0.22, "diversity": 0.31, "agent_evaluation": 0.27}
+        ]
+      },
+      "safety": {
+        "verifier_should_accept": false,
+        "verifier_score": 0.79,
+        "verifier_reject_reason": "missing_key_support",
+        "guarded_acceptance_blocked": false,
+        "guarded_block_reason": "",
+        "tree_rerooted": false,
+        "reroot_reason": "",
+        "repair_mode": "repair_supporting_evidence",
+        "missing_evidence_families": ["pathogen"],
+        "recommended_next_evidence": ["Xpert MTB/RIF", "痰抗酸染色", "结核核酸检测"],
+        "alternative_candidates": [
+          {"answer_name": "肺孢子菌肺炎 (PCP)", "strength": "weak", "reason": "关键影像证据缺失，已被安全闸门压低。"}
+        ]
+      }
+    }
+  ]
+}

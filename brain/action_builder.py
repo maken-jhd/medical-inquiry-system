@@ -134,6 +134,11 @@ class ActionBuilder:
 
     # 根据动作类型和目标标签生成更贴近临床语境的提问文本。
     def render_question_text(self, action: MctsAction, style: str = "clinical") -> str:
+        custom_question = str(action.metadata.get("question_text") or "").strip()
+
+        if len(custom_question) > 0:
+            return custom_question
+
         question_type_hint = str(action.metadata.get("question_type_hint", "symptom"))
         target_name = action.target_node_name
 

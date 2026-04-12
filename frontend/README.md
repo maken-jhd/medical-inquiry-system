@@ -1,0 +1,178 @@
+# Streamlit 演示前端
+
+本目录提供一个面向中期检查的前后端一体演示界面。目标是快速、稳定地展示当前第二阶段问诊系统的核心能力：
+
+- 多轮问诊对话
+- A1 / A2 / A3 / A4 阶段结果
+- 候选诊断排序
+- 下一问选择与 repair action
+- 搜索摘要
+- 复核器与安全接受闸门
+
+前端采用 `Streamlit + Python`，不引入 React / Vue 等前后端分离方案。
+
+## 启动方式
+
+在仓库根目录运行：
+
+```bash
+streamlit run frontend/app.py
+```
+
+如果当前环境没有安装 Streamlit：
+
+```bash
+pip install streamlit
+streamlit run frontend/app.py
+```
+
+如果使用项目 conda 环境，可按你的环境名运行：
+
+```bash
+conda run -n GraduationDesign streamlit run frontend/app.py
+```
+
+仓库已提供项目级 Streamlit 配置：
+
+```text
+.streamlit/config.toml
+```
+
+该配置默认关闭 Streamlit 首次启动时的邮箱 / 使用统计提示，避免 `conda run` 启动时卡在交互式 onboarding。
+
+如果仍然遇到邮箱提示，也可以使用显式参数启动：
+
+```bash
+conda run -n GraduationDesign streamlit run frontend/app.py --browser.gatherUsageStats false
+```
+
+## 模式 A：演示回放模式
+
+这是默认模式，也是现场演示的保底模式。
+
+特点：
+
+- 不依赖 Neo4j
+- 不依赖 DashScope / OpenAI API Key
+- 不调用真实 LLM
+- 直接加载本地 JSON demo
+- 可以逐轮查看问诊对话、A1-A4、搜索摘要和安全机制
+
+当前内置两个示例：
+
+- `示例 1：PCP 模糊证据逐步收敛`
+- `示例 2：PCP 与结核混淆时的安全拒停`
+
+示例文件位于：
+
+```text
+frontend/demo_replays/pcp_provisional_success.json
+frontend/demo_replays/tb_vs_pcp_safety_gate.json
+```
+
+## 模式 B：实时运行模式
+
+实时模式会直接调用现有后端入口：
+
+```python
+brain.service.build_default_brain_from_env()
+ConsultationBrain.process_turn(...)
+```
+
+需要环境变量：
+
+```bash
+export NEO4J_URI="bolt://localhost:7687"
+export NEO4J_USER="neo4j"
+export NEO4J_PASSWORD="你的 Neo4j 密码"
+export NEO4J_DATABASE="neo4j"
+
+export DASHSCOPE_API_KEY="你的 DashScope Key"
+export OPENAI_BASE_URL="https://dashscope.aliyuncs.com/compatible-mode/v1"
+export OPENAI_MODEL="qwen3-max"
+```
+
+如果这些环境变量、Neo4j 服务或 LLM 调用不可用，页面会显示中文错误提示；此时切回“演示回放模式”仍可完整展示。
+
+### 推荐一键启动方式
+
+仓库提供了实时模式启动脚本：
+
+```bash
+./scripts/run_streamlit_realtime.sh
+```
+
+脚本只负责启动页面，不再注入实时运行配置。实时配置由 Python 在运行时自动读取：
+
+```text
+configs/frontend.yaml
+configs/frontend.local.yaml
+```
+
+`configs/frontend.yaml` 已提供非敏感默认值：
+
+```bash
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=admin123456
+NEO4J_DATABASE=neo4j
+OPENAI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+OPENAI_MODEL=qwen3-max
+BRAIN_ACCEPTANCE_PROFILE=guarded_lenient
+TRAJECTORY_VERIFIER_ACCEPTANCE_PROFILE=guarded_lenient
+BRAIN_AGENT_EVAL_MODE=llm_verifier
+```
+
+真实 API Key 不建议写入版本库。请复制本机私密配置模板：
+
+```bash
+cp configs/frontend.local.example.yaml configs/frontend.local.yaml
+```
+
+然后在 `configs/frontend.local.yaml` 中填写：
+
+```yaml
+llm:
+  api_key: "你的 DashScope API Key"
+```
+
+`configs/frontend.local.yaml` 已被 `.gitignore` 忽略，不会提交。
+
+如果需要临时覆盖端口：
+
+```bash
+./scripts/run_streamlit_realtime.sh --server.port 8502
+```
+
+### 手动启动方式
+
+如果不使用脚本，可以直接运行：
+
+```bash
+conda run -n GraduationDesign streamlit run frontend/app.py --browser.gatherUsageStats false
+```
+
+页面启动后，实时模式会自动读取 `configs/frontend.yaml` 与可选的 `configs/frontend.local.yaml`。
+
+## 文件说明
+
+```text
+frontend/
+  app.py                    Streamlit 主页面
+  ui_adapter.py             将后端 process_turn / replay JSON 转为中文 UI 视图模型
+  demo_cases.py             内置 demo registry
+  demo_replays/             离线演示 JSON
+  README.md                 启动与模式说明
+```
+
+## 字段降级策略
+
+后端不同运行路径返回的字段可能不完全一致。前端通过 `ui_adapter.py` 做了轻量降级：
+
+- 如果没有 `a1.key_features`，A1 卡片显示“本轮暂无新的关键线索”
+- 如果没有 `a2.primary_hypothesis`，优先从 `final_report.candidate_hypotheses` 或 `search_report.final_answer_scores` 补候选诊断
+- 如果没有 `search_report.tree_node_count`，搜索摘要显示“暂无”
+- 如果没有 `guarded_acceptance` 信息，安全模块显示“未阻止”或“暂无”
+- 如果实时模式抛错，不影响回放模式
+
+这样可以优先保证中期检查时“可运行、可展示、可解释、可保底”。
