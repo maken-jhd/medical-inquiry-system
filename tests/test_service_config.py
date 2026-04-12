@@ -21,6 +21,8 @@ def test_load_brain_config_reads_yaml_file(tmp_path: Path) -> None:
                 "  enable_tree_reroot: false",
                 "stop:",
                 "  min_turn_index_before_final_answer: 3",
+                "  require_verifier_accept_flag: false",
+                "  acceptance_profile: guarded_lenient",
             ]
         ),
         encoding="utf-8",
@@ -33,3 +35,5 @@ def test_load_brain_config_reads_yaml_file(tmp_path: Path) -> None:
     assert config["a4"]["use_llm_deductive_judge"] is True
     assert config["repair"]["enable_tree_reroot"] is False
     assert config["stop"]["min_turn_index_before_final_answer"] == 3
+    assert config["stop"]["require_verifier_accept_flag"] is False
+    assert config["stop"]["acceptance_profile"] == "guarded_lenient"

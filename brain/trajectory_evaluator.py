@@ -17,6 +17,13 @@ ALLOWED_REJECT_REASONS = {
 }
 
 
+ALLOWED_ACCEPT_REASONS = {
+    "key_support_sufficient",
+    "alternatives_reasonably_ruled_out",
+    "trajectory_stable",
+}
+
+
 @dataclass
 class TrajectoryEvaluatorConfig:
     """保存轨迹聚合评分阶段的权重配置。"""
@@ -133,7 +140,7 @@ class TrajectoryEvaluator:
         answer_candidates: list[dict] | None = None,
     ) -> tuple[float, dict]:
         if len(trajectories) == 0:
-            return 0.0, {"verifier_mode": "empty"}
+            return 0.0, {"verifier_mode": "empty", "verifier_called": False}
 
         if self.config.agent_eval_mode == "llm_verifier":
             llm_result = self._compute_llm_agent_evaluation(
@@ -147,6 +154,7 @@ class TrajectoryEvaluator:
             if llm_result is not None:
                 return llm_result["score"], {
                     "verifier_mode": "llm_verifier",
+                    "verifier_called": True,
                     "verifier_should_accept": llm_result["should_accept_stop"],
                     "verifier_reject_reason": llm_result["reject_reason"],
                     "verifier_reasoning": llm_result["reasoning"],
@@ -156,12 +164,18 @@ class TrajectoryEvaluator:
                     "verifier_alternative_candidates": llm_result["alternative_candidates"],
                     "verifier_reject_reason_source": llm_result["reject_reason_source"],
                     "verifier_schema_valid": llm_result["schema_valid"],
+                    "verifier_accept_reason": llm_result["accept_reason"],
+                    "verifier_accept_reason_source": llm_result["accept_reason_source"],
+                    "verifier_accept_schema_valid": llm_result["accept_schema_valid"],
                 }
 
         if self.config.agent_eval_mode != "fallback":
             total_score = sum(item.score for item in trajectories)
             normalized = total_score / len(trajectories)
-            return max(min(normalized, 1.0), 0.0), {"verifier_mode": self.config.agent_eval_mode}
+            return max(min(normalized, 1.0), 0.0), {
+                "verifier_mode": self.config.agent_eval_mode,
+                "verifier_called": False,
+            }
 
         total_score = sum(item.score for item in trajectories)
         best_score = max(item.score for item in trajectories)
@@ -170,7 +184,7 @@ class TrajectoryEvaluator:
         )
         normalized = total_score / len(trajectories)
         normalized = normalized * 0.55 + best_score * 0.3 + terminal_ratio * 0.15
-        return max(min(normalized, 1.0), 0.0), {"verifier_mode": "fallback"}
+        return max(min(normalized, 1.0), 0.0), {"verifier_mode": "fallback", "verifier_called": False}
 
     # 使用可选的 LLM verifier 对某个答案组做一次代理级评审。
     def _compute_llm_agent_evaluation(
@@ -225,11 +239,18 @@ class TrajectoryEvaluator:
             alternative_candidates=alternative_candidates,
             missing_evidence=missing_evidence,
         )
+        accept_reason, accept_reason_source, accept_schema_valid = self._normalize_accept_reason(
+            payload,
+            should_accept_stop=should_accept_stop_value,
+            score=score,
+            reject_reason=reject_reason,
+        )
 
         return {
             "score": max(min(score, 1.0), 0.0),
             "should_accept_stop": should_accept_stop_value,
             "reject_reason": reject_reason,
+            "accept_reason": accept_reason,
             "reasoning": str(payload.get("reasoning", "")),
             "missing_evidence": missing_evidence,
             "risk_flags": self._normalize_string_list(payload.get("risk_flags", [])),
@@ -237,7 +258,44 @@ class TrajectoryEvaluator:
             "alternative_candidates": alternative_candidates,
             "reject_reason_source": reject_reason_source,
             "schema_valid": schema_valid,
+            "accept_reason_source": accept_reason_source,
+            "accept_schema_valid": accept_schema_valid,
         }
+
+    # 将 accepted 路径的原因结构化，避免只知道“能停”却不知道为什么能停。
+    def _normalize_accept_reason(
+        self,
+        payload: dict,
+        should_accept_stop: bool,
+        score: float,
+        reject_reason: str,
+    ) -> tuple[str, str, bool]:
+        raw_reason = str(payload.get("accept_reason", "")).strip()
+
+        if raw_reason in ALLOWED_ACCEPT_REASONS:
+            return raw_reason, "llm_schema", True
+
+        inferred_reason = self._infer_accept_reason(
+            should_accept_stop=should_accept_stop,
+            score=score,
+            reject_reason=reject_reason,
+        )
+        return inferred_reason, "fallback_inferred", False
+
+    # 当模型漏填 accept_reason 时，用低风险启发式补齐，并显式标记 fallback。
+    def _infer_accept_reason(
+        self,
+        should_accept_stop: bool,
+        score: float,
+        reject_reason: str,
+    ) -> str:
+        if should_accept_stop and score >= 0.9:
+            return "key_support_sufficient"
+
+        if should_accept_stop and reject_reason == "strong_alternative_not_ruled_out":
+            return "alternatives_reasonably_ruled_out"
+
+        return "trajectory_stable"
 
     # verifier 是 repair policy 的控制信号，因此优先消费显式枚举，只有异常时才退回启发式推断。
     def _normalize_reject_reason(

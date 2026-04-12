@@ -240,6 +240,136 @@ def test_service_missing_support_prefers_recommended_evidence_family() -> None:
     assert action.target_node_name == "胸部CT磨玻璃影"
 
 
+def test_service_pcp_combo_repair_prefers_missing_family_anchor_over_respiratory_path() -> None:
+    tracker = StateTracker()
+    state = tracker.create_session("s_combo")
+    state.candidate_hypotheses = [
+        HypothesisScore(node_id="pneumonia", label="DiseasePhase", name="原发性肺部感染", score=1.1),
+        HypothesisScore(node_id="pcp", label="Disease", name="肺孢子菌肺炎 (PCP)", score=0.95),
+    ]
+    rows = {
+        "pneumonia": [
+            {
+                "node_id": "low_oxygen",
+                "label": "Sign",
+                "name": "低氧血症",
+                "relation_type": "MANIFESTS_AS",
+                "relation_weight": 0.95,
+                "node_weight": 1.0,
+                "similarity_confidence": 1.0,
+                "contradiction_priority": 1.0,
+                "question_type_hint": "symptom",
+                "priority": 4.4,
+                "is_red_flag": True,
+                "topic_id": "DiseasePhase",
+            }
+        ],
+        "pcp": [
+            {
+                "node_id": "cd4",
+                "label": "LabFinding",
+                "name": "CD4+ T淋巴细胞计数 < 200/μL",
+                "relation_type": "HAS_LAB_FINDING",
+                "relation_weight": 0.8,
+                "node_weight": 1.0,
+                "similarity_confidence": 1.0,
+                "contradiction_priority": 0.88,
+                "question_type_hint": "lab",
+                "priority": 2.0,
+                "is_red_flag": False,
+                "topic_id": "Disease",
+            },
+            {
+                "node_id": "dry_cough",
+                "label": "Symptom",
+                "name": "干咳",
+                "relation_type": "MANIFESTS_AS",
+                "relation_weight": 0.9,
+                "node_weight": 1.0,
+                "similarity_confidence": 1.0,
+                "contradiction_priority": 0.75,
+                "question_type_hint": "symptom",
+                "priority": 3.5,
+                "is_red_flag": False,
+                "topic_id": "Disease",
+            },
+        ],
+    }
+    brain = _build_brain(rows, tracker)
+
+    action = brain._choose_repair_action(
+        "s_combo",
+        SearchResult(best_answer_id="pcp"),
+        {
+            "reject_reason": "missing_key_support",
+            "current_answer_id": "pcp",
+            "current_answer_name": "肺孢子菌肺炎 (PCP)",
+            "guarded_acceptance_block_reason": "pcp_combo_insufficient",
+            "guarded_confirmed_evidence_families": ["imaging", "oxygenation"],
+            "guarded_missing_evidence_families": ["immune_status", "pathogen", "pcp_specific"],
+            "recommended_next_evidence": ["CD4+ T淋巴细胞计数 < 200/μL", "β-D 葡聚糖", "PCP PCR"],
+        },
+    )
+
+    assert action is not None
+    assert action.hypothesis_id == "pcp"
+    assert action.target_node_name == "CD4+ T淋巴细胞计数 < 200/μL"
+
+
+def test_service_missing_confirmed_evidence_prefers_missing_family_before_root_symptoms() -> None:
+    tracker = StateTracker()
+    state = tracker.create_session("s_missing_family")
+    state.candidate_hypotheses = [
+        HypothesisScore(node_id="pcp", label="Disease", name="肺孢子菌肺炎 (PCP)", score=1.0),
+    ]
+    rows = [
+        {
+            "node_id": "fever",
+            "label": "Symptom",
+            "name": "发热",
+            "relation_type": "MANIFESTS_AS",
+            "relation_weight": 0.95,
+            "node_weight": 1.0,
+            "similarity_confidence": 1.0,
+            "contradiction_priority": 0.85,
+            "question_type_hint": "symptom",
+            "priority": 4.2,
+            "is_red_flag": False,
+            "topic_id": "Disease",
+        },
+        {
+            "node_id": "bdg",
+            "label": "LabFinding",
+            "name": "血清 β-D 葡聚糖升高",
+            "relation_type": "HAS_LAB_FINDING",
+            "relation_weight": 0.75,
+            "node_weight": 1.0,
+            "similarity_confidence": 1.0,
+            "contradiction_priority": 0.92,
+            "question_type_hint": "lab",
+            "priority": 2.1,
+            "is_red_flag": False,
+            "topic_id": "Disease",
+        },
+    ]
+    brain = _build_brain(rows, tracker)
+
+    action = brain._choose_repair_action(
+        "s_missing_family",
+        SearchResult(best_answer_id="pcp"),
+        {
+            "reject_reason": "missing_key_support",
+            "current_answer_id": "pcp",
+            "guarded_acceptance_block_reason": "missing_confirmed_key_evidence",
+            "guarded_missing_evidence_families": ["pathogen", "pcp_specific"],
+            "recommended_next_evidence": ["β-D 葡聚糖", "PCP PCR"],
+        },
+    )
+
+    assert action is not None
+    assert action.target_node_name == "血清 β-D 葡聚糖升高"
+
+
 # 验证 strong_alternative_not_ruled_out 会把强备选 hypothesis 的动作纳入 repair 候选池。
 def test_service_can_switch_to_alternative_hypothesis_action_when_verifier_requests_it() -> None:
     tracker = StateTracker()

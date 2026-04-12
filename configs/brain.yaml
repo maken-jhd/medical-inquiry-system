@@ -46,3 +46,6 @@ stop:
   min_answer_consistency: 0.45
   min_agent_eval_score: 0.72
   min_final_score: 0.6
+  require_verifier_accept_flag: true
+  acceptance_profile: baseline
+  guarded_lenient_early_turn_index: 2

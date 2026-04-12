@@ -24,7 +24,12 @@ from .router import ReasoningRouter, RouterConfig
 from .search_tree import SearchTree
 from .simulation_engine import SimulationConfig, SimulationEngine
 from .state_tracker import StateTracker
-from .stop_rules import StopRuleConfig, StopRuleEngine
+from .stop_rules import (
+    GUARDED_CONFIRMED_EVIDENCE_TAGS,
+    GUARDED_DEFINITION_RELATION_TYPES,
+    StopRuleConfig,
+    StopRuleEngine,
+)
 from .trajectory_evaluator import TrajectoryEvaluator, TrajectoryEvaluatorConfig
 from .types import (
     A1ExtractionResult,
@@ -181,6 +186,13 @@ class ConsultationBrain:
         )
         tracker.apply_slot_updates(session_id, a4_updates)
 
+        evidence_tags = self._infer_action_evidence_tags(pending_action)
+        confirmed_family_candidate = self._is_confirmed_family_candidate(
+            pending_action,
+            a4_result,
+            evidence_tags,
+        )
+        provisional_family_candidate = self._is_provisional_family_candidate(a4_result, evidence_tags)
         evidence_state = EvidenceState(
             node_id=pending_action.target_node_id,
             existence=a4_result.existence,
@@ -191,9 +203,23 @@ class ConsultationBrain:
                 "action_id": pending_action.action_id,
                 "hypothesis_id": pending_action.hypothesis_id,
                 "relation_type": pending_action.metadata.get("relation_type"),
+                "target_node_name": pending_action.target_node_name,
+                "target_node_label": pending_action.target_node_label,
+                "evidence_tags": sorted(evidence_tags),
+                "a4_supporting_span": a4_result.supporting_span,
+                "a4_negation_span": a4_result.negation_span,
+                "a4_uncertain_span": a4_result.uncertain_span,
+                "confirmed_family_candidate": confirmed_family_candidate,
+                "confirmed_family_candidates": sorted(evidence_tags & GUARDED_CONFIRMED_EVIDENCE_TAGS),
+                "provisional_family_candidate": provisional_family_candidate,
+                "provisional_family_candidates": sorted(
+                    evidence_tags & {"imaging", "oxygenation", "pathogen", "immune_status", "pcp_specific"}
+                ),
+                "patient_answer": patient_text,
             },
         )
         tracker.set_evidence_state(session_id, evidence_state)
+        self._record_a4_evidence_audit(session_id, pending_action, evidence_state, a4_result, patient_text, turn_index)
         self._apply_hypothesis_feedback(session_id, pending_action, evidence_state)
         self._record_action_reward(session_id, pending_action, a4_result)
         tracker.get_session(session_id).metadata["last_answered_action"] = pending_action
@@ -320,7 +346,8 @@ class ConsultationBrain:
                 self.deps.mcts_engine.backpropagate(tree, child.node_id, trajectory.score)
 
         grouped = self.deps.trajectory_evaluator.group_by_answer(trajectories)
-        final_scores = self.deps.trajectory_evaluator.score_groups(grouped, patient_context=patient_context)
+        verifier_patient_context = self._build_verifier_patient_context(session_id, patient_context)
+        final_scores = self.deps.trajectory_evaluator.score_groups(grouped, patient_context=verifier_patient_context)
         best_answer = self.deps.trajectory_evaluator.select_best_answer(final_scores)
         selected_action = self.deps.mcts_engine.select_root_action(
             tree,
@@ -342,6 +369,49 @@ class ConsultationBrain:
         )
         state.metadata["last_search_result"] = search_result
         return search_result
+
+    # verifier 判断是否可以停止时需要看到累计会话证据，而不是只看当前 turn 的患者回复。
+    def _build_verifier_patient_context(self, session_id: str, latest_context: PatientContext) -> PatientContext:
+        state = self.deps.state_tracker.get_session(session_id)
+        raw_sections: list[str] = []
+        latest_text = latest_context.raw_text.strip()
+
+        if len(latest_text) > 0:
+            raw_sections.append(f"最新患者回答：{latest_text}")
+
+        if len(state.slots) > 0:
+            raw_sections.append("累计已确认槽位：")
+
+            for slot in state.slots.values():
+                if slot.status == "unknown":
+                    continue
+
+                evidence_text = "；".join(str(item) for item in slot.evidence if len(str(item).strip()) > 0)
+                raw_sections.append(
+                    f"- {slot.node_id}: status={slot.status}, certainty={slot.certainty}, evidence={evidence_text}"
+                )
+
+        if len(state.evidence_states) > 0:
+            raw_sections.append("累计 A4 证据判断：")
+
+            for evidence in state.evidence_states.values():
+                raw_sections.append(
+                    f"- {evidence.node_id}: existence={evidence.existence}, certainty={evidence.certainty}, reasoning={evidence.reasoning}"
+                )
+
+        if len(state.candidate_hypotheses) > 0:
+            raw_sections.append("当前候选假设：")
+
+            for hypothesis in state.candidate_hypotheses[:5]:
+                raw_sections.append(f"- {hypothesis.name}: score={hypothesis.score:.4f}, node_id={hypothesis.node_id}")
+
+        raw_text = "\n".join(raw_sections).strip() or latest_context.raw_text
+        return PatientContext(
+            general_info=latest_context.general_info,
+            clinical_features=list(latest_context.clinical_features),
+            raw_text=raw_text,
+            metadata={**dict(latest_context.metadata), "context_scope": "cumulative_session_for_verifier"},
+        )
 
     # 将搜索结果转成一条可直接用于提问的动作。
     def choose_next_question_from_search(self, session_id: str, search_result: SearchResult) -> MctsAction | None:
@@ -485,6 +555,7 @@ class ConsultationBrain:
                 "route_after_a4": asdict(route_after_a4) if route_after_a4 is not None else None,
                 "route_after_slot_update": asdict(route_after_slot_update),
                 "updates": [asdict(item) for item in applied_updates],
+                "evidence_audit": tracker.get_session(session_id).metadata.get("last_a4_evidence_audit"),
                 "search_report": (
                     self.deps.report_builder.build_search_report(tracker.get_session(session_id), search_result)
                     if len(search_result.trajectories) > 0 or search_result.selected_action is not None
@@ -522,6 +593,7 @@ class ConsultationBrain:
             "route_after_a4": asdict(route_after_a4) if route_after_a4 is not None else None,
             "route_after_slot_update": asdict(route_after_slot_update),
             "updates": [asdict(item) for item in applied_updates],
+            "evidence_audit": tracker.get_session(session_id).metadata.get("last_a4_evidence_audit"),
             "search_report": (
                 self.deps.report_builder.build_search_report(tracker.get_session(session_id), search_result)
                 if len(search_result.trajectories) > 0 or search_result.selected_action is not None
@@ -531,6 +603,165 @@ class ConsultationBrain:
             "pending_action": asdict(selected_action) if selected_action is not None else None,
             "final_report": None,
         }
+
+    # 将 A4 问答解释写成逐轮审计记录，用来定位“问到了但没有进入 confirmed family”的断点。
+    def _record_a4_evidence_audit(
+        self,
+        session_id: str,
+        action: MctsAction,
+        evidence_state: EvidenceState,
+        a4_result: A4DeductiveResult,
+        patient_text: str,
+        turn_index: int,
+    ) -> None:
+        state = self.deps.state_tracker.get_session(session_id)
+        evidence_tags = self._infer_action_evidence_tags(action)
+        semantic_families = sorted(tag for tag in evidence_tags if not tag.startswith("type:"))
+        confirmed_family_candidate = bool(evidence_state.metadata.get("confirmed_family_candidate", False))
+        provisional_family_candidate = bool(evidence_state.metadata.get("provisional_family_candidate", False))
+        entry = {
+            "turn_index": turn_index,
+            "action_id": action.action_id,
+            "action_type": action.action_type,
+            "target_node_id": action.target_node_id,
+            "target_node_name": action.target_node_name,
+            "target_node_label": action.target_node_label,
+            "hypothesis_id": action.hypothesis_id,
+            "topic_id": action.topic_id,
+            "patient_answer": patient_text,
+            "existence": a4_result.existence,
+            "certainty": a4_result.certainty,
+            "reasoning": a4_result.reasoning,
+            "supporting_span": a4_result.supporting_span,
+            "negation_span": a4_result.negation_span,
+            "uncertain_span": a4_result.uncertain_span,
+            "relation_type": str(action.metadata.get("relation_type") or ""),
+            "question_type_hint": str(action.metadata.get("question_type_hint") or ""),
+            "evidence_tags": sorted(evidence_tags),
+            "evidence_families": semantic_families,
+            "confirmed_family_candidate": confirmed_family_candidate,
+            "confirmed_family_candidates": sorted(evidence_tags & GUARDED_CONFIRMED_EVIDENCE_TAGS),
+            "provisional_family_candidate": provisional_family_candidate,
+            "provisional_family_candidates": sorted(
+                evidence_tags & {"imaging", "oxygenation", "pathogen", "immune_status", "pcp_specific"}
+            ),
+            "entered_confirmed_family": confirmed_family_candidate,
+        }
+        history = state.metadata.get("a4_evidence_audit_history", [])
+
+        if not isinstance(history, list):
+            history = []
+
+        history.append(entry)
+        state.metadata["last_a4_evidence_audit"] = entry
+        state.metadata["a4_evidence_audit_history"] = history[-48:]
+
+    # A4 证据标签必须比动作 metadata 更鲁棒；节点名可兜底识别 CD4、β-D、PCR、CT 等锚点。
+    def _infer_action_evidence_tags(self, action: MctsAction) -> set[str]:
+        tags = {
+            item
+            for item in self._normalize_string_list(action.metadata.get("evidence_tags", []))
+            if len(item) > 0
+        }
+        text = self._normalize_match_text(
+            " ".join(
+                [
+                    action.target_node_id,
+                    action.target_node_name,
+                    action.target_node_label,
+                    str(action.metadata.get("relation_type") or ""),
+                    str(action.metadata.get("question_type_hint") or ""),
+                ]
+            )
+        )
+        tag_rules = {
+            "immune_status": ("hiv", "cd4", "t淋巴", "免疫", "艾滋", "机会性感染", "免疫抑制"),
+            "imaging": ("ct", "影像", "x线", "胸片", "磨玻璃", "双肺"),
+            "oxygenation": ("低氧", "血氧", "pao2", "氧分压", "氧合", "呼吸衰竭"),
+            "respiratory": ("发热", "干咳", "咳嗽", "呼吸困难", "气促"),
+            "pathogen": ("βd葡聚糖", "bdg", "葡聚糖", "病原", "痰", "balf", "pcr", "核酸", "支气管肺泡"),
+            "pcp_specific": ("肺孢子", "pcp", "pneumocystis", "βd葡聚糖", "bdg", "葡聚糖", "支气管肺泡"),
+            "tuberculosis": ("结核", "盗汗", "抗酸", "分枝杆菌", "tb", "tspot", "tspot.tb", "xpert"),
+            "systemic": ("皮疹", "咽痛", "关节", "腹泻", "淋巴结"),
+            "risk": ("高危", "性行为", "接触史", "暴露"),
+        }
+
+        for tag, keywords in tag_rules.items():
+            if any(keyword in text for keyword in keywords):
+                tags.add(tag)
+
+        anchor_families = self._anchor_action_families_from_text(text)
+
+        if len(anchor_families) > 0:
+            semantic_family_tags = {
+                "imaging",
+                "oxygenation",
+                "pathogen",
+                "immune_status",
+                "pcp_specific",
+                "tuberculosis",
+                "respiratory",
+                "risk",
+                "systemic",
+                "viral",
+            }
+            type_tags = {tag for tag in tags if tag.startswith("type:")}
+            non_family_tags = {
+                tag
+                for tag in tags
+                if not tag.startswith("type:") and tag not in semantic_family_tags
+            }
+            tags = type_tags | non_family_tags | anchor_families
+
+        question_type_hint = str(action.metadata.get("question_type_hint") or "").strip()
+
+        if len(question_type_hint) > 0:
+            tags.add(f"type:{question_type_hint}")
+
+        return tags
+
+    # 与 stop rule 的 promotion allowlist 保持一致，避免 CD4 这类节点继承错误 family。
+    def _anchor_action_families_from_text(self, normalized_text: str) -> set[str]:
+        anchor_rules: list[tuple[set[str], tuple[str, ...]]] = [
+            ({"immune_status"}, ("cd4", "t淋巴", "hiv感染", "艾滋", "免疫抑制")),
+            ({"imaging"}, ("胸部ct", "ct检查", "ct磨玻璃", "磨玻璃", "胸片", "影像")),
+            ({"oxygenation"}, ("pao2", "spo2", "氧分压", "低氧", "氧合", "呼吸衰竭")),
+            ({"pathogen", "pcp_specific"}, ("βd葡聚糖", "bdg", "葡聚糖", "g试验")),
+            ({"pathogen", "pcp_specific"}, ("肺孢子pcr", "pcppcr", "肺孢子核酸", "支气管肺泡", "balf", "bal")),
+            ({"tuberculosis"}, ("tspot", "tspot.tb", "t-spot", "xpert", "mtb/rif", "抗酸", "分枝杆菌")),
+        ]
+
+        for families, keywords in anchor_rules:
+            if any(keyword in normalized_text for keyword in keywords):
+                return set(families)
+
+        return set()
+
+    # 判断当前 A4 结果是否具备被 guarded gate 计入 confirmed family 的基础条件。
+    def _is_confirmed_family_candidate(
+        self,
+        action: MctsAction,
+        a4_result: A4DeductiveResult,
+        evidence_tags: set[str],
+    ) -> bool:
+        if a4_result.existence != "exist" or a4_result.certainty != "confident":
+            return False
+
+        relation_type = str(action.metadata.get("relation_type") or "")
+        return relation_type in GUARDED_DEFINITION_RELATION_TYPES or bool(
+            evidence_tags & GUARDED_CONFIRMED_EVIDENCE_TAGS
+        )
+
+    # 高价值 anchor 的 exist + doubt 可以进入 provisional family，但仍不等同 confirmed。
+    def _is_provisional_family_candidate(
+        self,
+        a4_result: A4DeductiveResult,
+        evidence_tags: set[str],
+    ) -> bool:
+        if a4_result.existence != "exist" or a4_result.certainty != "doubt":
+            return False
+
+        return bool(evidence_tags & {"imaging", "oxygenation", "pathogen", "immune_status", "pcp_specific"})
 
     # 根据 A4 结果将 reward 反馈给 MCTS 动作统计。
     def _record_action_reward(
@@ -762,14 +993,39 @@ class ConsultationBrain:
             return None
 
         metadata = dict(best_answer_score.metadata)
+        guarded_blocked = accept_decision.reason == "guarded_acceptance_rejected"
 
-        if metadata.get("verifier_mode") != "llm_verifier" or bool(metadata.get("verifier_should_accept", True)):
+        if metadata.get("verifier_mode") != "llm_verifier":
+            return None
+
+        if bool(metadata.get("verifier_should_accept", True)) and not guarded_blocked:
             return None
 
         state = self.deps.state_tracker.get_session(session_id)
-        reject_reason = str(metadata.get("verifier_reject_reason", "")).strip() or "missing_key_support"
+        reject_reason = (
+            str(accept_decision.metadata.get("repair_reject_reason", "")).strip()
+            or str(metadata.get("verifier_reject_reason", "")).strip()
+            or "missing_key_support"
+        )
         current_hypothesis = self._find_hypothesis_by_id(state.candidate_hypotheses, search_result.best_answer_id)
         recommended_next_evidence = self._normalize_string_list(metadata.get("verifier_recommended_next_evidence", []))
+        guarded_block_reason = str(
+            accept_decision.metadata.get("guarded_acceptance_block_reason")
+            or metadata.get("guarded_acceptance_block_reason")
+            or ""
+        )
+        guarded_features = {
+            key: value
+            for key, value in metadata.items()
+            if key.startswith("guarded_")
+        }
+        guarded_missing_families = self._normalize_string_list(
+            guarded_features.get("guarded_missing_evidence_families", [])
+        )
+        guarded_family_recommendations = self._recommended_evidence_for_guarded_families(
+            guarded_missing_families,
+            current_answer_name=best_answer_score.answer_name,
+        )
 
         if current_hypothesis is not None:
             recommended_next_evidence = self._merge_unique_strings(
@@ -778,6 +1034,12 @@ class ConsultationBrain:
             )
 
         alternative_candidates = self._normalize_alternative_candidates(metadata.get("verifier_alternative_candidates", []))
+        guarded_strong_alternatives = self._normalize_alternative_candidates(
+            guarded_features.get("guarded_strong_alternative_candidates", [])
+        )
+
+        if guarded_block_reason == "strong_unresolved_alternative_candidates" and len(guarded_strong_alternatives) > 0:
+            alternative_candidates = guarded_strong_alternatives
 
         if reject_reason == "strong_alternative_not_ruled_out" and len(alternative_candidates) == 0:
             alternative_candidates = [
@@ -792,6 +1054,12 @@ class ConsultationBrain:
         if reject_reason == "missing_key_support" and len(recommended_next_evidence) == 0:
             recommended_next_evidence = self._normalize_string_list(metadata.get("verifier_missing_evidence", []))[:3]
 
+        if guarded_block_reason in {"pcp_combo_insufficient", "missing_confirmed_key_evidence"}:
+            recommended_next_evidence = self._merge_unique_strings(
+                guarded_family_recommendations,
+                recommended_next_evidence,
+            )
+
         return {
             "reject_reason": reject_reason,
             "recommended_next_evidence": recommended_next_evidence,
@@ -799,6 +1067,14 @@ class ConsultationBrain:
             "verifier_reasoning": str(metadata.get("verifier_reasoning", "")),
             "verifier_reject_reason_source": str(metadata.get("verifier_reject_reason_source", "")),
             "verifier_schema_valid": bool(metadata.get("verifier_schema_valid", False)),
+            "guarded_acceptance_blocked": guarded_blocked,
+            "guarded_acceptance_block_reason": guarded_block_reason,
+            "guarded_missing_evidence_families": guarded_missing_families,
+            "guarded_family_recommendations": guarded_family_recommendations,
+            "guarded_confirmed_evidence_families": self._normalize_string_list(
+                guarded_features.get("guarded_confirmed_key_evidence_families", [])
+            ),
+            "guarded_acceptance_features": guarded_features,
             "force_tree_refresh": True,
             "repair_stage": self._map_reject_reason_to_stage(reject_reason),
             "current_answer_id": best_answer_score.answer_id,
@@ -842,10 +1118,7 @@ class ConsultationBrain:
     ) -> MctsAction | None:
         state = self.deps.state_tracker.get_session(session_id)
         reject_reason = str(repair_context.get("reject_reason", "missing_key_support"))
-        current_hypothesis = sorted(
-            state.candidate_hypotheses,
-            key=lambda item: (-item.score, item.name),
-        )[0] if len(state.candidate_hypotheses) > 0 else None
+        current_hypothesis = self._select_current_repair_hypothesis(state, repair_context)
 
         if current_hypothesis is None:
             return self.choose_next_question_from_search(session_id, search_result)
@@ -941,6 +1214,26 @@ class ConsultationBrain:
             metadata=metadata,
         )
 
+    # guarded gate 指明当前答案缺关键 family 时，repair 优先修当前答案，避免被 reshuffle 后的 top1 带跑。
+    def _select_current_repair_hypothesis(
+        self,
+        state: SessionState,
+        repair_context: dict,
+    ) -> HypothesisScore | None:
+        if len(state.candidate_hypotheses) == 0:
+            return None
+
+        guarded_block_reason = str(repair_context.get("guarded_acceptance_block_reason") or "")
+
+        if guarded_block_reason in {"pcp_combo_insufficient", "missing_confirmed_key_evidence"}:
+            current_answer_id = str(repair_context.get("current_answer_id") or "")
+            current_answer = self._find_hypothesis_by_id(state.candidate_hypotheses, current_answer_id)
+
+            if current_answer is not None:
+                return current_answer
+
+        return sorted(state.candidate_hypotheses, key=lambda item: (-item.score, item.name))[0]
+
     # 在 repair 阶段决定当前要从哪些 hypothesis 上取下一批候选动作。
     def _select_repair_hypotheses(
         self,
@@ -1021,6 +1314,52 @@ class ConsultationBrain:
         evidence_tags = self._normalize_string_list(action.metadata.get("evidence_tags", []))
         semantic_evidence_tags = {item for item in evidence_tags if not item.startswith("type:")}
         recent_semantic_evidence_tags = {item for item in recent_evidence_tags if not item.startswith("type:")}
+        guarded_missing_families = {
+            item
+            for item in self._normalize_string_list(repair_context.get("guarded_missing_evidence_families", []))
+            if len(item) > 0
+        }
+        guarded_confirmed_families = {
+            item
+            for item in self._normalize_string_list(repair_context.get("guarded_confirmed_evidence_families", []))
+            if len(item) > 0
+        }
+        guarded_block_reason = str(repair_context.get("guarded_acceptance_block_reason") or "")
+        guarded_family_match = len(semantic_evidence_tags & guarded_missing_families) > 0
+        guarded_family_match_score = (
+            len(semantic_evidence_tags & guarded_missing_families) / max(len(guarded_missing_families), 1)
+            if len(guarded_missing_families) > 0
+            else 0.0
+        )
+        pcp_combo_priority_bonus = 0.0
+        missing_family_priority_bonus = 0.0
+        non_missing_family_penalty = 0.0
+        combo_anchor_bonus = self._combo_anchor_bonus(action, semantic_evidence_tags, guarded_missing_families)
+        has_core_combo_gap = len(guarded_missing_families & {"immune_status", "pathogen", "pcp_specific"}) > 0
+        repeats_already_confirmed_resp_family = len(
+            semantic_evidence_tags & guarded_confirmed_families & {"imaging", "oxygenation", "respiratory"}
+        ) > 0
+        is_resp_or_oxygen_action = len(semantic_evidence_tags & {"respiratory", "oxygenation"}) > 0
+
+        if guarded_block_reason == "pcp_combo_insufficient" and guarded_family_match:
+            pcp_combo_priority_bonus = 3.0
+
+            if len(semantic_evidence_tags & {"immune_status", "pathogen", "pcp_specific"}) > 0:
+                pcp_combo_priority_bonus += 4.25
+
+        if guarded_block_reason in {"pcp_combo_insufficient", "missing_confirmed_key_evidence"}:
+            if guarded_family_match:
+                missing_family_priority_bonus = 4.5 + guarded_family_match_score * 4.0
+
+            if has_core_combo_gap and is_resp_or_oxygen_action and not guarded_family_match:
+                non_missing_family_penalty += 4.75
+
+            if guarded_block_reason == "pcp_combo_insufficient" and repeats_already_confirmed_resp_family:
+                non_missing_family_penalty += 3.25
+
+            if combo_anchor_bonus == 0.0 and has_core_combo_gap and not guarded_family_match:
+                non_missing_family_penalty += 1.75
+
         score = action.prior_score
         type_diversity_bonus = 0.35 if recent_question_type is not None and question_type_hint != recent_question_type else 0.0
         same_type_penalty = 0.2 if recent_question_type is not None and question_type_hint == recent_question_type else 0.0
@@ -1042,17 +1381,36 @@ class ConsultationBrain:
                 + verifier_recommended_match_score * 1.25
                 + hypothesis_recommended_match_score * 0.85
                 + recommended_bonus * 1.35
+                + guarded_family_match_score * 2.2
+                + pcp_combo_priority_bonus
+                + missing_family_priority_bonus
+                + combo_anchor_bonus
                 + discriminative_gain * 0.65
                 + type_diversity_bonus * 0.55
                 + family_diversity_bonus * 0.85
                 - same_type_penalty * 0.5
                 - family_repeat_penalty * 0.85
+                - non_missing_family_penalty
                 - patient_burden * 0.15
             )
 
         if reject_reason == "strong_alternative_not_ruled_out":
             current_answer_id = str(repair_context.get("current_answer_id") or "")
             alternative_hypothesis_bonus = 1.05 if len(current_answer_id) > 0 and action.hypothesis_id != current_answer_id else 0.0
+            competition_family_bonus = (
+                0.75
+                if len(
+                    semantic_evidence_tags
+                    & {"respiratory", "imaging", "oxygenation", "pathogen", "immune_status", "tuberculosis", "systemic"}
+                )
+                > 0
+                else 0.0
+            )
+            unclassified_lab_penalty = (
+                1.35
+                if question_type_hint == "lab" and len(semantic_evidence_tags) == 0
+                else 0.0
+            )
             return (
                 score
                 + discriminative_gain * 2.45
@@ -1060,9 +1418,11 @@ class ConsultationBrain:
                 + recommended_match_score * 1.1
                 + joint_recommended_match_score * 0.65
                 + alternative_hypothesis_bonus
+                + competition_family_bonus
                 + family_diversity_bonus * 0.75
                 - same_type_penalty * 0.35
                 - family_repeat_penalty * 1.75
+                - unclassified_lab_penalty
                 - patient_burden * 0.1
             )
 
@@ -1075,6 +1435,39 @@ class ConsultationBrain:
             - family_repeat_penalty * 1.9
             - patient_burden * 0.08
         )
+
+    # PCP combo repair anchors 是能直接补齐 immune/pathogen/PCP-specific 缺口的高价值证据。
+    def _combo_anchor_bonus(
+        self,
+        action: MctsAction,
+        semantic_evidence_tags: set[str],
+        missing_families: set[str],
+    ) -> float:
+        if len(missing_families) == 0:
+            return 0.0
+
+        normalized_name = self._normalize_match_text(action.target_node_name)
+        anchor_rules = {
+            "immune_status": ("cd4", "hiv", "免疫", "艾滋", "t淋巴"),
+            "pathogen": ("βd葡聚糖", "bdg", "葡聚糖", "pcr", "核酸", "bal", "balf", "支气管肺泡", "病原"),
+            "pcp_specific": ("肺孢子", "pcp", "pneumocystis", "βd葡聚糖", "bdg", "葡聚糖", "支气管肺泡"),
+        }
+        bonus = 0.0
+
+        for family, keywords in anchor_rules.items():
+            if family not in missing_families:
+                continue
+
+            tag_match = family in semantic_evidence_tags
+            text_match = any(keyword in normalized_name for keyword in keywords)
+
+            if tag_match or text_match:
+                bonus += 5.5
+
+        if len(semantic_evidence_tags & {"immune_status", "pathogen", "pcp_specific"} & missing_families) > 0:
+            bonus += 1.75
+
+        return bonus
 
     # 返回最近一次真实追问的 question type，用于 trajectory_insufficient 下切换问法。
     def _get_recent_question_type(self, state: SessionState) -> str | None:
@@ -1114,6 +1507,63 @@ class ConsultationBrain:
             return "A2"
 
         return "A3"
+
+    # 将 guarded gate 暴露出的缺失证据家族翻译成 A3 可匹配的推荐证据文本。
+    def _recommended_evidence_for_guarded_families(
+        self,
+        missing_families: list[str],
+        *,
+        current_answer_name: str,
+    ) -> list[str]:
+        answer_hint = self._normalize_match_text(current_answer_name)
+        pcp_like = any(keyword in answer_hint for keyword in ("肺孢子", "pcp", "pneumocystis"))
+        family_recommendations = {
+            "immune_status": [
+                "CD4+ T淋巴细胞计数 < 200/μL",
+                "HIV感染或免疫抑制背景",
+                "近期机会性感染或免疫功能低下",
+            ],
+            "pathogen": [
+                "血清或BAL β-D-葡聚糖",
+                "诱导痰或BAL病原学检查",
+                "病原学 PCR / 核酸检测",
+            ],
+            "pcp_specific": [
+                "诱导痰或BAL 肺孢子菌 PCR",
+                "肺孢子菌病原学证据",
+                "β-D-葡聚糖升高",
+            ],
+            "oxygenation": [
+                "动脉血氧分压 (PaO2) < 70 mmHg",
+                "低氧血症",
+                "SpO2下降或氧合异常",
+            ],
+            "imaging": [
+                "胸部CT磨玻璃影",
+                "双肺弥漫性磨玻璃影",
+                "胸部影像学异常",
+            ],
+            "respiratory": [
+                "干咳",
+                "进行性呼吸困难",
+                "发热伴气促",
+            ],
+        }
+        values: list[str] = []
+
+        for family in missing_families:
+            for evidence in family_recommendations.get(family, []):
+                if evidence not in values:
+                    values.append(evidence)
+
+        if pcp_like:
+            for evidence in ["CD4+ T淋巴细胞计数 < 200/μL", "诱导痰或BAL 肺孢子菌 PCR", "血清或BAL β-D-葡聚糖"]:
+                if evidence not in values and any(
+                    family in missing_families for family in ("immune_status", "pathogen", "pcp_specific")
+                ):
+                    values.append(evidence)
+
+        return values[:8]
 
     # 把任意列表清洗为唯一字符串列表。
     def _normalize_string_list(self, payload: object) -> list[str]:
@@ -1168,6 +1618,7 @@ class ConsultationBrain:
                         "answer_id": answer_id or None,
                         "answer_name": answer_name or answer_id,
                         "reason": str(item.get("reason", "")).strip(),
+                        **self._classify_alternative_candidate(item),
                     }
                 )
                 continue
@@ -1177,9 +1628,102 @@ class ConsultationBrain:
             if len(text) == 0:
                 continue
 
-            normalized.append({"answer_id": None, "answer_name": text, "reason": ""})
+            normalized.append(
+                {
+                    "answer_id": None,
+                    "answer_name": text,
+                    "reason": "",
+                    "strength": "strong",
+                    "is_unresolved_strong": True,
+                    "strength_reason": "text_candidate_without_reason",
+                }
+            )
 
         return normalized
+
+    # 与 guarded gate 使用同一套轻量语义规则，避免 weak alternatives 继续驱动 hypothesis repair。
+    def _classify_alternative_candidate(self, item: dict) -> dict:
+        raw_strength = str(
+            item.get("strength")
+            or item.get("confidence")
+            or item.get("competition_strength")
+            or item.get("risk_level")
+            or ""
+        ).strip().lower()
+        reason = str(item.get("reason", "")).strip()
+        normalized_reason = self._normalize_match_text(reason)
+
+        if raw_strength in {"strong", "high", "unresolved", "强", "高", "强竞争"}:
+            return {
+                "strength": "strong",
+                "is_unresolved_strong": True,
+                "strength_reason": "explicit_strong",
+            }
+
+        if raw_strength in {"weak", "low", "ruled_down", "ruled-out", "弱", "低", "已排除"}:
+            return {
+                "strength": "weak",
+                "is_unresolved_strong": False,
+                "strength_reason": "explicit_weak",
+            }
+
+        strong_markers = (
+            "未排除",
+            "不能排除",
+            "尚未排除",
+            "需要排除",
+            "强支持",
+            "证据支持",
+            "同样支持",
+            "更符合",
+            "高度符合",
+            "主要竞争",
+            "强竞争",
+        )
+        weak_markers = (
+            "缺乏",
+            "证据不足",
+            "不支持",
+            "不如",
+            "可能性低",
+            "可能性较低",
+            "较不符合",
+            "较弱",
+            "未见",
+            "没有关键证据",
+            "无法解释",
+            "不典型",
+            "仅作为",
+            "一般候选",
+            "低于当前诊断",
+        )
+
+        if any(marker in normalized_reason for marker in strong_markers):
+            return {
+                "strength": "strong",
+                "is_unresolved_strong": True,
+                "strength_reason": "reason_contains_strong_unresolved_signal",
+            }
+
+        if any(marker in normalized_reason for marker in weak_markers):
+            return {
+                "strength": "weak",
+                "is_unresolved_strong": False,
+                "strength_reason": "reason_indicates_ruled_down_or_weak_candidate",
+            }
+
+        if len(normalized_reason) == 0:
+            return {
+                "strength": "strong",
+                "is_unresolved_strong": True,
+                "strength_reason": "missing_reason_treated_as_unresolved",
+            }
+
+        return {
+            "strength": "medium",
+            "is_unresolved_strong": False,
+            "strength_reason": "no_strong_unresolved_signal",
+        }
 
     # 合并两组字符串列表，同时保持原有顺序和唯一性。
     def _merge_unique_strings(self, left: list[str], right: list[str]) -> list[str]:
@@ -1318,6 +1862,9 @@ def build_default_brain(client: Neo4jClient, config_overrides: dict | None = Non
                 min_answer_consistency=float(stop_config.get("min_answer_consistency", 0.45)),
                 min_agent_eval_score=float(stop_config.get("min_agent_eval_score", 0.65)),
                 min_final_score=float(stop_config.get("min_final_score", 0.55)),
+                require_verifier_accept_flag=bool(stop_config.get("require_verifier_accept_flag", True)),
+                acceptance_profile=str(stop_config.get("acceptance_profile", "baseline")),
+                guarded_lenient_early_turn_index=int(stop_config.get("guarded_lenient_early_turn_index", 2)),
             )
         ),
         report_builder=ReportBuilder(),

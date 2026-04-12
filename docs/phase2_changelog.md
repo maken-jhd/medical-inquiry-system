@@ -978,3 +978,132 @@
 - 通过 `python -m py_compile brain/action_builder.py brain/service.py brain/hypothesis_manager.py brain/trajectory_evaluator.py brain/llm_client.py scripts/run_focused_ablation.py`
 - 通过 `conda run -n GraduationDesign python -m pytest -q`
 - 当前测试结果：`46 passed`
+
+## 十八、verifier acceptance 校准实验入口
+
+本轮将目标从“拒停后是否会换问题”切到“答案已正确时 verifier 是否愿意放行”。
+
+### 1. acceptance profile 拆分
+
+- 在 `LlmClient` 的 `trajectory_agent_verifier` prompt 中新增 `conservative` 与 `slightly_lenient`
+- 保留 `baseline` 作为默认开发基线
+- `conservative` 更强调直接关键证据与强替代诊断排除
+- `slightly_lenient` 更强调在关键证据已覆盖、强替代未被支持时避免机械性拒停
+
+### 2. acceptance 时序指标
+
+focused replay / ablation 汇总新增：
+
+- `first_correct_best_answer_turn`：第一次出现正确 best answer 的轮次
+- `first_verifier_accept_turn`：第一次 verifier 对 best answer 给出接受信号的轮次
+- `correct_but_rejected_span`：best answer 已正确但仍持续未被 verifier 放行的轮次数
+- `verifier_called_count`：best answer 评分中成功带回 verifier metadata 的 turn 数
+- `accepted_with_verifier_metadata_count`：最终 accepted 且 accepted turn 带完整 verifier metadata 的病例数
+- `accepted_without_verifier_metadata_count`：最终 accepted 但缺失完整 verifier metadata 的病例数
+- `accepted_on_turn1_count`：第一次 verifier accept 出现在 turn 1 的 accepted 病例数
+- `accept_reason_counts`：accepted verifier 调用中的接受原因分布
+- `wrong_accept_on_turn1_count`：turn 1 verifier accept 且最终错误接受的病例数
+- `median_first_verifier_accept_turn`：首次 verifier accept 轮次的中位数
+
+这些指标用于判断系统到底是“答案还没对”，还是“答案早已对但 verifier 迟迟拒停”。
+同时也用于核查 accepted 路径是否真的经过了 verifier，而不是由记录链缺口或 stop 旁路造成。
+
+### 3. 固定开发基线
+
+- 新增 `scripts/run_verifier_acceptance_sweep.sh`
+- 默认固定 `MAX_TURNS=5`
+- 默认固定 `stop_profile=baseline`
+- 默认只扫 `ACCEPTANCE_PROFILES=baseline,slightly_lenient,guarded_lenient`
+- 新增 `scripts/run_focused_acceptance_validation.sh`，默认使用 10 个 focused acceptance cases 做扩样本验证
+- 新增 `simulator/focused_acceptance_cases.jsonl`，覆盖 PCP 正样本、PCP vs TB、PCP vs 真菌感染、非 PCP 呼吸道感染、风险史/影像/系统性症状干扰等类型
+
+这将下一轮真实实验的变量压缩到 verifier acceptance 倾向，避免继续把 turn budget、stop threshold 和 verifier prompt 混在一起分析。
+
+## 十九、guarded_lenient 接受闸门
+
+本轮根据 10-case focused validation 的结果继续收紧 acceptance calibration。
+实验显示 `slightly_lenient` 能减少正确拒停，但会显著增加 turn1 错误接受，因此不能直接作为默认 profile。
+
+### 1. 新增 guarded_lenient profile
+
+- `trajectory_agent_verifier` 新增 `guarded_lenient`
+- 它保留“关键支持证据充分时更敢停”的倾向
+- 但 prompt 明确要求遇到强替代诊断、近期 hypothesis 切换、负向或不确定关键证据时保持拒停
+- focused validation 默认 profile 变为 `baseline,slightly_lenient,guarded_lenient`
+
+### 2. StopRule 安全闸门
+
+`StopRuleEngine.should_accept_final_answer()` 在 `guarded_lenient` 下新增二次安全 gate：
+
+- 早期接受必须至少有 1 条 A4 `exist + confident` 的定义性关键证据
+- PCP、结核、真菌性肺部感染、影像强但非 PCP 等高混淆呼吸道诊断，全程都必须有 confirmed key evidence
+- confirmed key evidence 不再只依赖 `relation_type`，同时消费 `evidence_tags`，覆盖 `imaging`、`oxygenation`、`pathogen`、`immune_status`
+- PCP 单独影像或单独氧合证据不足以接受，必须有免疫背景、病原学证据，或影像/氧合/典型呼吸道表现构成的组合证据
+- 当前答案相关的关键支持证据若出现 `non_exist` 或 `doubt`，禁止立即接受
+- 最近 1 轮 best hypothesis / final answer 发生切换时，禁止立即接受
+- verifier 返回非空强替代候选时，禁止立即接受
+- 如果首次 verifier accept 的答案与当前最终答案不一致，要求当前答案至少先稳定通过一轮 verifier
+
+guarded gate 会把拒绝原因写入 `FinalAnswerScore.metadata` 与 `SessionState.metadata`，并映射回 repair 可消费的三类拒停原因。
+
+后续根据 focused validation 结果，guarded gate 从单一 PCP combo 改为分 block reason 的条件化策略：
+
+- `negative_or_doubtful_key_evidence` 继续严格拦截，不降低安全门槛
+- `missing_confirmed_key_evidence` 优先作为 evidence tagging / A4 记录链审计信号，而不是直接放宽接受
+- `pcp_combo_insufficient` 改为有限组合模板，包括影像+免疫/实验室、影像+病原或 PCP-specific、影像+氧合+免疫、影像+典型呼吸道表现+免疫
+- 高混淆呼吸道答案会允许 `imaging`、`oxygenation`、`immune_status`、`respiratory` 等可共享临床证据进入 guarded family 归集，但病原类证据仍保持更谨慎的 PCP-specific 识别
+- guarded block 会把缺失 family 写回 repair context，引导 A3 优先补 CD4/HIV/免疫抑制、β-D 葡聚糖、PCP PCR 等能完成 combo 的证据
+- missing-family-first repair 会在 `pcp_combo_insufficient` 与 `missing_confirmed_key_evidence` 下优先围绕当前 verifier candidate answer 修复，而不是跟随 reshuffle 后的 top1 继续问普通症状路径
+- 对 CD4、β-D 葡聚糖、PCP PCR、BAL / 支气管肺泡灌洗相关 PCP 检测增加 combo-repair anchor bonus
+- 如果已经确认了 `imaging` 或 `oxygenation`，且仍缺 `immune_status`、`pathogen` 或 `pcp_specific`，继续追问 `respiratory/oxygenation` 会被显著降权
+
+再根据 audit 结果，`negative_or_doubtful_key_evidence` 被拆成两层：
+
+- `hard_negative_key_evidence`：当前答案作用域内、定义性关键证据出现 `non_exist + confident`，继续作为硬拦截
+- `soft_negative_needs_stability`：共享临床证据、`unknown`、`doubt` 或非核心 family 只作为延迟信号，要求同一答案有 prior verifier accept 或补足其他 confirmed family，而不是一票否决
+
+### 3. 新增 acceptance 安全指标
+
+focused replay / ablation 汇总新增：
+
+- `wrong_accept_reason_counts`
+- `first_verifier_accept_turn_for_final_answer`
+- `median_first_verifier_accept_turn_for_final_answer`
+- `final_answer_changed_after_first_accept_count`
+- `accepted_after_negative_key_evidence_count`
+- `accepted_after_recent_hypothesis_switch_count`
+- `accepted_with_nonempty_alternative_candidates_count`
+- `guarded_block_reason_counts`
+- `verifier_positive_but_gate_rejected_count`
+- `accept_candidate_without_confirmed_combo_count`
+- `guarded_gate_audit_records`
+- `guarded_negative_evidence_node_counts`
+- `guarded_negative_evidence_family_counts`
+- `guarded_negative_evidence_tier_counts`
+- `guarded_negative_evidence_scope_counts`
+- `missing_family_first_selected_count`
+- `missing_family_repair_turn_count`
+- `combo_anchor_selected_before_turn3_count`
+- `family_recorded_after_question_count`
+- `family_recorded_after_question_attempt_count`
+
+这些指标用于判断错误接受是否来自“轨迹稳定但证据不足”、“负向关键证据被忽略”、“近期答案切换后过早停”或“强替代候选未排除”。
+
+同时每个 focused ablation profile 会额外落盘 `guarded_gate_audit.jsonl`，逐条记录：
+
+- `block_reason`
+- `current_answer_name`
+- `confirmed_evidence_families`
+- `missing_families`
+- `alternative_candidates`
+- `recent_key_evidence_states`
+- `pcp_combo_missing_family_options`
+- `hard_negative_key_evidence`
+- `soft_negative_or_doubtful_key_evidence`
+
+### 4. guarded verifier 与 gate 协同校准
+
+- `guarded_lenient` prompt 不再单方面压低 `should_accept_stop`
+- verifier 现在被定位为“候选接受信号提供者”，允许在临床上较可信时先给出 accept 信号
+- 最终是否停止仍由结构化 gate 校验 confirmed evidence、negative/doubtful 证据、强替代候选和答案稳定性
+- focused validation 脚本默认 `CASE_CONCURRENCY=5`，同一 profile 内最多 5 个病例并行回放，以降低真实 qwen3-max smoke 的等待时间

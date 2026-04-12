@@ -4,6 +4,10 @@
 
 # 忽略所有 .sh 脚本文件
 *.sh
+!scripts/run_baseline_focused_ablation.sh
+!scripts/run_acceptance_sweep.sh
+!scripts/run_verifier_acceptance_sweep.sh
+!scripts/run_focused_acceptance_validation.sh
 
 # macOS 系统自动生成的隐藏文件
 .DS_Store

@@ -241,13 +241,88 @@ conda run -n GraduationDesign python scripts/run_batch_replay.py --max-turns 5
 - `A1 -> A2 -> A3/A4 -> search -> report`
 - 虚拟病人自动回放
 
+真实 focused baseline ablation：
+
+```bash
+./scripts/run_baseline_focused_ablation.sh
+```
+
+说明：
+
+- 默认跑 `pcp_typical_001,pcp_vague_001,concealing_risk_001`
+- 默认只跑 `baseline` 变体，`MAX_TURNS=5`
+- 如未提前设置 `DASHSCOPE_API_KEY`，脚本会在启动时静默提示输入
+- 输出目录默认为 `test_outputs/simulator_replay/focused_ablation_baseline_<timestamp>`
+- 运行中可查看 `run.log` 与 `status.json` 判断是否仍在跑、是否出错
+- 最近一次输出目录会写入 `test_outputs/simulator_replay/latest_baseline_ablation_output.txt`
+
+真实 focused acceptance sweep：
+
+```bash
+./scripts/run_acceptance_sweep.sh
+```
+
+说明：
+
+- 默认在 baseline repair 策略下扫 `MAX_TURNS_SWEEP=3,5,7`
+- 默认扫 `STOP_PROFILES=baseline,relaxed_thresholds`
+- 因此默认会跑 `3 个 turn budget * 2 个 stop profile * 3 个病例 = 18 个真实病例回放`，每轮会调用真实 Neo4j 与 qwen3-max verifier，通常会明显慢于单次 baseline
+- 可选设置 `ACCEPTANCE_PROFILES=baseline,slightly_lenient,guarded_lenient` 对比 verifier 接受倾向
+- 输出目录默认为 `test_outputs/simulator_replay/acceptance_sweep_<timestamp>`
+- 运行中可看 `run.log`、`status.json`、`current_combo.txt` 和 `sweep_results.jsonl`
+- 最近一次 sweep 输出目录会写入 `test_outputs/simulator_replay/latest_acceptance_sweep_output.txt`
+
+如果只想先快速确认链路，可以缩小 sweep：
+
+```bash
+MAX_TURNS_SWEEP=3 STOP_PROFILES=baseline ./scripts/run_acceptance_sweep.sh
+```
+
+真实 verifier acceptance sweep：
+
+```bash
+./scripts/run_verifier_acceptance_sweep.sh
+```
+
+说明：
+
+- 默认固定 `MAX_TURNS=5`、`stop_profile=baseline`
+- 默认只比较 verifier 接受倾向：`ACCEPTANCE_PROFILES=baseline,slightly_lenient,guarded_lenient`
+- 默认 `CASE_CONCURRENCY=5`，同一 profile 内最多 5 个病例并行回放；如需保守串行可设置 `CASE_CONCURRENCY=1`
+- 输出目录默认为 `test_outputs/simulator_replay/verifier_acceptance_sweep_<timestamp>`
+- 运行中可看 `run.log`、`status.json`、`current_profile.txt`、`sweep_results.jsonl` 和 `profile_summary.tsv`
+- 最近一次 sweep 输出目录会写入 `test_outputs/simulator_replay/latest_verifier_acceptance_sweep_output.txt`
+- 该脚本重点观察 `verifier_called_count`、`accepted_with_verifier_metadata_count`、`accepted_without_verifier_metadata_count`、`accepted_on_turn1_count`、`wrong_accept_on_turn1_count`
+- 同时继续观察 `first_correct_best_answer_turn`、`first_verifier_accept_turn`、`first_verifier_accept_turn_for_final_answer`、`correct_but_rejected_span`、`accepted_correct_count`、`accepted_wrong_count`
+- 新增 guarded safety 指标：`wrong_accept_reason_counts`、`final_answer_changed_after_first_accept_count`、`accepted_after_negative_key_evidence_count`、`accepted_after_recent_hypothesis_switch_count`、`accepted_with_nonempty_alternative_candidates_count`
+- 继续观察 gate 协同指标：`guarded_block_reason_counts`、`verifier_positive_but_gate_rejected_count`、`accept_candidate_without_confirmed_combo_count`
+- 每个 profile 的 `baseline/guarded_gate_audit.jsonl` 会逐条记录 verifier positive 但 guarded gate 拒绝的 turn，包括 `block_reason`、已确认证据 family、缺失 family、强替代候选、最近关键证据状态，以及 hard/soft negative evidence 分层
+- 节点级归因指标会统计 `guarded_negative_evidence_node_counts`、`guarded_negative_evidence_family_counts`、`guarded_negative_evidence_tier_counts`、`guarded_negative_evidence_scope_counts`，用于定位到底是哪几个节点把 guarded 接受率压低
+- missing-family-first repair 指标会统计 `missing_family_first_selected_count`、`combo_anchor_selected_before_turn3_count`、`family_recorded_after_question_count`，用于区分“缺口没被问到”和“问到了但没进 confirmed family”
+- `guarded_lenient` 会对 PCP、结核、真菌性肺部感染等高混淆呼吸道诊断全程要求 confirmed key evidence，并对 PCP 使用有限组合模板闸门，如影像+免疫/实验室、影像+病原/PCP-specific、影像+氧合+免疫、影像+典型呼吸道表现+免疫
+
+真实 focused acceptance validation：
+
+```bash
+./scripts/run_focused_acceptance_validation.sh
+```
+
+说明：
+
+- 默认使用 [focused_acceptance_cases.jsonl](/Users/loki/Workspace/GraduationDesign/simulator/focused_acceptance_cases.jsonl) 的 10 个核心病例
+- 默认固定 `MAX_TURNS=5`、`stop_profile=baseline`、repair 策略不变
+- 默认只比较 `ACCEPTANCE_PROFILES=baseline,slightly_lenient,guarded_lenient`
+- 输出目录默认为 `test_outputs/simulator_replay/focused_acceptance_validation_<timestamp>`
+- 最近一次输出目录会写入 `test_outputs/simulator_replay/latest_focused_acceptance_validation_output.txt`
+- 重点观察 `accepted_correct_count`、`accepted_wrong_count`、`wrong_accept_on_turn1_count`、`wrong_accept_reason_counts`、`accept_reason_counts`、`median_first_verifier_accept_turn`、`median_first_verifier_accept_turn_for_final_answer`
+
 ## 推荐下一步
 
 如果继续推进第二阶段，建议开发顺序如下：
 
-1. 继续补强 `brain/service.py` 的完整 A1-A4 闭环
-2. 在本地 Neo4j 正常启动后，用 `run_retriever_smoke.py` 做真实图谱联调
-3. 用 `run_batch_replay.py` 做真实端到端 smoke，并观察 `final_report` 与路径聚合结果
+1. 先运行 `./scripts/run_focused_acceptance_validation.sh`，验证 10 个 focused cases 上 `baseline`、`slightly_lenient` 与 `guarded_lenient` 的接受表现
+2. 重点比较 `accepted_correct_count`、`accepted_wrong_count`、`wrong_accept_on_turn1_count`、`wrong_accept_reason_counts` 与 guarded safety 指标
+3. 如果 `guarded_lenient` 能保留正确接受提升且压低 turn1 错误接受，再考虑把它作为新的默认 acceptance profile 候选
 4. 继续扩展 `simulator/generate_cases.py` 的病例覆盖面和行为风格
 5. 在 `benchmark.py` 中继续固化更多质量指标
 6. 最后再推进更深层的 rollout 与路径缓存
