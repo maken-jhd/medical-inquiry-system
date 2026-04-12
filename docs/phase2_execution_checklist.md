@@ -489,3 +489,126 @@ simulator/
 - 每个函数上方都应有中文用途说明
 - 类说明、模块说明优先使用中文
 - 说明性注释不再使用纯英文
+
+## 十一、2026-04-12 切换前待做清单
+
+本节记录后端第二阶段当前的暂停点，以及下一轮切换到前端搭建时应优先完成的事项。
+
+### A. 后端当前阶段结论
+
+- [x] `guarded_lenient` 已从“几乎不接受”校准到更可用的状态：10 个 focused cases 中 `accepted_correct_count=4`、`accepted_wrong_count=0`。
+- [x] `family promotion / evidence recording` 已打通一轮：CD4、β-D 葡聚糖、PCP PCR / BAL、胸部 CT / 磨玻璃影等高价值 anchor 已能进入更稳定的 evidence family。
+- [x] `provisional_evidence_families` 已生效：`pcp_vague_001` 和 `pcp_conflicting_001` 可通过 `confirmed + provisional` 的 PCP combo 被接受。
+- [x] 安全闸门仍有效：`TB vs PCP`、`影像强但非 PCP` 等强混淆负样本仍保持 `wrong_rejected`。
+- [x] 最新 focused validation 输出目录：`test_outputs/simulator_replay/focused_acceptance_validation_20260412_003500`。
+
+### B. 后端暂存待办
+
+- [ ] 拆分并修正 `accepted_on_turn1_count` 的语义。
+- 建议改成：
+  - `first_verifier_accept_on_turn1_count`
+  - `final_accept_on_turn1_count`
+- 原因：当前指标更像“verifier 第一次愿意 accept 出现在 turn1”，不是“系统最终在 turn1 停止”。
+
+- [ ] 单独处理非 PCP / 阶段类答案的 acceptance。
+- 当前代表病例：`systemic_non_pcp_001`。
+- 当前现象：`best_answer=急性期` 且正确，但 verifier 持续认为“急性期”过于宽泛，给出 `missing_key_support`，最终成为 `correct_rejected`。
+- 下一步方向：为“阶段 / 综合征 / 非特异性急性表现”设计独立 acceptance 规则，而不是继续改 PCP combo gate。
+
+- [ ] 继续收紧 verifier schema 稳定性。
+- 当前问题：`guarded_lenient` 中仍有少量 `verifier_schema_valid_false`，主要集中在 PCP 的 accepted / blocked 轮次。
+- 当前判断：accept 侧字段可用，但 reject schema 偶尔 fallback。
+- 下一步方向：优化 verifier prompt / schema 后处理，减少 `fallback_inferred`。
+
+- [ ] 保留 guarded gate，不再整体放松。
+- 当前判断：`accepted_wrong_count=0` 是这条线最重要的安全收益。
+- 后续只做结构化放宽，不做全局阈值放宽。
+
+- [ ] 暂不继续大调 repair-aware A3。
+- 当前判断：missing-family-first repair、combo anchor 提前选择、reroot 和 reshuffle 已经能推动关键证据追问。
+- 下一步除非出现“问不到关键 family”，否则不优先动 repair 权重。
+
+### C. 前端搭建第一阶段目标
+
+- [ ] 确认前端技术栈与目录位置。
+- 推荐先检查仓库是否已有前端目录；若没有，建议新建 `frontend/`。
+- 推荐技术栈：`Vite + React + TypeScript`，后续根据展示需要接入图谱 / 时间线 / 对话面板。
+
+- [ ] 搭建最小可运行前端骨架。
+- MVP 页面至少包含：
+  - 问诊对话区
+  - 当前问题 / 患者回答输入区
+  - 当前 top hypothesis 面板
+  - evidence family 面板
+  - search / repair / verifier 状态面板
+  - 最终报告面板
+
+- [ ] 定义前后端 API 边界。
+- 第一版建议只包一层轻量 API，不直接把复杂内部对象暴露给前端。
+- 建议接口：
+  - `POST /api/session/start`
+  - `POST /api/session/{session_id}/turn`
+  - `GET /api/session/{session_id}/state`
+  - `GET /api/session/{session_id}/report`
+  - `GET /api/replay/{run_id}/cases`
+
+- [ ] 设计前端展示用的 session view model。
+- 建议字段：
+  - `messages`
+  - `selected_action`
+  - `root_best_action`
+  - `repair_selected_action`
+  - `repair_context`
+  - `hypotheses`
+  - `confirmed_evidence_families`
+  - `provisional_evidence_families`
+  - `guarded_gate_audit`
+  - `verifier_metadata`
+  - `final_report`
+
+- [ ] 优先支持 replay 结果浏览。
+- 原因：真实在线问诊需要 Neo4j + DashScope，前端第一版可以先消费已落盘 JSON/JSONL，快速做出可演示界面。
+- 推荐优先读取：
+  - `focused_repair_summary.jsonl`
+  - `focused_metrics.json`
+  - `guarded_gate_audit.jsonl`
+  - `a4_evidence_audit.jsonl`
+
+- [ ] 增加“论文演示模式”。
+- 展示重点：
+  - 为什么 root best action 被 repair action 替换
+  - verifier 为什么拒停 / 接受
+  - confirmed / provisional evidence family 如何累积
+  - 当前最终答案为什么胜出
+  - 哪些 alternative 被排除
+
+### D. 前端第二阶段增强项
+
+- [ ] 增加搜索树 / rollout 轨迹可视化。
+- 展示 `select -> expand -> simulate -> backpropagate` 的路径和 reward。
+
+- [ ] 增加 hypothesis timeline。
+- 展示每轮 top1 / top2 如何变化，以及 verifier-driven reshuffle 是否发生。
+
+- [ ] 增加 acceptance calibration 面板。
+- 对比 `baseline`、`slightly_lenient`、`guarded_lenient` 的指标：
+  - `accepted_correct_count`
+  - `accepted_wrong_count`
+  - `correct_best_answer_but_rejected_count`
+  - `accepted_with_provisional_combo_count`
+  - `verifier_positive_but_gate_rejected_count`
+
+- [ ] 增加病例 replay 对比视图。
+- 同一个 case 横向比较不同 profile 下：
+  - 最终答案
+  - stop reason
+  - repair turns
+  - guarded block reason
+  - evidence family 变化
+
+### E. 前端启动前检查
+
+- [ ] 跑一次前端目录探查，确认是否已有 package 管理文件。
+- [ ] 若新建前端，先只提交脚手架和静态 replay viewer，不急于接真实后端。
+- [ ] 保留当前后端 replay 输出格式，前端优先适配现有落盘文件。
+- [ ] 若需要在线调用后端，再新增轻量 API 层，避免前端直接依赖 `brain/` 内部类型。
