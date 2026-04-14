@@ -18,61 +18,65 @@ KG_ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = KG_ROOT.parent
 
 ALLOWED_LABELS = [
+    "GuidelineDocument",
+    "GuidelineSection",
+    "EvidenceSpan",
+    "Assertion",
+    "Recommendation",
     "Disease",
     "DiseasePhase",
-    "OpportunisticInfection",
-    "Comorbidity",
-    "SyndromeOrComplication",
-    "Tumor",
     "Pathogen",
     "Symptom",
     "Sign",
     "ClinicalAttribute",
     "LabTest",
     "LabFinding",
-    "ImagingFinding",
-    "RiskFactor",
-    "RiskBehavior",
+    "DiagnosticCriterion",
+    "OpportunisticInfection",
+    "Comorbidity",
+    "Tumor",
+    "SyndromeOrComplication",
+    "ExposureScenario",
     "PopulationGroup",
+    "RiskFactor",
+    "TransmissionRoute",
+    "ManagementAction",
+    "Medication",
+    "DrugClass",
+    "TreatmentRegimen",
+    "PreventionStrategy",
 ]
 
 ALLOWED_EDGE_TYPES = [
+    "HAS_SECTION",
+    "HAS_EVIDENCE",
+    "SUBJECT",
+    "OBJECT",
+    "SUPPORTED_BY",
+    "RECOMMENDS",
+    "CAUSED_BY",
+    "HAS_PHASE",
     "MANIFESTS_AS",
     "HAS_LAB_FINDING",
-    "HAS_IMAGING_FINDING",
-    "HAS_PATHOGEN",
     "DIAGNOSED_BY",
-    "REQUIRES_DETAIL",
-    "RISK_FACTOR_FOR",
     "COMPLICATED_BY",
+    "TREATED_WITH",
+    "CONSISTS_OF",
+    "BELONGS_TO_CLASS",
+    "PREVENTED_BY",
+    "MONITORED_BY",
+    "SCREENED_BY",
     "APPLIES_TO",
+    "RISK_FACTOR_FOR",
+    "TRANSMITTED_VIA",
+    "INTERACTS_WITH",
+    "INITIATED_AFTER",
+    "CONTRAINDICATED_IN",
+    "NOT_RECOMMENDED_FOR",
+    "REQUIRES_DETAIL",
 ]
 
 DETAIL_LEVELS = {"minimal", "standard", "full"}
-
-ALLOWED_ACQUISITION_MODES = [
-    "direct_ask",
-    "history_known",
-    "needs_lab_test",
-    "needs_imaging",
-    "needs_pathogen_test",
-    "needs_clinician_assessment",
-]
-
-ALLOWED_EVIDENCE_COSTS = [
-    "low",
-    "medium",
-    "high",
-]
-
-ACQUISITION_COST_BY_MODE = {
-    "direct_ask": "low",
-    "history_known": "low",
-    "needs_clinician_assessment": "medium",
-    "needs_lab_test": "high",
-    "needs_imaging": "high",
-    "needs_pathogen_test": "high",
-}
 
 GRAPH_OUTPUT_SCHEMA: Dict[str, Any] = {
     "type": "object",
@@ -99,14 +103,6 @@ GRAPH_OUTPUT_SCHEMA: Dict[str, Any] = {
                     "detail_required": {
                         "type": "string",
                         "enum": sorted(DETAIL_LEVELS),
-                    },
-                    "acquisition_mode": {
-                        "type": "string",
-                        "enum": sorted(ALLOWED_ACQUISITION_MODES),
-                    },
-                    "evidence_cost": {
-                        "type": "string",
-                        "enum": sorted(ALLOWED_EVIDENCE_COSTS),
                     },
                     "attributes": {
                         "type": "object",
@@ -142,26 +138,17 @@ GRAPH_OUTPUT_SCHEMA: Dict[str, Any] = {
 }
 
 SCHEMA_CONSTITUTION = f"""
-你正在为一个 HIV/AIDS 场景的“问诊搜索树”抽取可直接写入 Neo4j 的搜索专用知识图谱。
-
-这不是通用医学指南归档图谱。图谱只服务以下问诊链路：
-- R1：症状 / 风险 / 检查线索 -> 候选疾病或疾病阶段
-- R2：候选疾病 -> 关键待验证证据
-- A3：根据待验证证据构造下一问
-- A4：根据患者回答更新证据和诊断假设
+你正在为一个 HIV/AIDS 问诊系统抽取可直接写入 Neo4j 的知识图谱。
 
 你必须严格遵守以下本体与输出规则：
 1. 只能返回严格 JSON，且顶层必须且只能包含两个键：`nodes` 和 `edges`。
-2. 只能使用下面明确列出的搜索专用节点标签和关系类型。
+2. 只能使用下面明确列出的节点类型和关系类型。
 3. 每个节点必须包含以下字段：
    - id
    - label
    - name
    - weight
    - detail_required
-   对症状、体征、风险、检查、影像、病原、可追问细节等“证据节点”，请尽量额外输出：
-   - acquisition_mode
-   - evidence_cost
 4. 每条边必须包含以下字段：
    - id
    - type
@@ -169,65 +156,25 @@ SCHEMA_CONSTITUTION = f"""
    - target_id
    - weight
    - detail_required
-5. 请重点抽取“诊断问诊子图”，包括：
-   - 疾病、疾病阶段、机会性感染、并发症、肿瘤、共病
-   - 症状、体征、可追问的临床细节
-   - 实验室检查、实验室发现
-   - 影像学发现
-   - 病原体或病原学线索
-   - 风险因素、风险行为、人群特征
-6. 请忽略用药、治疗方案、预防策略、推荐意见编号、证据分级、指南章节、证据片段、文档证据链。
-   不要输出 Recommendation、Medication、TreatmentRegimen、GuidelineDocument、EvidenceSpan、Assertion 等全指南型实体。
-7. `RiskBehavior` 必须用于具体行为风险，例如高危性行为、无保护性行为、多性伴、静脉吸毒、共用针具。
-   不要把这些内容抽成 ExposureScenario。
-8. `ImagingFinding` 必须用于影像学发现，例如双肺弥漫磨玻璃影、胸部 CT 异常、粟粒样结节、空洞、间质性浸润。
-   疾病到影像学发现优先使用 `HAS_IMAGING_FINDING`。
-9. `Pathogen` 用于病原体或明确病原学线索，例如肺孢子菌、结核分枝杆菌、隐球菌、巨细胞病毒。
-   疾病到病原体或病原线索使用 `HAS_PATHOGEN`。
-10. `LabFinding` 必须结构化表达。如果文本中出现阈值或比较条件，请放入 `LabFinding.attributes` 中，至少包含：
+5. `Recommendation` 必须作为独立节点存在。请将 `recommendation_no`、`evidence_grade`、`strength`、`recommendation_text` 放入 `Recommendation.attributes` 中。
+   只有当文本中存在明确的推荐语句，且你能够可靠抽取推荐文本及其编号/等级/强度时，才输出为 `Recommendation`。
+   如果只是一般性建议、流程描述或管理动作，而没有稳定的推荐元数据，请改为 `Assertion`、`ManagementAction`、`TreatmentRegimen` 或其他更合适的实体。
+6. `LabFinding` 必须结构化表达。如果文本中出现阈值或比较条件，请放入 `LabFinding.attributes` 中，至少包含：
    - test_id
    - operator
    - value
    - unit
-   如果原文是“阳性”“阴性”“升高”“降低”“高于检测下限”等无法稳定转换为数值的检验结论，也可以使用：
+   如果原文是“高于检测下限”“低于检测下限”“阳性”“阴性”这类无法稳定转换为数值的检验结论，也可以使用：
    - value_text
    - reference_value_text
-   如果你无法可靠判断某条信息对应的 `test_id` 或 `operator`，不要把它输出为 `LabFinding`，可输出为 `LabTest` 或其他更合适的搜索证据节点。
-11. 用于问诊追问的细节槽位，必须建模为 `ClinicalAttribute` 节点，并通过 `REQUIRES_DETAIL` 关系连接。
-   例如咳嗽持续时间、发热程度、呼吸困难是否进行性加重、是否夜间盗汗、体重下降幅度。
-12. 每一条边的 `source_id` 和 `target_id` 都必须引用本次返回的 `nodes` 数组中真实存在的节点 id，禁止输出指向未定义节点的边。
-13. 不要臆造文本中不存在的事实。所有抽取结果都必须能够从当前文本块中直接或高度确定地归纳出来。
-14. `acquisition_mode` 用于描述这条证据通常如何获得，只能使用：
-   - `direct_ask`：患者通常可以直接回答，例如发热、干咳、气促、盗汗、体重下降、高危性行为。
-   - `history_known`：通常来自既往史或已知背景，例如 HIV 感染者、免疫抑制人群、孕产妇。
-   - `needs_lab_test`：需要实验室检查结果，例如 CD4+ T 淋巴细胞计数、HIV RNA、LDH、β-D 葡聚糖。
-   - `needs_imaging`：需要影像检查结果，例如胸部 CT 磨玻璃影、空洞、粟粒样结节。
-   - `needs_pathogen_test`：需要病原学检测结果，例如 BAL 肺孢子菌 PCR 阳性、培养、抗原、核酸检测。
-   - `needs_clinician_assessment`：需要医生查体或临床判断，例如听诊异常、体格检查发现。
-15. `evidence_cost` 用于描述获取这条证据的相对成本，只能使用：
-   - `low`：直接询问或既往已知即可获得。
-   - `medium`：需要医生查体、临床评估或常规已做检查。
-   - `high`：需要化验、影像、病原学检查或医疗设备支持。
-16. 如果无法可靠判断 `acquisition_mode` 或 `evidence_cost`，可以省略，不要强行臆造。
-
-证据获取方式示例：
-- 发热：`Symptom`，`acquisition_mode=direct_ask`，`evidence_cost=low`
-- 干咳：`Symptom`，`acquisition_mode=direct_ask`，`evidence_cost=low`
-- 高危性行为：`RiskBehavior`，`acquisition_mode=direct_ask`，`evidence_cost=low`
-- CD4+ T 淋巴细胞计数 < 200/μL：`LabFinding`，`acquisition_mode=needs_lab_test`，`evidence_cost=high`
-- 胸部 CT 磨玻璃影：`ImagingFinding`，`acquisition_mode=needs_imaging`，`evidence_cost=high`
-- BAL 肺孢子菌 PCR 阳性：`LabFinding` 或病原学证据，`acquisition_mode=needs_pathogen_test`，`evidence_cost=high`
-
-关系使用指南：
-- `MANIFESTS_AS`：疾病 / 阶段 / 并发症 -> 症状或体征
-- `HAS_LAB_FINDING`：疾病 / 阶段 -> 实验室发现
-- `HAS_IMAGING_FINDING`：疾病 / 阶段 -> 影像学发现
-- `HAS_PATHOGEN`：疾病 / 机会性感染 -> 病原体或病原学线索
-- `DIAGNOSED_BY`：疾病 / 阶段 -> 关键检查、诊断依据或高度诊断性发现
-- `REQUIRES_DETAIL`：疾病或症状 -> 需要进一步追问的临床细节
-- `RISK_FACTOR_FOR`：风险因素 / 风险行为 / 人群特征 -> 疾病或阶段
-- `COMPLICATED_BY`：疾病 / 阶段 -> 并发症、综合征、肿瘤或共病
-- `APPLIES_TO`：疾病或证据 -> 适用人群，例如 HIV 感染者、免疫抑制人群、孕产妇
+   如果你无法可靠判断某条信息对应的 `test_id` 或 `operator`，不要把它输出为 `LabFinding`，可改为 `DiagnosticCriterion`、`LabTest` 或其他更合适的实体。
+7. 用于问诊追问的细节字段，必须建模为 `ClinicalAttribute` 节点，并通过 `REQUIRES_DETAIL` 关系连接。
+8. 药物禁忌、条件限制或不推荐情形，必须使用 `CONTRAINDICATED_IN` 或 `NOT_RECOMMENDED_FOR` 关系表示。
+9. 如果文本片段中存在明确证据，请尽量同时抽取 `GuidelineDocument`、`GuidelineSection`、`EvidenceSpan`、`Assertion` 以及 `SUPPORTED_BY`，以保留证据链和可解释性。
+10. 不要臆造文本中不存在的事实。所有抽取结果都必须能够从当前文本块中直接或高度确定地归纳出来。
+11. 每一条边的 `source_id` 和 `target_id` 都必须引用本次返回的 `nodes` 数组中真实存在的节点 id，禁止输出指向未定义节点的边。
+12. 如果同一句中包含多个独立检验条件，例如“CD4 在某范围内且 HIV RNA 高于/低于检测下限”，请拆成多个 `LabFinding` 节点，不要把不同检验项目揉成一个复合 `LabFinding`。
+13. 如果某种治疗或推荐只在满足特定阈值时成立，请在对应关系的 `attributes.condition_text` 中保留条件原文。
 
 允许使用的节点标签：
 {", ".join(ALLOWED_LABELS)}
@@ -321,16 +268,7 @@ def summarize_node_for_error(node: Any) -> Any:
 
     summary: Dict[str, Any] = {}
 
-    for key in [
-        "id",
-        "label",
-        "name",
-        "canonical_name",
-        "weight",
-        "detail_required",
-        "acquisition_mode",
-        "evidence_cost",
-    ]:
+    for key in ["id", "label", "name", "canonical_name", "weight", "detail_required"]:
         if key in node:
             summary[key] = compact_debug_value(node.get(key))
 
@@ -860,10 +798,8 @@ def build_extraction_messages(chunk: Chunk) -> List[Dict[str, str]]:
 
     user_prompt = "\n".join(
         [
-            "请从下面的 Markdown 文本块中抽取可直接写入 Neo4j 的问诊搜索专用知识图谱。",
-            "请只关注：候选诊断、症状/体征、风险因素/风险行为、实验室检查与发现、影像学发现、病原学线索、可进一步追问的临床细节。",
-            "对症状、风险、检查、影像、病原等证据节点，请尽量补充 acquisition_mode 和 evidence_cost，便于后续区分可直接询问证据与高成本检查证据。",
-            "请忽略：用药、治疗方案、预防策略、推荐意见、指南章节、证据分级和文档证据链。",
+            "请从下面的 Markdown 文本块中抽取可直接写入 Neo4j 的知识图谱。",
+            "请重点关注：临床实体、诊疗决策逻辑、禁忌或限制条件、监测要求、结构化阈值检验结果，以及证据支持关系。",
             "只允许返回严格 JSON，不要输出任何解释性文字。",
             "",
             "[元数据]",
@@ -894,7 +830,7 @@ async def call_model_for_chunk(client: AsyncOpenAI, chunk: Chunk, config: Config
         "response_format": {
             "type": "json_schema",
             "json_schema": {
-                "name": "hiv_search_graph_extraction",
+                "name": "hiv_graph_extraction",
                 "strict": True,
                 "schema": GRAPH_OUTPUT_SCHEMA,
             },
@@ -917,18 +853,21 @@ async def call_model_for_chunk(client: AsyncOpenAI, chunk: Chunk, config: Config
     content = extract_assistant_content(response)
     parsed = parse_json_content(content)
     parsed = repair_lab_finding_nodes(parsed, chunk)
-    parsed = repair_acquisition_metadata(parsed, chunk)
+    parsed = repair_recommendation_nodes(parsed, chunk)
 
     try:
         validate_extraction_result(parsed, chunk)
     except RuntimeError as exc:
         if "unknown source_id" in str(exc) or "unknown target_id" in str(exc):
             parsed = repair_dangling_edges(parsed, chunk)
-            parsed = repair_acquisition_metadata(parsed, chunk)
             validate_extraction_result(parsed, chunk)
         elif "LabFinding" in str(exc):
             parsed = repair_lab_finding_nodes(parsed, chunk)
-            parsed = repair_acquisition_metadata(parsed, chunk)
+            parsed = repair_recommendation_nodes(parsed, chunk)
+            validate_extraction_result(parsed, chunk)
+        elif "Recommendation" in str(exc):
+            parsed = repair_recommendation_nodes(parsed, chunk)
+            parsed = repair_lab_finding_nodes(parsed, chunk)
             validate_extraction_result(parsed, chunk)
         else:
             raise
@@ -1056,292 +995,6 @@ def normalize_lookup_text(value: str) -> str:
     return normalized
 
 
-def normalize_acquisition_mode(value: Any) -> Optional[str]:
-    if not isinstance(value, str):
-        return None
-
-    raw_value = value.strip()
-
-    if raw_value in ALLOWED_ACQUISITION_MODES:
-        return raw_value
-
-    normalized = normalize_lookup_text(raw_value)
-    aliases = {
-        "direct": "direct_ask",
-        "directask": "direct_ask",
-        "ask": "direct_ask",
-        "askpatient": "direct_ask",
-        "patientanswer": "direct_ask",
-        "直接问": "direct_ask",
-        "直接询问": "direct_ask",
-        "患者回答": "direct_ask",
-        "患者可回答": "direct_ask",
-        "病史": "history_known",
-        "既往史": "history_known",
-        "已知病史": "history_known",
-        "history": "history_known",
-        "historyknown": "history_known",
-        "lab": "needs_lab_test",
-        "labtest": "needs_lab_test",
-        "laboratory": "needs_lab_test",
-        "实验室": "needs_lab_test",
-        "化验": "needs_lab_test",
-        "检验": "needs_lab_test",
-        "imaging": "needs_imaging",
-        "image": "needs_imaging",
-        "ct": "needs_imaging",
-        "影像": "needs_imaging",
-        "影像学": "needs_imaging",
-        "病原": "needs_pathogen_test",
-        "病原学": "needs_pathogen_test",
-        "pathogen": "needs_pathogen_test",
-        "pcr": "needs_pathogen_test",
-        "培养": "needs_pathogen_test",
-        "医生评估": "needs_clinician_assessment",
-        "临床评估": "needs_clinician_assessment",
-        "查体": "needs_clinician_assessment",
-        "体格检查": "needs_clinician_assessment",
-        "clinician": "needs_clinician_assessment",
-        "clinicianassessment": "needs_clinician_assessment",
-    }
-
-    return aliases.get(normalized)
-
-
-def normalize_evidence_cost(value: Any) -> Optional[str]:
-    if not isinstance(value, str):
-        return None
-
-    raw_value = value.strip()
-
-    if raw_value in ALLOWED_EVIDENCE_COSTS:
-        return raw_value
-
-    normalized = normalize_lookup_text(raw_value)
-    aliases = {
-        "低": "low",
-        "低成本": "low",
-        "低代价": "low",
-        "lowcost": "low",
-        "中": "medium",
-        "中等": "medium",
-        "中成本": "medium",
-        "mediumcost": "medium",
-        "高": "high",
-        "高成本": "high",
-        "高代价": "high",
-        "highcost": "high",
-    }
-
-    return aliases.get(normalized)
-
-
-def node_text_for_acquisition_inference(node: Dict[str, Any]) -> str:
-    candidates: List[str] = []
-
-    for key in ["name", "canonical_name", "definition"]:
-        value = node.get(key)
-
-        if isinstance(value, str) and len(value.strip()) > 0:
-            candidates.append(value.strip())
-
-    aliases = node.get("aliases")
-
-    if isinstance(aliases, list):
-        for alias in aliases:
-            if isinstance(alias, str) and len(alias.strip()) > 0:
-                candidates.append(alias.strip())
-
-    attributes = node.get("attributes")
-
-    if isinstance(attributes, dict):
-        for key in ["test_id", "value_text", "reference_value_text", "specimen", "method"]:
-            value = attributes.get(key)
-
-            if isinstance(value, str) and len(value.strip()) > 0:
-                candidates.append(value.strip())
-
-    return "；".join(candidates)
-
-
-def infer_acquisition_mode_for_node(node: Dict[str, Any]) -> Optional[str]:
-    label = node.get("label")
-    text = node_text_for_acquisition_inference(node)
-    normalized_text = normalize_lookup_text(text)
-
-    if label in {"Symptom", "Sign", "RiskBehavior", "RiskFactor"}:
-        return "direct_ask"
-
-    if label == "PopulationGroup":
-        return "history_known"
-
-    if label == "ImagingFinding":
-        return "needs_imaging"
-
-    if label == "Pathogen":
-        return "needs_pathogen_test"
-
-    if label in {"LabFinding", "LabTest"}:
-        pathogen_markers = [
-            "pcr",
-            "bal",
-            "肺泡灌洗",
-            "培养",
-            "病原",
-            "病原学",
-            "抗原",
-            "核酸",
-            "检出",
-            "阳性",
-        ]
-
-        if any(marker in normalized_text for marker in pathogen_markers):
-            return "needs_pathogen_test"
-
-        return "needs_lab_test"
-
-    if label == "ClinicalAttribute":
-        pathogen_markers = ["pcr", "bal", "肺泡灌洗", "培养", "病原", "抗原", "核酸"]
-        imaging_markers = ["ct", "影像", "胸片", "x线", "磨玻璃", "空洞", "结节", "浸润"]
-        lab_markers = [
-            "cd4",
-            "hivrna",
-            "rna",
-            "病毒载量",
-            "pao2",
-            "血氧",
-            "氧分压",
-            "葡聚糖",
-            "g试验",
-            "ldh",
-            "计数",
-            "检测",
-            "检验",
-            "化验",
-        ]
-        clinician_markers = ["听诊", "叩诊", "查体", "体格检查", "医生评估", "临床评估"]
-
-        if any(marker in normalized_text for marker in pathogen_markers):
-            return "needs_pathogen_test"
-
-        if any(marker in normalized_text for marker in imaging_markers):
-            return "needs_imaging"
-
-        if any(marker in normalized_text for marker in lab_markers):
-            return "needs_lab_test"
-
-        if any(marker in normalized_text for marker in clinician_markers):
-            return "needs_clinician_assessment"
-
-        return "direct_ask"
-
-    return None
-
-
-def repair_acquisition_metadata(payload: Dict[str, Any], chunk: Chunk) -> Dict[str, Any]:
-    repaired_payload = {
-        "nodes": list(payload.get("nodes", [])),
-        "edges": list(payload.get("edges", [])),
-    }
-    repair_notes = list(payload.get("repair_notes", []))
-    promoted_count = 0
-    inferred_mode_count = 0
-    inferred_cost_count = 0
-    removed_invalid_count = 0
-
-    for node in repaired_payload["nodes"]:
-        if not isinstance(node, dict):
-            continue
-
-        attributes = node.get("attributes")
-
-        if isinstance(attributes, dict):
-            attribute_mode = normalize_acquisition_mode(attributes.get("acquisition_mode"))
-            attribute_cost = normalize_evidence_cost(attributes.get("evidence_cost"))
-
-            if "acquisition_mode" not in node and attribute_mode is not None:
-                node["acquisition_mode"] = attribute_mode
-                promoted_count += 1
-
-            if "evidence_cost" not in node and attribute_cost is not None:
-                node["evidence_cost"] = attribute_cost
-                promoted_count += 1
-
-            attributes.pop("acquisition_mode", None)
-            attributes.pop("evidence_cost", None)
-
-        normalized_mode = normalize_acquisition_mode(node.get("acquisition_mode"))
-        normalized_cost = normalize_evidence_cost(node.get("evidence_cost"))
-
-        if "acquisition_mode" in node:
-            if normalized_mode is None:
-                node.pop("acquisition_mode", None)
-                removed_invalid_count += 1
-            else:
-                node["acquisition_mode"] = normalized_mode
-
-        if "evidence_cost" in node:
-            if normalized_cost is None:
-                node.pop("evidence_cost", None)
-                removed_invalid_count += 1
-            else:
-                node["evidence_cost"] = normalized_cost
-
-        if "acquisition_mode" not in node:
-            inferred_mode = infer_acquisition_mode_for_node(node)
-
-            if inferred_mode is not None:
-                node["acquisition_mode"] = inferred_mode
-                normalized_mode = inferred_mode
-                inferred_mode_count += 1
-        else:
-            normalized_mode = node.get("acquisition_mode")
-
-        if "evidence_cost" not in node and isinstance(normalized_mode, str):
-            inferred_cost = ACQUISITION_COST_BY_MODE.get(normalized_mode)
-
-            if inferred_cost is not None:
-                node["evidence_cost"] = inferred_cost
-                inferred_cost_count += 1
-
-    if promoted_count > 0:
-        repair_notes.append(
-            {
-                "type": "promoted_acquisition_metadata_from_attributes",
-                "count": promoted_count,
-            }
-        )
-
-    if inferred_mode_count > 0:
-        repair_notes.append(
-            {
-                "type": "inferred_acquisition_mode",
-                "count": inferred_mode_count,
-            }
-        )
-
-    if inferred_cost_count > 0:
-        repair_notes.append(
-            {
-                "type": "inferred_evidence_cost",
-                "count": inferred_cost_count,
-            }
-        )
-
-    if removed_invalid_count > 0:
-        repair_notes.append(
-            {
-                "type": "removed_invalid_acquisition_metadata",
-                "count": removed_invalid_count,
-            }
-        )
-
-    if len(repair_notes) > 0:
-        repaired_payload["repair_notes"] = repair_notes
-
-    return repaired_payload
-
-
 def build_lab_test_lookup(payload: Dict[str, Any]) -> Dict[str, str]:
     lookup: Dict[str, str] = {}
 
@@ -1462,6 +1115,143 @@ def infer_lab_finding_test_id(text: str, lab_test_lookup: Dict[str, str]) -> Opt
             return test_id
 
     return None
+
+
+def parse_recommendation_number(*text_values: Optional[str]) -> Optional[int]:
+    patterns = [
+        r"推荐意见\s*([0-9]{1,3})",
+        r"recommendation[_\s-]*([0-9]{1,3})",
+        r"rec[_-]?([0-9]{1,3})",
+    ]
+
+    for text in text_values:
+        if not isinstance(text, str) or len(text.strip()) == 0:
+            continue
+
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+
+            if match is not None:
+                try:
+                    return int(match.group(1))
+                except ValueError:
+                    continue
+
+    return None
+
+
+def parse_recommendation_grade_strength(*text_values: Optional[str]) -> tuple[Optional[str], Optional[int]]:
+    evidence_grade: Optional[str] = None
+    strength: Optional[int] = None
+
+    compact_text = " ".join(
+        text.strip()
+        for text in text_values
+        if isinstance(text, str) and len(text.strip()) > 0
+    )
+
+    if len(compact_text) == 0:
+        return evidence_grade, strength
+
+    direct_match = re.search(r"[\(（]\s*([ABCabc])\s*([12])\s*[\)）]", compact_text)
+
+    if direct_match is not None:
+        evidence_grade = direct_match.group(1).upper()
+        strength = int(direct_match.group(2))
+        return evidence_grade, strength
+
+    evidence_match = re.search(r"(?:证据(?:等级|级别|水平)|推荐级别)\s*[:：]?\s*([ABCabc])", compact_text)
+
+    if evidence_match is not None:
+        evidence_grade = evidence_match.group(1).upper()
+
+    strength_match = re.search(r"(?:推荐强度|推荐等级|强度)\s*[:：]?\s*([12])", compact_text)
+
+    if strength_match is not None:
+        strength = int(strength_match.group(1))
+
+    roman_strength_match = re.search(r"([ⅠIⅡ]{1,2}|IV|Ⅳ)\s*类推荐", compact_text)
+
+    if strength is None and roman_strength_match is not None:
+        roman_value = roman_strength_match.group(1)
+        roman_map = {
+            "Ⅰ": 1,
+            "I": 1,
+            "Ⅱ": 2,
+            "II": 2,
+            "Ⅳ": 2,
+            "IV": 2,
+        }
+        strength = roman_map.get(roman_value)
+
+    evidence_level_digit_match = re.search(r"证据(?:等级|级别|水平)\s*[:：]?\s*([12])", compact_text)
+
+    if strength is None and evidence_level_digit_match is not None:
+        strength = int(evidence_level_digit_match.group(1))
+
+    return evidence_grade, strength
+
+
+def is_generic_recommendation_name(value: Optional[str]) -> bool:
+    if not isinstance(value, str):
+        return False
+
+    return re.fullmatch(r"\s*推荐意见\s*\d{1,3}\s*", value) is not None
+
+
+def strip_recommendation_prefix(text: str) -> str:
+    stripped = re.sub(r"^\s*推荐意见\s*\d{1,3}\s*[:：]?\s*", "", text).strip()
+    return stripped
+
+
+def strip_recommendation_rating_suffix(text: str) -> str:
+    stripped = re.sub(r"\s*[\(（]\s*[ABCabc]\s*[12]\s*[\)）]\s*[。.]?\s*$", "", text).strip()
+    return stripped
+
+
+def summarize_recommendation_text(text: str, max_length: int = 36) -> str:
+    normalized = re.sub(r"[ \t]{2,}", " ", text.strip())
+
+    normalized = strip_recommendation_prefix(normalized)
+    normalized = strip_recommendation_rating_suffix(normalized)
+    normalized = normalized.strip("；;，,。. ")
+
+    clause_candidates = [part.strip() for part in re.split(r"[、；;。]", normalized) if len(part.strip()) > 0]
+
+    for clause in clause_candidates:
+        if len(clause) <= max_length:
+            return clause
+
+    if len(normalized) <= max_length:
+        return normalized
+
+    sentence_match = re.match(r"^(.{1," + str(max_length) + r"}?[；;。.!！？])", normalized)
+
+    if sentence_match is not None:
+        return sentence_match.group(1).rstrip("；;。.!！？")
+
+    return normalized[:max_length].rstrip()
+
+
+def build_recommendation_display_name(
+    recommendation_no: Optional[int],
+    recommendation_text: Optional[str],
+) -> Optional[str]:
+    if not isinstance(recommendation_text, str) or len(recommendation_text.strip()) == 0:
+        return None
+
+    summary = summarize_recommendation_text(recommendation_text)
+
+    if len(summary) == 0:
+        return None
+
+    if summary.startswith("推荐"):
+        summary = summary[2:].strip()
+
+    if isinstance(recommendation_no, int):
+        return f"推荐意见{recommendation_no}：{summary}"
+
+    return summary
 
 
 def repair_dangling_edges(payload: Dict[str, Any], chunk: Chunk) -> Dict[str, Any]:
@@ -1697,6 +1487,220 @@ def repair_lab_finding_nodes(payload: Dict[str, Any], chunk: Chunk) -> Dict[str,
     return repaired_payload
 
 
+def repair_recommendation_nodes(payload: Dict[str, Any], chunk: Chunk) -> Dict[str, Any]:
+    repaired_payload = {
+        "nodes": list(payload.get("nodes", [])),
+        "edges": list(payload.get("edges", [])),
+    }
+    repair_notes = list(payload.get("repair_notes", []))
+    initialized_attributes_count = 0
+    repaired_recommendation_no_count = 0
+    repaired_recommendation_text_count = 0
+    repaired_evidence_grade_count = 0
+    repaired_strength_count = 0
+    repaired_display_name_count = 0
+    downgraded_node_ids: List[str] = []
+
+    for node in repaired_payload["nodes"]:
+        if not isinstance(node, dict):
+            continue
+
+        if node.get("label") != "Recommendation":
+            continue
+
+        attributes = node.get("attributes")
+
+        if not isinstance(attributes, dict):
+            attributes = {}
+            node["attributes"] = attributes
+            initialized_attributes_count += 1
+
+        name = node.get("name")
+        definition = node.get("definition")
+        node_id = node.get("id")
+        aliases = node.get("aliases")
+        text_candidates: List[str] = []
+
+        for candidate in [name, definition, node_id]:
+            if isinstance(candidate, str) and len(candidate.strip()) > 0:
+                text_candidates.append(candidate.strip())
+
+        if isinstance(aliases, list):
+            for alias in aliases:
+                if isinstance(alias, str) and len(alias.strip()) > 0:
+                    text_candidates.append(alias.strip())
+
+        if "recommendation_text" not in attributes:
+            fallback_text = None
+
+            if isinstance(definition, str) and len(definition.strip()) > 0:
+                fallback_text = definition.strip()
+            elif isinstance(name, str) and len(name.strip()) > 0:
+                fallback_text = name.strip()
+
+            if fallback_text is not None:
+                attributes["recommendation_text"] = fallback_text
+                repaired_recommendation_text_count += 1
+
+        if "recommendation_no" not in attributes:
+            parsed_number = parse_recommendation_number(name, definition, node_id)
+
+            if parsed_number is not None:
+                attributes["recommendation_no"] = parsed_number
+                repaired_recommendation_no_count += 1
+
+        parsed_grade, parsed_strength = parse_recommendation_grade_strength(
+            attributes.get("recommendation_text") if isinstance(attributes, dict) else None,
+            definition,
+            name,
+        )
+
+        if "evidence_grade" not in attributes and parsed_grade is not None:
+            attributes["evidence_grade"] = parsed_grade
+            repaired_evidence_grade_count += 1
+
+        if "strength" not in attributes and parsed_strength is not None:
+            attributes["strength"] = parsed_strength
+            repaired_strength_count += 1
+
+        display_name = build_recommendation_display_name(
+            attributes.get("recommendation_no"),
+            attributes.get("recommendation_text"),
+        )
+
+        if isinstance(display_name, str) and len(display_name) > 0:
+            aliases = node.get("aliases")
+
+            if not isinstance(aliases, list):
+                aliases = []
+
+            current_name = name.strip() if isinstance(name, str) else None
+
+            if isinstance(current_name, str) and len(current_name) > 0 and current_name != display_name:
+                if current_name not in aliases:
+                    aliases.append(current_name)
+
+            if current_name != display_name and (
+                current_name is None or is_generic_recommendation_name(current_name)
+            ):
+                node["name"] = display_name
+                repaired_display_name_count += 1
+
+            canonical_name = node.get("canonical_name")
+
+            if not isinstance(canonical_name, str) or len(canonical_name.strip()) == 0:
+                node["canonical_name"] = display_name
+            elif is_generic_recommendation_name(canonical_name):
+                node["canonical_name"] = display_name
+
+            node["aliases"] = aliases
+
+        required_keys = ["recommendation_no", "evidence_grade", "strength", "recommendation_text"]
+
+        if any(key not in attributes for key in required_keys):
+            downgraded_node_ids.append(str(node.get("id", "<unknown-node-id>")))
+            node["label"] = "Assertion"
+            node["attributes"] = {
+                "original_label": "Recommendation",
+                "downgrade_reason": "missing_recommendation_attributes",
+            }
+
+            if isinstance(definition, str) and len(definition.strip()) > 0:
+                node["definition"] = definition.strip()
+            elif isinstance(name, str) and len(name.strip()) > 0:
+                node["definition"] = name.strip()
+
+    if initialized_attributes_count > 0:
+        print(
+            f"[repair] {chunk.chunk_id} initialized empty attributes for {initialized_attributes_count} Recommendation nodes.",
+            file=sys.stderr,
+        )
+        repair_notes.append(
+            {
+                "type": "initialized_recommendation_attributes",
+                "count": initialized_attributes_count,
+            }
+        )
+
+    if repaired_recommendation_text_count > 0:
+        print(
+            f"[repair] {chunk.chunk_id} backfilled recommendation_text for {repaired_recommendation_text_count} Recommendation nodes.",
+            file=sys.stderr,
+        )
+        repair_notes.append(
+            {
+                "type": "backfilled_recommendation_text",
+                "count": repaired_recommendation_text_count,
+            }
+        )
+
+    if repaired_recommendation_no_count > 0:
+        print(
+            f"[repair] {chunk.chunk_id} inferred recommendation_no for {repaired_recommendation_no_count} Recommendation nodes.",
+            file=sys.stderr,
+        )
+        repair_notes.append(
+            {
+                "type": "inferred_recommendation_no",
+                "count": repaired_recommendation_no_count,
+            }
+        )
+
+    if repaired_evidence_grade_count > 0:
+        print(
+            f"[repair] {chunk.chunk_id} inferred evidence_grade for {repaired_evidence_grade_count} Recommendation nodes.",
+            file=sys.stderr,
+        )
+        repair_notes.append(
+            {
+                "type": "inferred_recommendation_evidence_grade",
+                "count": repaired_evidence_grade_count,
+            }
+        )
+
+    if repaired_strength_count > 0:
+        print(
+            f"[repair] {chunk.chunk_id} inferred strength for {repaired_strength_count} Recommendation nodes.",
+            file=sys.stderr,
+        )
+        repair_notes.append(
+            {
+                "type": "inferred_recommendation_strength",
+                "count": repaired_strength_count,
+            }
+        )
+
+    if repaired_display_name_count > 0:
+        print(
+            f"[repair] {chunk.chunk_id} upgraded display names for {repaired_display_name_count} Recommendation nodes.",
+            file=sys.stderr,
+        )
+        repair_notes.append(
+            {
+                "type": "upgraded_recommendation_display_name",
+                "count": repaired_display_name_count,
+            }
+        )
+
+    if len(downgraded_node_ids) > 0:
+        print(
+            f"[repair] {chunk.chunk_id} downgraded {len(downgraded_node_ids)} Recommendation nodes to Assertion.",
+            file=sys.stderr,
+        )
+        repair_notes.append(
+            {
+                "type": "downgraded_recommendation_to_assertion",
+                "count": len(downgraded_node_ids),
+                "node_ids": downgraded_node_ids,
+            }
+        )
+
+    if len(repair_notes) > 0:
+        repaired_payload["repair_notes"] = repair_notes
+
+    return repaired_payload
+
+
 def validate_node(node: Dict[str, Any], chunk: Chunk) -> None:
     if not isinstance(node, dict):
         raise_validation_error(
@@ -1746,29 +1750,11 @@ def validate_node(node: Dict[str, Any], chunk: Chunk) -> None:
             node=node,
         )
 
-    if "acquisition_mode" in node and node.get("acquisition_mode") not in ALLOWED_ACQUISITION_MODES:
-        raise_validation_error(
-            f"Chunk {chunk.chunk_id} contains a node with an invalid acquisition_mode value.",
-            "NODE_INVALID_ACQUISITION_MODE",
-            chunk=chunk,
-            node=node,
-            extra={"allowed_values": ALLOWED_ACQUISITION_MODES},
-        )
-
-    if "evidence_cost" in node and node.get("evidence_cost") not in ALLOWED_EVIDENCE_COSTS:
-        raise_validation_error(
-            f"Chunk {chunk.chunk_id} contains a node with an invalid evidence_cost value.",
-            "NODE_INVALID_EVIDENCE_COST",
-            chunk=chunk,
-            node=node,
-            extra={"allowed_values": ALLOWED_EVIDENCE_COSTS},
-        )
-
     if node["label"] == "LabFinding":
         validate_lab_finding_node(node, chunk)
 
-    if node["label"] == "ImagingFinding":
-        validate_imaging_finding_node(node, chunk)
+    if node["label"] == "Recommendation":
+        validate_recommendation_node(node, chunk)
 
 
 def validate_lab_finding_node(node: Dict[str, Any], chunk: Chunk) -> None:
@@ -1821,31 +1807,30 @@ def validate_lab_finding_node(node: Dict[str, Any], chunk: Chunk) -> None:
         )
 
 
-def validate_imaging_finding_node(node: Dict[str, Any], chunk: Chunk) -> None:
+def validate_recommendation_node(node: Dict[str, Any], chunk: Chunk) -> None:
     attributes = node.get("attributes")
 
-    if attributes is not None and not isinstance(attributes, dict):
+    if not isinstance(attributes, dict):
         raise_validation_error(
-            f"Chunk {chunk.chunk_id} returned ImagingFinding with non-object attributes.",
-            "IMAGING_FINDING_INVALID_ATTRIBUTES",
+            f"Chunk {chunk.chunk_id} returned Recommendation without attributes.",
+            "RECOMMENDATION_MISSING_ATTRIBUTES",
             chunk=chunk,
             node=node,
         )
 
-    normalized_name = normalize_lookup_text(str(node.get("name", "")))
-    generic_names = {"影像", "影像学", "影像检查", "影像学检查", "影像异常", "检查异常"}
-
-    definition = node.get("definition")
-
-    if normalized_name in generic_names and (
-        not isinstance(definition, str) or len(definition.strip()) == 0
-    ):
-        raise_validation_error(
-            f"Chunk {chunk.chunk_id} returned an overly generic ImagingFinding.",
-            "IMAGING_FINDING_GENERIC_NAME",
-            chunk=chunk,
-            node=node,
-        )
+    for key in ["recommendation_no", "evidence_grade", "strength", "recommendation_text"]:
+        if key not in attributes:
+            raise_validation_error(
+                f"Chunk {chunk.chunk_id} returned Recommendation missing attributes.{key} "
+                f"for node {node.get('id')} ({node.get('name')}).",
+                f"RECOMMENDATION_MISSING_{key.upper()}",
+                chunk=chunk,
+                node=node,
+                extra={
+                    "missing_field": key,
+                    "present_attribute_keys": sorted(attributes.keys()),
+                },
+            )
 
 
 def validate_edge(edge: Dict[str, Any], node_ids: set[str], chunk: Chunk) -> None:

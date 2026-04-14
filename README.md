@@ -1,24 +1,29 @@
 # GraduationDesign
 
-本项目面向 HIV/AIDS 场景的智能问诊系统建设，当前已完成第一阶段的知识图谱底座整理，并已经把第二阶段“问诊大脑”和“虚拟病人”推进到可做真实端到端联调的阶段。
+本项目面向 HIV/AIDS 场景的智能问诊系统建设，当前已完成第一阶段知识图谱链路从“全量指南图谱”到“问诊搜索专用图谱”的收缩，并已经把第二阶段“问诊大脑”和“虚拟病人”推进到可做真实端到端联调的阶段。
 
 ## 当前阶段
 
-当前工作可以分成两条主线：
+当前工作可以分成三条活跃主线，并保留一个历史备份目录：
 
-- `knowledge_graph/`：第一阶段，负责医学资料清理、图谱抽取、关系修补、别名合并与 Neo4j 入库
+- `knowledge_graph/`：当前激活的第一阶段链路，负责医学资料清理、搜索专用图谱抽取、别名合并与 Neo4j 入库
+- `knowledge_graph_bak/`：旧版全量指南知识图谱备份，已经废弃，仅用于历史对照
 - `brain/`、`simulator/`：第二阶段，负责 Med-MCTS 风格问诊、虚拟病人生成与离线评测
+- `frontend/`：中期检查演示层，负责 Streamlit 前端、回放模式与实时问诊模式展示
 
 一句话概括当前状态：
 
-- 第一阶段：已可跑通
+- 第一阶段：当前活跃版本已切换为服务 `R1 / R2 / A3 / A4` 的搜索专用图谱；旧版治疗、推荐、证据链图谱已移至 `knowledge_graph_bak/`
 - 第二阶段：已经进入“select -> expand -> simulate -> backpropagate 多次 rollout 可跑”的阶段，并已具备 A4 路由控制、配置驱动构造和真实 smoke 入口
+- 前端演示：已支持中文 Streamlit 页面，可展示多轮问诊、A1/A2/A3/A4、候选诊断、下一问、搜索摘要与安全机制
 
 更详细的局部说明可分别查看：
 
-- 第一阶段知识图谱处理链：[knowledge_graph/README.md](/Users/loki/Workspace/GraduationDesign/knowledge_graph/README.md)
+- 第一阶段搜索专用知识图谱处理链：[knowledge_graph/README.md](/Users/loki/Workspace/GraduationDesign/knowledge_graph/README.md)
+- 旧版全量指南图谱备份：[knowledge_graph_bak/README.md](/Users/loki/Workspace/GraduationDesign/knowledge_graph_bak/README.md)
 - 第二阶段问诊大脑：[brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
 - 虚拟病人与离线回放：[simulator/README.md](/Users/loki/Workspace/GraduationDesign/simulator/README.md)
+- 前端演示界面：[frontend/README.md](/Users/loki/Workspace/GraduationDesign/frontend/README.md)
 - 第二阶段测试：[tests/README.md](/Users/loki/Workspace/GraduationDesign/tests/README.md)
 
 ## 项目结构
@@ -27,12 +32,12 @@
 GraduationDesign/
 ├── HIV/                          # 原始医学资料
 ├── HIV_cleaned/                  # 清理后的资料输出
-├── knowledge_graph/              # 第一阶段知识图谱处理链
+├── knowledge_graph/              # 当前激活的搜索专用知识图谱处理链
 │   ├── aliases/
 │   ├── scripts/neo4j_init.cypher
 │   ├── clean_markdown.py
 │   ├── pipeline.py
-│   ├── repair_relations_with_llm.py
+│   ├── repair_relations_with_llm.py       # 搜索专用孤立节点关系修补工具，非默认必要步骤
 │   ├── collect_normalization_candidates.py
 │   ├── merge_nodes_by_aliases.py
 │   ├── import_merged_graph.py
@@ -43,9 +48,19 @@ GraduationDesign/
 │   ├── run_merge_nodes_by_aliases.sh
 │   ├── run_import_merged_graph.sh
 │   └── README.md
+├── knowledge_graph_bak/          # 已废弃的旧版全量指南图谱备份
 ├── brain/                        # 第二阶段问诊大脑脚手架
 ├── simulator/                    # 虚拟病人与离线评测脚手架
+├── frontend/                     # Streamlit 中期检查演示界面
+│   ├── app.py                    # 前端入口
+│   ├── ui_adapter.py             # 后端结果到 UI 展示字段的轻量适配层
+│   ├── output_browser.py         # 历史实验输出浏览适配层
+│   ├── config_loader.py          # 前端实时模式配置加载
+│   ├── demo_cases.py             # 内置回放病例索引
+│   ├── demo_replays/             # 可离线展示的示例问诊记录
+│   └── README.md
 ├── configs/                      # 第二阶段配置
+├── .streamlit/                   # Streamlit 本地运行配置
 ├── docs/                         # 设计与执行清单
 ├── scripts/                      # 第二阶段演示与工具脚本
 ├── tests/                        # 第二阶段单元测试脚手架
@@ -56,32 +71,81 @@ GraduationDesign/
 └── README.md
 ```
 
-## 第一阶段：知识图谱处理链
+## 第一阶段：搜索专用知识图谱处理链
 
-第一阶段的脚本已经全部整理到 [knowledge_graph](/Users/loki/Workspace/GraduationDesign/knowledge_graph)。
+第一阶段的当前活跃脚本整理在 [knowledge_graph](/Users/loki/Workspace/GraduationDesign/knowledge_graph)。这一版已经不再维护“全量医学指南图谱”，而是为问诊搜索树量身定制：支持 `R1` 候选诊断生成、`R2` 关键证据检索、`A3` 下一问构造和 `A4` 证据更新。
+
+旧版全量指南图谱已经移到 [knowledge_graph_bak](/Users/loki/Workspace/GraduationDesign/knowledge_graph_bak)，该目录只作历史备份，不建议用于当前 Neo4j 入库、replay 或实时问诊。
 
 主流程如下：
 
-1. 原始 Markdown 清理  
-   入口：[run_clean_markdown.sh](/Users/loki/Workspace/GraduationDesign/knowledge_graph/run_clean_markdown.sh)
+推荐一键入口：
 
-2. 大模型抽取 `nodes / edges`  
-   入口：[run_pipeline.sh](/Users/loki/Workspace/GraduationDesign/knowledge_graph/run_pipeline.sh)
+```bash
+./knowledge_graph/run_search_kg_pipeline.sh
+```
 
-3. 定向关系修补  
-   入口：[run_repair_relations_with_llm.sh](/Users/loki/Workspace/GraduationDesign/knowledge_graph/run_repair_relations_with_llm.sh)
+该脚本默认读取 [HIV_cleaned](/Users/loki/Workspace/GraduationDesign/HIV_cleaned)，并把本轮结果写入：
 
-4. 提取待统一名称  
-   入口：[run_collect_normalization_candidates.sh](/Users/loki/Workspace/GraduationDesign/knowledge_graph/run_collect_normalization_candidates.sh)
+```text
+test_outputs/search_kg/search_kg_<timestamp>/
+```
 
-5. 人工维护 `aliases/`  
-   目录：[aliases](/Users/loki/Workspace/GraduationDesign/knowledge_graph/aliases)
+它会自动完成：
 
-6. 按 alias 合并图谱  
-   入口：[run_merge_nodes_by_aliases.sh](/Users/loki/Workspace/GraduationDesign/knowledge_graph/run_merge_nodes_by_aliases.sh)
+1. 大模型抽取 `nodes / edges`
+2. 提取待统一名称
+3. 按 alias 合并图谱
 
-7. 导入 Neo4j  
-   入口：[run_import_merged_graph.sh](/Users/loki/Workspace/GraduationDesign/knowledge_graph/run_import_merged_graph.sh)
+默认不会运行可选的 `repair_relations_with_llm.py` 孤立节点关系修补，也不会自动导入 Neo4j。确认合并图谱无误后，如需导入可执行：
+
+```bash
+IMPORT_TO_NEO4J=true ./knowledge_graph/run_search_kg_pipeline.sh
+```
+
+或导入最近一次构建结果：
+
+```bash
+./knowledge_graph/run_import_merged_graph.sh
+```
+
+如果要重建 Neo4j 中的当前图谱，可使用清库、导入、校验一体入口：
+
+```bash
+./knowledge_graph/run_reload_search_kg_neo4j.sh
+```
+
+校验报告会写到当前搜索图谱输出目录下的 `neo4j_validation_report.json`。
+
+如果只是人工更新了某次输出目录下的 `aliases/`，无需重跑 LLM，可直接复用该轮抽取结果重新合并：
+
+```bash
+SEARCH_KG_OUTPUT_ROOT="/Users/loki/Workspace/GraduationDesign/test_outputs/search_kg/search_kg_20260413_231209" \
+SKIP_EXTRACTION=true \
+./knowledge_graph/run_search_kg_pipeline.sh
+```
+
+当前搜索专用本体重点保留：
+
+- 诊断候选：`Disease`、`OpportunisticInfection`、`Comorbidity`、`SyndromeOrComplication`、`Tumor`
+- 待验证证据：`Symptom`、`Sign`、`ClinicalAttribute`、`LabTest`、`LabFinding`、`ImagingFinding`、`Pathogen`
+- 风险与人群：`RiskFactor`、`RiskBehavior`、`PopulationGroup`
+- 搜索关系：`MANIFESTS_AS`、`HAS_LAB_FINDING`、`HAS_IMAGING_FINDING`、`HAS_PATHOGEN`、`DIAGNOSED_BY`、`REQUIRES_DETAIL`、`RISK_FACTOR_FOR`、`COMPLICATED_BY`、`APPLIES_TO`
+- 证据获取元数据：证据节点可预留 `acquisition_mode` 和 `evidence_cost`，用于后续区分直接问诊证据与依赖化验、影像、病原检测的高成本证据；当前只在抽取端保留，不改变搜索排序
+
+以下旧版全量指南图谱内容已经从当前抽取端移除：
+
+- `Recommendation`、`Medication`、`DrugClass`、`TreatmentRegimen`、`PreventionStrategy`、`ManagementAction`
+- `GuidelineDocument`、`GuidelineSection`、`EvidenceSpan`、`Assertion`
+- `RECOMMENDS`、`TREATED_WITH`、`SUPPORTED_BY`、`HAS_EVIDENCE`、`SUBJECT`、`OBJECT` 等治疗/推荐/证据链关系
+
+[repair_relations_with_llm.py](/Users/loki/Workspace/GraduationDesign/knowledge_graph/repair_relations_with_llm.py) 当前已改为搜索专用孤立节点关系修补器，仍然不作为默认必要步骤。若 Neo4j 校验或合并报告显示孤立节点偏高，可运行：
+
+```bash
+./knowledge_graph/run_repair_relations_with_llm.sh
+```
+
+该脚本默认读取最近一次 `test_outputs/search_kg/search_kg_<timestamp>/output_graph.jsonl`，只允许补充当前搜索本体中的诊断-证据关系，并会继续生成修补后的候选名称和 alias 合并图谱。修补结果默认写入当前搜索图谱目录下的 `relation_repair/`。
 
 最常用的最终入库源通常是：
 
@@ -94,6 +158,7 @@ Neo4j 初始化脚本位于：
 更详细的说明见：
 
 - [knowledge_graph/README.md](/Users/loki/Workspace/GraduationDesign/knowledge_graph/README.md)
+- [knowledge_graph_bak/README.md](/Users/loki/Workspace/GraduationDesign/knowledge_graph_bak/README.md)
 
 ## 第二阶段：问诊大脑
 
@@ -151,11 +216,79 @@ Neo4j 初始化脚本位于：
 
 当前 `replay_engine` 已经不再是占位文件，而是能够驱动 `brain/service.py` 跑通最小的“系统问 -> 病人答 -> 系统再问”自动回放闭环，并支持批量回放。
 
+## 前端演示界面
+
+前端演示层位于 [frontend](/Users/loki/Workspace/GraduationDesign/frontend)，采用 Streamlit + Python 实现，不引入 React/Vue 等前后端分离框架。页面以中文为主，面向中期检查现场展示，重点让老师能直接看到“系统不是普通聊天，而是在执行结构化问诊决策”。
+
+主要展示内容：
+
+- 左侧展示多轮问诊对话、患者输入、系统追问与最终结论
+- 右侧展示当前会话状态、A1 关键线索提取、A2 候选诊断排序、A3 下一问选择、A4 回答解释与路由
+- 搜索摘要展示 rollout 次数、树节点数量、当前 best answer、一致性、路径多样性与代理评估 / 复核器结果
+- 安全机制模块展示复核器是否允许停止、安全接受闸门是否阻止停止、搜索树是否换根、缺失关键证据与竞争诊断信息
+- 实验复盘模式可直接浏览 [test_outputs/simulator_replay](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_replay) 下的历史 replay / sweep / ablation 输出
+
+启动方式：
+
+```bash
+conda activate GraduationDesign
+streamlit run frontend/app.py
+```
+
+或使用仓库脚本：
+
+```bash
+./scripts/run_streamlit_realtime.sh
+```
+
+启动后通常访问：
+
+```text
+http://localhost:8501
+```
+
+如果 8501 被占用，以 Streamlit 终端输出的 `Local URL` 为准。也可以手动指定端口：
+
+```bash
+streamlit run frontend/app.py --server.port 8514
+```
+
+前端支持三种模式：
+
+- 回放模式：从 [frontend/demo_replays](/Users/loki/Workspace/GraduationDesign/frontend/demo_replays) 加载预置 JSON 问诊记录，不依赖 Neo4j、DashScope 或环境变量，适合作为现场保底演示
+- 实验复盘模式：扫描 [test_outputs/simulator_replay](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_replay)，可选择历史输出目录和病例，逐轮查看 repair、verifier、guarded gate、A4 evidence audit 等实验记录
+- 实时运行模式：直接调用 [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py) 的默认构造和 `process_turn()`，需要 Neo4j 与 LLM 配置可用
+
+实验复盘模式当前可识别：
+
+- `focused_repair_summary.jsonl`：最适合逐轮复盘，包含 root best action、repair selected action、reject reason、reroot、A4 evidence audit 等字段
+- `replay_results.jsonl`：普通虚拟病人 replay 输出，包含问答轮次和 final_report
+- `ablation_summary.jsonl`：病例级 ablation 摘要
+- `focused_metrics.json`、`ablation_metrics.json`、`benchmark_summary.json`、`profile_summary.tsv`：实验指标汇总
+- `status.json`、`run.log`：运行状态与日志尾部
+
+实时模式配置读取顺序：
+
+- 默认读取 [configs/frontend.yaml](/Users/loki/Workspace/GraduationDesign/configs/frontend.yaml)
+- 如需本地密钥，可复制 [configs/frontend.local.example.yaml](/Users/loki/Workspace/GraduationDesign/configs/frontend.local.example.yaml) 为 `configs/frontend.local.yaml`
+- `configs/frontend.local.yaml` 已加入忽略列表，适合填写 `llm.api_key`、Neo4j 密码等本地敏感配置
+- 前端运行时会把配置适配为现有后端所需的环境变量与 `config_overrides`，因此不需要在命令行手动 export 大量变量
+
+实时模式依赖说明：
+
+- Neo4j 需要已导入知识图谱，并能通过 `configs/frontend.yaml` 或 `configs/frontend.local.yaml` 连接
+- LLM 默认使用 DashScope compatible OpenAI 接口与 `qwen3-max`
+- 如果实时模式连接失败，页面仍可切换到回放模式完成完整展示
+- 如果患者第一句只是“你好，医生”等无症状问候，系统会主动询问主诉
+- 如果患者只提供“我正在发热”等单一线索，系统会通过冷启动追问补充关键症状或风险因素
+
 ## 配置、测试与文档
 
 - [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml)
 - [configs/stop_rules.yaml](/Users/loki/Workspace/GraduationDesign/configs/stop_rules.yaml)
 - [configs/simulator.yaml](/Users/loki/Workspace/GraduationDesign/configs/simulator.yaml)
+- [configs/frontend.yaml](/Users/loki/Workspace/GraduationDesign/configs/frontend.yaml)：前端实时模式默认配置
+- [configs/frontend.local.example.yaml](/Users/loki/Workspace/GraduationDesign/configs/frontend.local.example.yaml)：前端本地密钥配置模板
 - [tests](/Users/loki/Workspace/GraduationDesign/tests)：第二阶段测试脚手架
 - 更详细的目录说明见：[tests/README.md](/Users/loki/Workspace/GraduationDesign/tests/README.md)
 - [tests/test_replay_engine.py](/Users/loki/Workspace/GraduationDesign/tests/test_replay_engine.py)
@@ -166,6 +299,8 @@ Neo4j 初始化脚本位于：
 - [phase2_execution_checklist.md](/Users/loki/Workspace/GraduationDesign/docs/phase2_execution_checklist.md)：第二阶段与虚拟病人开发清单
 - [phase2_changelog.md](/Users/loki/Workspace/GraduationDesign/docs/phase2_changelog.md)：第二阶段实现历程、问题改进与论文写作素材整理
 - [scripts/run_brain_demo.py](/Users/loki/Workspace/GraduationDesign/scripts/run_brain_demo.py)：最小命令行问诊演示入口
+- [scripts/run_streamlit_realtime.sh](/Users/loki/Workspace/GraduationDesign/scripts/run_streamlit_realtime.sh)：Streamlit 前端启动入口
+- [.streamlit/config.toml](/Users/loki/Workspace/GraduationDesign/.streamlit/config.toml)：关闭 Streamlit 首次启动邮箱提示，提升演示稳定性
 
 当前 [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml) 已会被 [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py) 的默认构造逻辑真正读取并映射到：
 
@@ -181,9 +316,11 @@ Neo4j 初始化脚本位于：
 补充说明：
 
 - 全局 README 主要说明整体结构与阶段划分
-- [knowledge_graph/README.md](/Users/loki/Workspace/GraduationDesign/knowledge_graph/README.md) 说明第一阶段知识图谱处理链
+- [knowledge_graph/README.md](/Users/loki/Workspace/GraduationDesign/knowledge_graph/README.md) 说明当前搜索专用知识图谱处理链
+- [knowledge_graph_bak/README.md](/Users/loki/Workspace/GraduationDesign/knowledge_graph_bak/README.md) 说明已废弃的旧版全量指南图谱备份
 - [brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md) 说明第二阶段问诊大脑目录结构与文件职责
 - [simulator/README.md](/Users/loki/Workspace/GraduationDesign/simulator/README.md) 说明虚拟病人与离线回放目录结构与文件职责
+- [frontend/README.md](/Users/loki/Workspace/GraduationDesign/frontend/README.md) 说明 Streamlit 前端启动、回放模式、实时模式与配置方式
 - [tests/README.md](/Users/loki/Workspace/GraduationDesign/tests/README.md) 说明第二阶段测试组织方式与当前覆盖范围
 - [phase2_changelog.md](/Users/loki/Workspace/GraduationDesign/docs/phase2_changelog.md) 重点记录第二阶段各轮改进分别解决了什么问题，适合作为论文写作材料
 
@@ -196,6 +333,7 @@ Neo4j 初始化脚本位于：
   - `neo4j`
   - `langchain`
   - `langchain_community`
+  - `streamlit`
 
 建议先执行：
 
@@ -213,7 +351,7 @@ conda run -n GraduationDesign python -m pytest -q
 
 说明：
 
-- 当前测试数为 `27`
+- 测试数会随第二阶段和前端适配迭代变化，建议以实际 `pytest` 输出为准
 - 直接运行 `conda run -n GraduationDesign pytest -q` 在部分环境下可能出现导入路径问题
 - 因此建议统一使用 `python -m pytest`
 

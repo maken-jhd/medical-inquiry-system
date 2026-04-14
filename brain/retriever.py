@@ -31,7 +31,6 @@ class RetrievalConfig:
         "Symptom",
         "Sign",
         "ClinicalAttribute",
-        "ManagementAction",
         "PopulationGroup",
     )
     r1_feature_labels: tuple[str, ...] = (
@@ -39,11 +38,12 @@ class RetrievalConfig:
         "Sign",
         "LabFinding",
         "LabTest",
+        "ImagingFinding",
+        "Pathogen",
         "ClinicalAttribute",
         "RiskFactor",
         "RiskBehavior",
         "PopulationGroup",
-        "ManagementAction",
     )
     r1_candidate_labels: tuple[str, ...] = (
         "Disease",
@@ -56,9 +56,10 @@ class RetrievalConfig:
     r1_relation_types: tuple[str, ...] = (
         "MANIFESTS_AS",
         "HAS_LAB_FINDING",
+        "HAS_IMAGING_FINDING",
+        "HAS_PATHOGEN",
         "DIAGNOSED_BY",
         "REQUIRES_DETAIL",
-        "ASSOCIATED_WITH",
         "COMPLICATED_BY",
         "RISK_FACTOR_FOR",
         "APPLIES_TO",
@@ -66,9 +67,10 @@ class RetrievalConfig:
     r2_relation_types: tuple[str, ...] = (
         "MANIFESTS_AS",
         "HAS_LAB_FINDING",
+        "HAS_IMAGING_FINDING",
+        "HAS_PATHOGEN",
         "DIAGNOSED_BY",
         "REQUIRES_DETAIL",
-        "ASSOCIATED_WITH",
         "COMPLICATED_BY",
         "RISK_FACTOR_FOR",
     )
@@ -77,11 +79,12 @@ class RetrievalConfig:
         "Sign",
         "LabFinding",
         "LabTest",
+        "ImagingFinding",
+        "Pathogen",
         "ClinicalAttribute",
         "RiskFactor",
         "RiskBehavior",
         "PopulationGroup",
-        "ManagementAction",
     )
     kg_similarity_threshold: float = 0.72
     disable_kg_below_threshold: bool = True
@@ -290,20 +293,22 @@ class GraphRetriever:
                    coalesce(target.weight, 0.0) AS node_weight,
                    direction_confidence AS similarity_confidence,
                    CASE
-                     WHEN type(r) IN ['HAS_LAB_FINDING', 'DIAGNOSED_BY'] THEN 1.0
+                     WHEN type(r) IN ['HAS_LAB_FINDING', 'HAS_IMAGING_FINDING', 'HAS_PATHOGEN', 'DIAGNOSED_BY'] THEN 1.0
                      WHEN type(r) = 'MANIFESTS_AS' THEN 0.85
                      WHEN type(r) = 'REQUIRES_DETAIL' THEN 0.55
                      ELSE 0.45
                    END AS contradiction_priority,
                    CASE
                      WHEN labels(target)[0] IN ['LabFinding', 'LabTest'] THEN 'lab'
+                     WHEN labels(target)[0] = 'ImagingFinding' THEN 'imaging'
+                     WHEN labels(target)[0] = 'Pathogen' THEN 'pathogen'
                      WHEN labels(target)[0] IN ['RiskFactor', 'RiskBehavior'] THEN 'risk'
                      WHEN labels(target)[0] = 'ClinicalAttribute' THEN 'detail'
                      ELSE 'symptom'
                    END AS question_type_hint,
                    (coalesce(target.weight, 0.0) + coalesce(r.weight, 0.0)) * direction_confidence AS priority,
                    CASE
-                     WHEN labels(target)[0] IN ['Sign', 'LabFinding'] THEN true
+                     WHEN labels(target)[0] IN ['Sign', 'LabFinding', 'ImagingFinding'] THEN true
                      ELSE false
                    END AS is_red_flag,
                    labels(target)[0] AS topic_id
@@ -539,10 +544,11 @@ class GraphRetriever:
         weights = {
             "DIAGNOSED_BY": 1.0,
             "HAS_LAB_FINDING": 0.95,
+            "HAS_IMAGING_FINDING": 0.95,
+            "HAS_PATHOGEN": 0.92,
             "MANIFESTS_AS": 0.9,
             "REQUIRES_DETAIL": 0.55,
             "RISK_FACTOR_FOR": 0.5,
-            "ASSOCIATED_WITH": 0.35,
             "COMPLICATED_BY": 0.3,
             "APPLIES_TO": 0.2,
         }
@@ -575,7 +581,7 @@ class GraphRetriever:
         if label not in {"DiseasePhase", "SyndromeOrComplication", "Comorbidity"}:
             return 0.0
 
-        weak_relation_types = {"ASSOCIATED_WITH", "APPLIES_TO", "COMPLICATED_BY", "RISK_FACTOR_FOR"}
+        weak_relation_types = {"APPLIES_TO", "COMPLICATED_BY", "RISK_FACTOR_FOR"}
 
         if len(relation_types) > 0 and all(item in weak_relation_types for item in relation_types):
             return 0.24

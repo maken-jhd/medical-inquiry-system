@@ -1,0 +1,22 @@
+{
+  "merge_groups": [
+    {
+      "canonical_name": "PCP临床诊断标准",
+      "aliases": [
+        "PCP临床诊断标准",
+        "临床诊断 PCP"
+      ],
+      "confidence": "high",
+      "reason": "语序不同及包含疾病英文缩写的同一概念变体"
+    },
+    {
+      "canonical_name": "排除其他原因导致的病情恶化",
+      "aliases": [
+        "排除其他原因导致的病情恶化",
+        "排除其他恶化原因"
+      ],
+      "confidence": "high",
+      "reason": "语义完全相同的完整表述与精简表述变体"
+    }
+  ]
+}

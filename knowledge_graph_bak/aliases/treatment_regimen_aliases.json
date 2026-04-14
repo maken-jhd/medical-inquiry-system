@@ -1,0 +1,36 @@
+{
+  "merge_groups": [
+    {
+      "canonical_name": "抗逆转录病毒治疗 (ART)",
+      "aliases": [
+        "cART",
+        "ART（抗逆转录病毒治疗）",
+        "抗反转录病毒治疗",
+        "抗反转录病毒治疗（ART）",
+        "抗逆转录病毒治疗 (ART)"
+      ],
+      "confidence": "high",
+      "reason": "同一概念的中英文全称、缩写、旧称（HAART/cART）及不同翻译（逆转录/反转录）变体"
+    },
+    {
+      "canonical_name": "AZT+3TC+EFV",
+      "aliases": [
+        "AZT + 3TC + EFV",
+        "AZT+3TC+EFV",
+        "替代ART方案（齐多夫定+拉米夫定+依非韦伦）"
+      ],
+      "confidence": "high",
+      "reason": "相同药物组合方案的英文缩写格式（空格差异）及中文药物通用名对照变体"
+    },
+    {
+      "canonical_name": "TDF+3TC+EFV",
+      "aliases": [
+        "TDF + 3TC + EFV",
+        "TDF+3TC+EFV",
+        "标准ART方案（替诺福韦+拉米夫定+依非韦伦）"
+      ],
+      "confidence": "high",
+      "reason": "相同药物组合方案的英文缩写格式（空格差异）及中文药物通用名对照变体"
+    }
+  ]
+}

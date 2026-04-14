@@ -9,84 +9,209 @@ import sys
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from openai import AsyncOpenAI
 
 KG_ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = KG_ROOT.parent
 
-ALLOWED_LABELS = [
-    "Disease",
-    "DiseasePhase",
-    "OpportunisticInfection",
-    "Comorbidity",
-    "SyndromeOrComplication",
-    "Tumor",
-    "Pathogen",
-    "Symptom",
-    "Sign",
-    "ClinicalAttribute",
-    "LabTest",
-    "LabFinding",
-    "ImagingFinding",
-    "RiskFactor",
-    "RiskBehavior",
-    "PopulationGroup",
-]
-
 ALLOWED_EDGE_TYPES = [
+    "HAS_SECTION",
+    "HAS_EVIDENCE",
+    "SUBJECT",
+    "OBJECT",
+    "SUPPORTED_BY",
+    "RECOMMENDS",
+    "CAUSED_BY",
+    "HAS_PHASE",
     "MANIFESTS_AS",
     "HAS_LAB_FINDING",
-    "HAS_IMAGING_FINDING",
-    "HAS_PATHOGEN",
     "DIAGNOSED_BY",
-    "REQUIRES_DETAIL",
-    "RISK_FACTOR_FOR",
     "COMPLICATED_BY",
+    "TREATED_WITH",
+    "CONSISTS_OF",
+    "BELONGS_TO_CLASS",
+    "PREVENTED_BY",
+    "MONITORED_BY",
+    "SCREENED_BY",
     "APPLIES_TO",
+    "RISK_FACTOR_FOR",
+    "TRANSMITTED_VIA",
+    "INTERACTS_WITH",
+    "INITIATED_AFTER",
+    "CONTRAINDICATED_IN",
+    "NOT_RECOMMENDED_FOR",
+    "REQUIRES_DETAIL",
 ]
 
 DETAIL_LEVELS = {"minimal", "standard", "full"}
-DISEASE_LIKE_LABELS = {
+NON_SEMANTIC_EDGE_TYPES = {"HAS_SECTION", "HAS_EVIDENCE", "SUPPORTED_BY", "SUBJECT", "OBJECT"}
+FOCUS_LABELS = {
+    "Assertion",
+    "ClinicalAttribute",
+    "Comorbidity",
+    "DiagnosticCriterion",
     "Disease",
     "DiseasePhase",
+    "DrugClass",
+    "ExposureScenario",
+    "LabFinding",
+    "LabTest",
+    "ManagementAction",
+    "Medication",
     "OpportunisticInfection",
-    "Comorbidity",
+    "Pathogen",
+    "PopulationGroup",
+    "PreventionStrategy",
+    "Recommendation",
+    "RiskFactor",
+    "Sign",
+    "Symptom",
     "SyndromeOrComplication",
+    "TransmissionRoute",
+    "TreatmentRegimen",
     "Tumor",
 }
-EVIDENCE_LABELS = {
-    "Pathogen",
-    "Symptom",
-    "Sign",
-    "ClinicalAttribute",
-    "LabTest",
-    "LabFinding",
-    "ImagingFinding",
-    "RiskFactor",
-    "RiskBehavior",
-    "PopulationGroup",
+NON_DROPPABLE_LABELS = {"GuidelineDocument", "GuidelineSection", "EvidenceSpan"}
+SOURCE_LABEL_TARGET_LABELS: Dict[str, set[str]] = {
+    "Recommendation": {
+        "Medication",
+        "TreatmentRegimen",
+        "ManagementAction",
+        "DiagnosticCriterion",
+        "PreventionStrategy",
+        "PopulationGroup",
+        "LabTest",
+        "LabFinding",
+        "ClinicalAttribute",
+        "Disease",
+        "DiseasePhase",
+        "OpportunisticInfection",
+        "Comorbidity",
+        "SyndromeOrComplication",
+    },
+    "Disease": {
+        "Medication",
+        "TreatmentRegimen",
+        "ManagementAction",
+        "LabTest",
+        "LabFinding",
+        "DiagnosticCriterion",
+        "Symptom",
+        "Sign",
+        "ClinicalAttribute",
+        "OpportunisticInfection",
+        "Comorbidity",
+        "Tumor",
+        "SyndromeOrComplication",
+        "PopulationGroup",
+        "PreventionStrategy",
+    },
+    "DiseasePhase": {
+        "Medication",
+        "TreatmentRegimen",
+        "ManagementAction",
+        "LabTest",
+        "LabFinding",
+        "DiagnosticCriterion",
+        "Symptom",
+        "Sign",
+        "ClinicalAttribute",
+        "OpportunisticInfection",
+        "Comorbidity",
+        "Tumor",
+        "SyndromeOrComplication",
+    },
+    "OpportunisticInfection": {
+        "Medication",
+        "TreatmentRegimen",
+        "ManagementAction",
+        "LabTest",
+        "LabFinding",
+        "DiagnosticCriterion",
+        "Symptom",
+        "Sign",
+        "ClinicalAttribute",
+        "PopulationGroup",
+        "PreventionStrategy",
+    },
+    "Comorbidity": {
+        "Medication",
+        "TreatmentRegimen",
+        "ManagementAction",
+        "LabTest",
+        "LabFinding",
+        "DiagnosticCriterion",
+        "Symptom",
+        "Sign",
+        "ClinicalAttribute",
+    },
+    "SyndromeOrComplication": {
+        "Medication",
+        "TreatmentRegimen",
+        "ManagementAction",
+        "LabTest",
+        "LabFinding",
+        "DiagnosticCriterion",
+        "Symptom",
+        "Sign",
+        "ClinicalAttribute",
+    },
+    "Medication": {
+        "Disease",
+        "DiseasePhase",
+        "OpportunisticInfection",
+        "Comorbidity",
+        "SyndromeOrComplication",
+        "Tumor",
+        "DrugClass",
+        "RiskFactor",
+        "PopulationGroup",
+        "LabFinding",
+        "ClinicalAttribute",
+        "Recommendation",
+    },
+    "LabTest": {
+        "Disease",
+        "DiseasePhase",
+        "OpportunisticInfection",
+        "Comorbidity",
+        "SyndromeOrComplication",
+        "PopulationGroup",
+        "LabFinding",
+        "DiagnosticCriterion",
+        "Recommendation",
+    },
+    "LabFinding": {
+        "Disease",
+        "DiseasePhase",
+        "OpportunisticInfection",
+        "Comorbidity",
+        "SyndromeOrComplication",
+        "PopulationGroup",
+        "Medication",
+        "Recommendation",
+    },
+    "ClinicalAttribute": {
+        "Recommendation",
+        "DiagnosticCriterion",
+        "LabTest",
+        "Symptom",
+        "Sign",
+        "ManagementAction",
+        "PopulationGroup",
+        "Disease",
+        "Medication",
+    },
+    "ManagementAction": {
+        "Disease",
+        "Recommendation",
+        "PopulationGroup",
+        "ClinicalAttribute",
+        "TreatmentRegimen",
+    },
 }
-REPAIR_FOCUS_LABELS = set(ALLOWED_LABELS)
-
-
-def edge_label_rules() -> Dict[str, Tuple[set[str], set[str]]]:
-    return {
-        "MANIFESTS_AS": (DISEASE_LIKE_LABELS, {"Symptom", "Sign"}),
-        "HAS_LAB_FINDING": (DISEASE_LIKE_LABELS, {"LabFinding"}),
-        "HAS_IMAGING_FINDING": (DISEASE_LIKE_LABELS, {"ImagingFinding"}),
-        "HAS_PATHOGEN": ({"Disease", "OpportunisticInfection"}, {"Pathogen"}),
-        "DIAGNOSED_BY": (DISEASE_LIKE_LABELS, {"LabTest", "LabFinding", "ImagingFinding"}),
-        "REQUIRES_DETAIL": (DISEASE_LIKE_LABELS | {"Symptom", "Sign", "LabTest"}, {"ClinicalAttribute"}),
-        "RISK_FACTOR_FOR": ({"RiskFactor", "RiskBehavior", "PopulationGroup"}, DISEASE_LIKE_LABELS),
-        "COMPLICATED_BY": ({"Disease", "DiseasePhase"}, {"OpportunisticInfection", "Comorbidity", "SyndromeOrComplication", "Tumor"}),
-        "APPLIES_TO": (DISEASE_LIKE_LABELS | EVIDENCE_LABELS, {"PopulationGroup"}),
-    }
-
-
-EDGE_LABEL_RULES = edge_label_rules()
-
 
 def build_repair_output_schema(max_add_edges: int) -> Dict[str, Any]:
     return {
@@ -115,7 +240,7 @@ def build_repair_output_schema(max_add_edges: int) -> Dict[str, Any]:
                         "target_id": {"type": "string"},
                         "weight": {"type": "number", "minimum": 0, "maximum": 1},
                         "detail_required": {"type": "string", "enum": sorted(DETAIL_LEVELS)},
-                        "evidence_text": {"type": "string", "maxLength": 240},
+                        "evidence_text": {"type": "string", "maxLength": 220},
                         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                         "attributes": {
                             "type": "object",
@@ -137,43 +262,37 @@ def build_repair_output_schema(max_add_edges: int) -> Dict[str, Any]:
         },
     }
 
-
 REPAIR_SYSTEM_PROMPT = f"""
-你正在为 HIV/AIDS 智能问诊系统修补“搜索专用知识图谱”的缺失关系。
+你正在执行知识图谱“关系修补”任务，而不是重新抽取整张图。
 
-这不是全量指南图谱，也不是治疗推荐图谱。你只能服务下面的问诊搜索链路：
-- R1：症状 / 风险 / 检查 / 影像 / 病原线索 -> 候选诊断
-- R2：候选诊断 -> 关键待验证证据
-- A3：根据待验证证据构造下一问
-- A4：根据患者回答更新证据和假设
+你的目标：
+1. 只针对给定 chunk 中的可疑节点补充缺失关系。
+2. 如果某个可疑节点在当前 chunk 文本中没有足够依据、也无法与当前 chunk 里的其他节点建立可信关系，可以建议删除它。
+3. 你绝对不能新建节点，也绝对不能引用当前 chunk 之外的节点 id。
 
-任务目标：
-1. 只针对 suspicious_nodes 中列出的可疑节点补充当前 chunk 内缺失的关系。
-2. 只能在 existing_nodes 中已有节点之间补边，禁止新建节点，禁止引用当前 chunk 之外的节点 id。
-3. 只在 chunk_text 中有明确文本依据时补边，evidence_text 必须来自当前文本或非常贴近原文。
-4. 不要重复 existing_edges 中已有关系。
-5. drop_node_ids 默认返回空数组；除非可疑节点明显是抽取误差且当前文本没有依据，否则不要建议删除。
-6. 宁可少补，也不要为了降低孤立率而臆造关系。
-7. 不要输出任何解释性文字，只返回严格 JSON。
-
-只能使用这些节点标签：
-{", ".join(ALLOWED_LABELS)}
-
-只能使用这些关系类型：
-{", ".join(ALLOWED_EDGE_TYPES)}
-
-关系方向必须符合：
-- `MANIFESTS_AS`：疾病/阶段/机会性感染/共病/并发症/肿瘤 -> 症状或体征
-- `HAS_LAB_FINDING`：疾病/阶段/机会性感染/共病/并发症/肿瘤 -> 实验室发现
-- `HAS_IMAGING_FINDING`：疾病/阶段/机会性感染/共病/并发症/肿瘤 -> 影像学发现
-- `HAS_PATHOGEN`：疾病或机会性感染 -> 病原体或病原学线索
-- `DIAGNOSED_BY`：疾病/阶段/机会性感染/共病/并发症/肿瘤 -> 关键检查、实验室发现或影像学发现
-- `REQUIRES_DETAIL`：疾病/症状/体征/检查 -> 可进一步追问的临床细节
-- `RISK_FACTOR_FOR`：风险因素/风险行为/人群特征 -> 疾病/阶段/机会性感染/共病/并发症/肿瘤
-- `COMPLICATED_BY`：疾病/阶段 -> 机会性感染/共病/综合征/肿瘤
-- `APPLIES_TO`：疾病或证据 -> 人群特征
-
-不要使用旧版全量图谱关系，例如 RECOMMENDS、TREATED_WITH、SUPPORTED_BY、HAS_EVIDENCE、SUBJECT、OBJECT。
+严格规则：
+1. 只能返回严格 JSON，顶层字段只能是：
+   - add_edges
+   - drop_node_ids
+   - notes
+2. add_edges 里的 source_id 和 target_id 必须来自输入中给定的 existing_nodes。
+3. 你只能使用以下关系类型：
+   {", ".join(ALLOWED_EDGE_TYPES)}
+4. 不要重复已有边。
+5. 只有在文本中有明确证据时才补边，evidence_text 必须摘自当前提供的上下文。
+6. 优先补“业务语义边”，例如：
+   - Recommendation -> RECOMMENDS -> Medication/TreatmentRegimen/ManagementAction/DiagnosticCriterion/PreventionStrategy
+   - Disease -> TREATED_WITH -> Medication/TreatmentRegimen
+   - Disease -> DIAGNOSED_BY / HAS_LAB_FINDING / MANIFESTS_AS -> target
+   - Symptom / DiagnosticCriterion -> REQUIRES_DETAIL -> ClinicalAttribute
+7. 对 Recommendation：
+   - 优先让 Recommendation 指向被推荐的对象
+   - 不要再创建 Section -> RECOMMENDS -> Recommendation 这种关系，因为那不是本次修补目标
+8. 如果你拿不准，不要补边。
+9. 允许删除的仅限当前标记为 suspicious 的节点；不要删除其他节点。
+10. 不要输出任何解释性文字。
+11. 默认保持 drop_node_ids 为空数组，除非文本中明确看不到该节点且你非常确定它应被丢弃。
+12. 最多只补少量最关键的边，宁可少补，也不要为了“补全”输出很多边。
 """.strip()
 
 
@@ -222,6 +341,15 @@ class ChunkContext:
 
 class RepairValidationError(RuntimeError):
     pass
+
+
+def summarize_text_for_prompt(value: str, limit: int = 500) -> str:
+    normalized = re.sub(r"\s+", " ", value).strip()
+
+    if len(normalized) <= limit:
+        return normalized
+
+    return normalized[:limit].rstrip() + " ..."
 
 
 def parse_positive_int(value: Optional[str], fallback: int) -> int:
@@ -274,15 +402,6 @@ def clean_text(value: Any) -> Optional[str]:
     return cleaned
 
 
-def summarize_text(value: str, limit: int = 500) -> str:
-    normalized = re.sub(r"\s+", " ", value).strip()
-
-    if len(normalized) <= limit:
-        return normalized
-
-    return normalized[:limit].rstrip() + " ..."
-
-
 def flatten_attributes(item: Dict[str, Any]) -> None:
     attributes = item.get("attributes")
 
@@ -302,10 +421,10 @@ def read_env_config() -> RepairConfig:
         os.getenv("REPAIR_INPUT_FILE", str(PROJECT_ROOT / "output_graph_test.jsonl"))
     ).resolve()
     output_file = Path(
-        os.getenv("REPAIR_OUTPUT_FILE", str(output_root / "output_graph_repaired.jsonl"))
+        os.getenv("REPAIR_OUTPUT_FILE", str(output_root / "output_graph_test_repaired.jsonl"))
     ).resolve()
     report_file = Path(
-        os.getenv("REPAIR_REPORT_FILE", str(output_root / "output_graph_repaired_report.json"))
+        os.getenv("REPAIR_REPORT_FILE", str(output_root / "output_graph_test_repaired_report.json"))
     ).resolve()
     retry_report_env = os.getenv("REPAIR_RETRY_REPORT_FILE")
     baseline_output_env = os.getenv("REPAIR_BASELINE_OUTPUT_FILE")
@@ -329,37 +448,51 @@ def read_env_config() -> RepairConfig:
     base_url = (
         os.getenv("REPAIR_BASE_URL")
         or os.getenv("OPENAI_BASE_URL")
-        or os.getenv("DASHSCOPE_BASE_URL")
         or "https://api.openai.com/v1"
     )
     model = os.getenv("REPAIR_MODEL") or os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL") or "gpt-4.1"
+    request_timeout_seconds = parse_positive_float(
+        os.getenv("REPAIR_REQUEST_TIMEOUT_SECONDS"),
+        180.0,
+    )
+    sdk_max_retries = parse_positive_int(os.getenv("REPAIR_SDK_MAX_RETRIES"), 0)
+    concurrency = parse_positive_int(os.getenv("REPAIR_CONCURRENCY"), 4)
+    retry_count = parse_positive_int(os.getenv("REPAIR_RETRY_COUNT"), 3)
+    retry_delay_ms = parse_positive_int(os.getenv("REPAIR_RETRY_DELAY_MS"), 1500)
+    min_confidence = parse_positive_float(os.getenv("REPAIR_MIN_CONFIDENCE"), 0.6)
+    apply_drop_node_ids = (os.getenv("REPAIR_APPLY_DROP_NODE_IDS") or "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    retry_chunk_ids = parse_csv_strings(os.getenv("REPAIR_RETRY_CHUNK_IDS"))
+    max_context_nodes = parse_positive_int(os.getenv("REPAIR_MAX_CONTEXT_NODES"), 40)
+    max_context_edges = parse_positive_int(os.getenv("REPAIR_MAX_CONTEXT_EDGES"), 80)
+    max_chunk_text_chars = parse_positive_int(os.getenv("REPAIR_MAX_CHUNK_TEXT_CHARS"), 6000)
+    max_add_edges = parse_positive_int(os.getenv("REPAIR_MAX_ADD_EDGES"), 8)
     return RepairConfig(
         input_file=input_file,
         output_file=output_file,
         report_file=report_file,
         retry_report_file=Path(retry_report_env).resolve() if retry_report_env else None,
         baseline_output_file=Path(baseline_output_env).resolve() if baseline_output_env else None,
-        retry_chunk_ids=parse_csv_strings(os.getenv("REPAIR_RETRY_CHUNK_IDS")),
+        retry_chunk_ids=retry_chunk_ids,
         source_root_dir=source_root_dir,
         api_key=api_key,
         base_url=base_url,
         model=model,
-        request_timeout_seconds=parse_positive_float(os.getenv("REPAIR_REQUEST_TIMEOUT_SECONDS"), 240.0),
-        sdk_max_retries=parse_positive_int(os.getenv("REPAIR_SDK_MAX_RETRIES"), 0),
-        concurrency=parse_positive_int(os.getenv("REPAIR_CONCURRENCY"), 5),
-        retry_count=parse_positive_int(os.getenv("REPAIR_RETRY_COUNT"), 3),
-        retry_delay_ms=parse_positive_int(os.getenv("REPAIR_RETRY_DELAY_MS"), 1500),
-        min_confidence=parse_positive_float(os.getenv("REPAIR_MIN_CONFIDENCE"), 0.68),
-        apply_drop_node_ids=(os.getenv("REPAIR_APPLY_DROP_NODE_IDS") or "false").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        },
-        max_context_nodes=parse_positive_int(os.getenv("REPAIR_MAX_CONTEXT_NODES"), 50),
-        max_context_edges=parse_positive_int(os.getenv("REPAIR_MAX_CONTEXT_EDGES"), 90),
-        max_chunk_text_chars=parse_positive_int(os.getenv("REPAIR_MAX_CHUNK_TEXT_CHARS"), 6500),
-        max_add_edges=parse_positive_int(os.getenv("REPAIR_MAX_ADD_EDGES"), 8),
+        request_timeout_seconds=request_timeout_seconds,
+        sdk_max_retries=sdk_max_retries,
+        concurrency=concurrency,
+        retry_count=retry_count,
+        retry_delay_ms=retry_delay_ms,
+        min_confidence=min_confidence,
+        apply_drop_node_ids=apply_drop_node_ids,
+        max_context_nodes=max_context_nodes,
+        max_context_edges=max_context_edges,
+        max_chunk_text_chars=max_chunk_text_chars,
+        max_add_edges=max_add_edges,
     )
 
 
@@ -386,7 +519,10 @@ def load_retry_chunk_ids_from_report(path: Path) -> List[str]:
     chunk_ids: List[str] = []
 
     for item in report.get("chunk_summaries", []):
-        if not isinstance(item, dict) or item.get("status") != "repair_failed":
+        if not isinstance(item, dict):
+            continue
+
+        if item.get("status") != "repair_failed":
             continue
 
         chunk_id = clean_text(item.get("chunk_id"))
@@ -402,25 +538,38 @@ def determine_retry_chunk_ids(config: RepairConfig) -> List[str]:
     seen: set[str] = set()
 
     for chunk_id in config.retry_chunk_ids:
-        if chunk_id not in seen:
-            ordered_chunk_ids.append(chunk_id)
-            seen.add(chunk_id)
+        if chunk_id in seen:
+            continue
+
+        ordered_chunk_ids.append(chunk_id)
+        seen.add(chunk_id)
 
     if config.retry_report_file is not None and config.retry_report_file.exists():
         for chunk_id in load_retry_chunk_ids_from_report(config.retry_report_file):
-            if chunk_id not in seen:
-                ordered_chunk_ids.append(chunk_id)
-                seen.add(chunk_id)
+            if chunk_id in seen:
+                continue
+
+            ordered_chunk_ids.append(chunk_id)
+            seen.add(chunk_id)
 
     return ordered_chunk_ids
 
 
 def filter_records_for_retry(records: Sequence[Dict[str, Any]], retry_chunk_ids: set[str]) -> List[Dict[str, Any]]:
-    return [
-        record
-        for record in records
-        if record.get("record_type") == "chunk_result" and clean_text(record.get("chunk_id")) in retry_chunk_ids
-    ]
+    filtered_records: List[Dict[str, Any]] = []
+
+    for record in records:
+        if record.get("record_type") != "chunk_result":
+            continue
+
+        chunk_id = clean_text(record.get("chunk_id"))
+
+        if chunk_id is None or chunk_id not in retry_chunk_ids:
+            continue
+
+        filtered_records.append(record)
+
+    return filtered_records
 
 
 def merge_retry_results_into_baseline(
@@ -430,20 +579,30 @@ def merge_retry_results_into_baseline(
     replacement_map: Dict[str, Dict[str, Any]] = {}
 
     for record in retried_records:
+        if record.get("record_type") != "chunk_result":
+            continue
+
         chunk_id = clean_text(record.get("chunk_id"))
 
-        if record.get("record_type") == "chunk_result" and chunk_id is not None:
-            replacement_map[chunk_id] = record
+        if chunk_id is None:
+            continue
+
+        replacement_map[chunk_id] = record
 
     merged_records: List[Dict[str, Any]] = []
 
     for record in baseline_records:
+        if record.get("record_type") != "chunk_result":
+            merged_records.append(record)
+            continue
+
         chunk_id = clean_text(record.get("chunk_id"))
 
-        if record.get("record_type") == "chunk_result" and chunk_id in replacement_map:
-            merged_records.append(replacement_map[chunk_id])
-        else:
+        if chunk_id is None or chunk_id not in replacement_map:
             merged_records.append(record)
+            continue
+
+        merged_records.append(replacement_map[chunk_id])
 
     return merged_records
 
@@ -505,8 +664,10 @@ def build_chunk_context(record: Dict[str, Any], config: RepairConfig) -> ChunkCo
     )
 
 
-def compute_incident_counts(edges: Sequence[Dict[str, Any]]) -> Dict[str, int]:
+def compute_edge_maps(edges: Sequence[Dict[str, Any]]) -> Tuple[Dict[str, int], Dict[str, int], Dict[str, int]]:
     incident_count: Dict[str, int] = {}
+    outgoing_total_count: Dict[str, int] = {}
+    outgoing_semantic_count: Dict[str, int] = {}
 
     for raw_edge in edges:
         if not isinstance(raw_edge, dict):
@@ -516,14 +677,19 @@ def compute_incident_counts(edges: Sequence[Dict[str, Any]]) -> Dict[str, int]:
         flatten_attributes(edge)
         source_id = clean_text(edge.get("source_id"))
         target_id = clean_text(edge.get("target_id"))
+        edge_type = clean_text(edge.get("type"))
 
-        if source_id is None or target_id is None:
+        if source_id is None or target_id is None or edge_type is None:
             continue
 
         incident_count[source_id] = incident_count.get(source_id, 0) + 1
         incident_count[target_id] = incident_count.get(target_id, 0) + 1
+        outgoing_total_count[source_id] = outgoing_total_count.get(source_id, 0) + 1
 
-    return incident_count
+        if edge_type not in NON_SEMANTIC_EDGE_TYPES:
+            outgoing_semantic_count[source_id] = outgoing_semantic_count.get(source_id, 0) + 1
+
+    return incident_count, outgoing_total_count, outgoing_semantic_count
 
 
 def identify_suspicious_nodes(record: Dict[str, Any]) -> List[SuspiciousNode]:
@@ -538,7 +704,7 @@ def identify_suspicious_nodes(record: Dict[str, Any]) -> List[SuspiciousNode]:
     if not isinstance(nodes, list) or not isinstance(edges, list):
         return []
 
-    incident_count = compute_incident_counts(edges)
+    incident_count, outgoing_total_count, outgoing_semantic_count = compute_edge_maps(edges)
     suspicious_nodes: List[SuspiciousNode] = []
 
     for raw_node in nodes:
@@ -554,18 +720,28 @@ def identify_suspicious_nodes(record: Dict[str, Any]) -> List[SuspiciousNode]:
         if node_id is None or label is None or name is None:
             continue
 
-        if label not in REPAIR_FOCUS_LABELS:
+        if label not in FOCUS_LABELS:
             continue
 
+        reasons: List[str] = []
+
         if incident_count.get(node_id, 0) == 0:
-            suspicious_nodes.append(
-                SuspiciousNode(
-                    node_id=node_id,
-                    label=label,
-                    name=name,
-                    reasons=["isolated_node"],
-                )
+            reasons.append("isolated_node")
+
+        if label == "Recommendation" and outgoing_semantic_count.get(node_id, 0) == 0:
+            reasons.append("recommendation_without_semantic_out_edges")
+
+        if len(reasons) == 0:
+            continue
+
+        suspicious_nodes.append(
+            SuspiciousNode(
+                node_id=node_id,
+                label=label,
+                name=name,
+                reasons=reasons,
             )
+        )
 
     return suspicious_nodes
 
@@ -577,17 +753,7 @@ def compact_node(node: Dict[str, Any]) -> Dict[str, Any]:
         "name": node.get("name"),
     }
 
-    for key in [
-        "canonical_name",
-        "definition",
-        "test_id",
-        "operator",
-        "value",
-        "value_text",
-        "unit",
-        "acquisition_mode",
-        "evidence_cost",
-    ]:
+    for key in ["canonical_name", "definition", "test_id", "operator", "value", "value_text", "unit", "recommendation_text"]:
         if key in node and node.get(key) not in [None, "", [], {}]:
             result[key] = node.get(key)
 
@@ -601,6 +767,7 @@ def compact_edge(edge: Dict[str, Any]) -> Dict[str, Any]:
         "source_id": edge.get("source_id"),
         "target_id": edge.get("target_id"),
     }
+
     condition_text = clean_text(edge.get("condition_text"))
 
     if condition_text is not None:
@@ -620,13 +787,42 @@ def build_node_map(nodes: Sequence[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]
         flatten_attributes(node)
         node_id = clean_text(node.get("id"))
 
-        if node_id is not None:
-            node_map[node_id] = node
+        if node_id is None:
+            continue
+
+        node_map[node_id] = node
 
     return node_map
 
 
-def score_candidate_node(node: Dict[str, Any], suspicious_node_ids: set[str]) -> int:
+def build_edge_index(edges: Sequence[Dict[str, Any]]) -> Tuple[Dict[str, List[Dict[str, Any]]], Dict[str, List[Dict[str, Any]]]]:
+    outgoing: Dict[str, List[Dict[str, Any]]] = {}
+    incoming: Dict[str, List[Dict[str, Any]]] = {}
+
+    for raw_edge in edges:
+        if not isinstance(raw_edge, dict):
+            continue
+
+        edge = dict(raw_edge)
+        flatten_attributes(edge)
+        source_id = clean_text(edge.get("source_id"))
+        target_id = clean_text(edge.get("target_id"))
+
+        if source_id is None or target_id is None:
+            continue
+
+        outgoing.setdefault(source_id, []).append(edge)
+        incoming.setdefault(target_id, []).append(edge)
+
+    return outgoing, incoming
+
+
+def score_candidate_node(
+    node: Dict[str, Any],
+    suspicious_nodes: Sequence[SuspiciousNode],
+    suspicious_node_ids: set[str],
+    anchor_neighbor_ids: set[str],
+) -> int:
     node_id = clean_text(node.get("id")) or ""
     label = clean_text(node.get("label")) or ""
     score = 0
@@ -634,17 +830,23 @@ def score_candidate_node(node: Dict[str, Any], suspicious_node_ids: set[str]) ->
     if node_id in suspicious_node_ids:
         score += 1000
 
-    if label in DISEASE_LIKE_LABELS:
-        score += 180
+    if node_id in anchor_neighbor_ids:
+        score += 250
 
-    if label in EVIDENCE_LABELS:
-        score += 90
+    for suspicious_node in suspicious_nodes:
+        target_labels = SOURCE_LABEL_TARGET_LABELS.get(suspicious_node.label, set())
 
-    if label in {"Symptom", "Sign", "LabFinding", "ImagingFinding", "RiskFactor", "RiskBehavior"}:
-        score += 40
+        if label in target_labels:
+            score += 40
+
+    if label == "Recommendation":
+        score += 15
+
+    if label in {"Medication", "LabTest", "LabFinding", "ClinicalAttribute", "ManagementAction"}:
+        score += 10
 
     name = clean_text(node.get("name")) or ""
-    score += min(len(name), 30)
+    score += min(len(name), 20)
     return score
 
 
@@ -657,22 +859,47 @@ def select_context_subgraph(
     raw_nodes = extraction["nodes"]
     raw_edges = extraction["edges"]
     node_map = build_node_map(raw_nodes)
+    outgoing_edges, incoming_edges = build_edge_index(raw_edges)
     suspicious_node_ids = {node.node_id for node in suspicious_nodes}
+    anchor_neighbor_ids: set[str] = set()
+
+    for suspicious_node_id in suspicious_node_ids:
+        for edge in outgoing_edges.get(suspicious_node_id, []):
+            target_id = clean_text(edge.get("target_id"))
+
+            if target_id is not None:
+                anchor_neighbor_ids.add(target_id)
+
+        for edge in incoming_edges.get(suspicious_node_id, []):
+            source_id = clean_text(edge.get("source_id"))
+
+            if source_id is not None:
+                anchor_neighbor_ids.add(source_id)
+
     ranked_nodes = sorted(
         node_map.values(),
         key=lambda node: (
-            -score_candidate_node(node, suspicious_node_ids),
+            -score_candidate_node(node, suspicious_nodes, suspicious_node_ids, anchor_neighbor_ids),
             clean_text(node.get("label")) or "",
             clean_text(node.get("name")) or "",
         ),
     )
-    selected_nodes = ranked_nodes[: config.max_context_nodes]
-    selected_node_ids = {
-        clean_text(node.get("id"))
-        for node in selected_nodes
-        if clean_text(node.get("id")) is not None
-    }
-    selected_node_ids = {node_id for node_id in selected_node_ids if node_id is not None}
+
+    selected_nodes: List[Dict[str, Any]] = []
+    selected_node_ids: set[str] = set()
+
+    for node in ranked_nodes:
+        node_id = clean_text(node.get("id"))
+
+        if node_id is None or node_id in selected_node_ids:
+            continue
+
+        if len(selected_nodes) >= config.max_context_nodes and node_id not in suspicious_node_ids:
+            continue
+
+        selected_nodes.append(node)
+        selected_node_ids.add(node_id)
+
     selected_edges: List[Dict[str, Any]] = []
 
     for raw_edge in raw_edges:
@@ -684,10 +911,25 @@ def select_context_subgraph(
         source_id = clean_text(edge.get("source_id"))
         target_id = clean_text(edge.get("target_id"))
 
-        if source_id in selected_node_ids and target_id in selected_node_ids:
-            selected_edges.append(edge)
+        if source_id is None or target_id is None:
+            continue
 
-    return selected_nodes, selected_edges[: config.max_context_edges]
+        if source_id not in selected_node_ids or target_id not in selected_node_ids:
+            continue
+
+        selected_edges.append(edge)
+
+    selected_edges = sorted(
+        selected_edges,
+        key=lambda edge: (
+            0 if clean_text(edge.get("type")) in NON_SEMANTIC_EDGE_TYPES else -1,
+            clean_text(edge.get("type")) or "",
+            clean_text(edge.get("source_id")) or "",
+            clean_text(edge.get("target_id")) or "",
+        ),
+    )[: config.max_context_edges]
+
+    return selected_nodes, selected_edges
 
 
 def build_retry_feedback_block(retry_feedback: Optional[str]) -> List[str]:
@@ -720,10 +962,10 @@ def build_messages(
 
     user_prompt = "\n".join(
         [
-            "请只修补当前 chunk 内 suspicious_nodes 的缺失关系，不要重新抽取整张图。",
+            "请只修补当前 chunk 内可疑节点的缺失关系，不要重新抽取整张图。",
+            "若某个可疑节点在当前文本中缺乏足够依据，也无法与当前 chunk 的其他节点形成可靠关系，可以建议删除它。",
             "你只能使用 existing_nodes 中已经存在的节点 id。",
             f"最多补 {config.max_add_edges} 条最关键的新边；如果拿不准，宁可少补。",
-            "优先把孤立的症状、风险、检查、影像、病原线索连接到合适的候选诊断，或把孤立诊断连接到关键证据。",
             "notes 最多写 3 条极短说明；如果没有补充说明，返回空数组。",
             "drop_node_ids 默认返回空数组。",
             *build_retry_feedback_block(retry_feedback),
@@ -733,6 +975,8 @@ def build_messages(
             f"Document: {chunk.relative_path}",
             f"Heading Path: {heading_text}",
             f"Line Range: {chunk.line_start}-{chunk.line_end}",
+            f"Selected Node Count: {len(existing_nodes)}",
+            f"Selected Edge Count: {len(existing_edges)}",
             "",
             "[Suspicious Nodes]",
             "\n".join(suspicious_lines),
@@ -747,6 +991,7 @@ def build_messages(
             chunk.chunk_text,
         ]
     )
+
     return [
         {"role": "system", "content": REPAIR_SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
@@ -766,7 +1011,7 @@ def extract_assistant_content(response: Any) -> str:
         return content
 
     if isinstance(content, list):
-        text_parts = []
+        text_parts: List[str] = []
 
         for item in content:
             text_value = getattr(item, "text", None)
@@ -793,6 +1038,160 @@ def strip_code_fences(text: str) -> str:
     return stripped.strip()
 
 
+def extract_balanced_array_segment(text: str, key: str) -> Optional[str]:
+    key_index = text.find(f'"{key}"')
+
+    if key_index < 0:
+        return None
+
+    start_index = text.find("[", key_index)
+
+    if start_index < 0:
+        return None
+
+    depth = 0
+    in_string = False
+    escaped = False
+
+    for index in range(start_index, len(text)):
+        char = text[index]
+
+        if escaped:
+            escaped = False
+            continue
+
+        if char == "\\":
+            escaped = True
+            continue
+
+        if char == '"':
+            in_string = not in_string
+            continue
+
+        if in_string:
+            continue
+
+        if char == "[":
+            depth += 1
+            continue
+
+        if char == "]":
+            depth -= 1
+
+            if depth == 0:
+                return text[start_index : index + 1]
+
+    return None
+
+
+def extract_complete_object_items_from_array(array_text: str) -> List[Dict[str, Any]]:
+    if not array_text.startswith("["):
+        return []
+
+    items: List[Dict[str, Any]] = []
+    depth = 0
+    in_string = False
+    escaped = False
+    current_start: Optional[int] = None
+
+    for index, char in enumerate(array_text):
+        if escaped:
+            escaped = False
+            continue
+
+        if char == "\\":
+            escaped = True
+            continue
+
+        if char == '"':
+            in_string = not in_string
+            continue
+
+        if in_string:
+            continue
+
+        if char == "{":
+            if depth == 0:
+                current_start = index
+
+            depth += 1
+            continue
+
+        if char == "}":
+            depth -= 1
+
+            if depth == 0 and current_start is not None:
+                candidate = array_text[current_start : index + 1]
+
+                try:
+                    parsed = json.loads(candidate)
+                except json.JSONDecodeError:
+                    current_start = None
+                    continue
+
+                if isinstance(parsed, dict):
+                    items.append(parsed)
+
+                current_start = None
+
+    return items
+
+
+def salvage_partial_payload(content: str) -> Optional[Dict[str, Any]]:
+    cleaned = strip_code_fences(content)
+    salvaged_payload: Dict[str, Any] = {
+        "add_edges": [],
+        "drop_node_ids": [],
+        "notes": [],
+        "_salvaged_partial_json": True,
+    }
+    found_anything = False
+    add_edges_segment = extract_balanced_array_segment(cleaned, "add_edges")
+
+    if add_edges_segment is not None:
+        try:
+            parsed_add_edges = json.loads(add_edges_segment)
+        except json.JSONDecodeError:
+            parsed_add_edges = extract_complete_object_items_from_array(add_edges_segment)
+
+        if isinstance(parsed_add_edges, list):
+            salvaged_payload["add_edges"] = [item for item in parsed_add_edges if isinstance(item, dict)]
+            found_anything = True
+    else:
+        add_edges_key_index = cleaned.find('"add_edges"')
+
+        if add_edges_key_index >= 0:
+            array_start = cleaned.find("[", add_edges_key_index)
+
+            if array_start >= 0:
+                partial_array = cleaned[array_start:]
+                parsed_add_edges = extract_complete_object_items_from_array(partial_array)
+
+                if len(parsed_add_edges) > 0:
+                    salvaged_payload["add_edges"] = parsed_add_edges
+                    found_anything = True
+
+    for key in ["drop_node_ids", "notes"]:
+        segment = extract_balanced_array_segment(cleaned, key)
+
+        if segment is None:
+            continue
+
+        try:
+            parsed_value = json.loads(segment)
+        except json.JSONDecodeError:
+            continue
+
+        if isinstance(parsed_value, list):
+            salvaged_payload[key] = parsed_value
+            found_anything = True
+
+    if found_anything:
+        return salvaged_payload
+
+    return None
+
+
 def parse_json_content(content: str) -> Dict[str, Any]:
     trimmed = content.strip()
 
@@ -804,44 +1203,27 @@ def parse_json_content(content: str) -> Dict[str, Any]:
         try:
             return json.loads(fenced)
         except json.JSONDecodeError as exc:
-            raise RuntimeError(f"Failed to parse model JSON output. Excerpt: {summarize_text(trimmed, 700)}") from exc
+            salvaged_payload = salvage_partial_payload(trimmed)
 
+            if salvaged_payload is not None:
+                return salvaged_payload
 
-def is_edge_direction_plausible(edge_type: str, source_label: Optional[str], target_label: Optional[str]) -> bool:
-    if source_label is None or target_label is None:
-        return False
-
-    rules = EDGE_LABEL_RULES.get(edge_type)
-
-    if rules is None:
-        return False
-
-    source_labels, target_labels = rules
-    return source_label in source_labels and target_label in target_labels
-
-
-def edge_signature(edge: Dict[str, Any]) -> Tuple[str, str, str, str]:
-    return (
-        clean_text(edge.get("source_id")) or "",
-        clean_text(edge.get("type")) or "",
-        clean_text(edge.get("target_id")) or "",
-        clean_text(edge.get("condition_text")) or "",
-    )
+            excerpt = summarize_text_for_prompt(trimmed, limit=700)
+            raise RuntimeError(f"Failed to parse model JSON output. Excerpt: {excerpt}") from exc
 
 
 def sanitize_repair_payload(
     payload: Dict[str, Any],
-    node_map: Dict[str, Dict[str, Any]],
+    node_ids: set[str],
     suspicious_node_ids: set[str],
-    existing_signatures: set[Tuple[str, str, str, str]],
     max_add_edges: int,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     if not isinstance(payload, dict):
         raise RepairValidationError("Repair payload must be an object.")
 
-    raw_add_edges = payload.get("add_edges", [])
-    raw_drop_node_ids = payload.get("drop_node_ids", [])
-    raw_notes = payload.get("notes", [])
+    add_edges = payload.get("add_edges", [])
+    drop_node_ids = payload.get("drop_node_ids", [])
+    notes = payload.get("notes", [])
     sanitized_payload: Dict[str, Any] = {
         "add_edges": [],
         "drop_node_ids": [],
@@ -849,26 +1231,31 @@ def sanitize_repair_payload(
     }
     dropped_edge_reasons: Dict[str, int] = {}
 
-    if not isinstance(raw_add_edges, list):
-        raw_add_edges = []
+    if not isinstance(add_edges, list):
+        add_edges = []
 
-    if not isinstance(raw_drop_node_ids, list):
-        raw_drop_node_ids = []
+    if not isinstance(drop_node_ids, list):
+        drop_node_ids = []
 
-    if not isinstance(raw_notes, list):
-        raw_notes = []
+    if not isinstance(notes, list):
+        notes = []
 
-    for note in raw_notes:
-        cleaned_note = clean_text(note)
+    for raw_note in notes:
+        note = clean_text(raw_note)
 
-        if cleaned_note is not None:
-            sanitized_payload["notes"].append(cleaned_note)
+        if note is not None:
+            sanitized_payload["notes"].append(note)
 
-    for drop_node_id in raw_drop_node_ids:
-        if isinstance(drop_node_id, str) and drop_node_id in suspicious_node_ids:
-            sanitized_payload["drop_node_ids"].append(drop_node_id)
+    for raw_drop_node_id in drop_node_ids:
+        if not isinstance(raw_drop_node_id, str):
+            continue
 
-    for raw_edge in raw_add_edges:
+        if raw_drop_node_id not in suspicious_node_ids:
+            continue
+
+        sanitized_payload["drop_node_ids"].append(raw_drop_node_id)
+
+    for raw_edge in add_edges:
         if not isinstance(raw_edge, dict):
             dropped_edge_reasons["invalid_edge_shape"] = dropped_edge_reasons.get("invalid_edge_shape", 0) + 1
             continue
@@ -882,27 +1269,12 @@ def sanitize_repair_payload(
             dropped_edge_reasons["missing_endpoint_id"] = dropped_edge_reasons.get("missing_endpoint_id", 0) + 1
             continue
 
-        if source_id not in node_map or target_id not in node_map:
+        if source_id not in node_ids or target_id not in node_ids:
             dropped_edge_reasons["unknown_node_id"] = dropped_edge_reasons.get("unknown_node_id", 0) + 1
-            continue
-
-        if source_id not in suspicious_node_ids and target_id not in suspicious_node_ids:
-            dropped_edge_reasons["no_suspicious_endpoint"] = dropped_edge_reasons.get("no_suspicious_endpoint", 0) + 1
-            continue
-
-        if source_id == target_id:
-            dropped_edge_reasons["self_loop"] = dropped_edge_reasons.get("self_loop", 0) + 1
             continue
 
         if edge_type not in ALLOWED_EDGE_TYPES:
             dropped_edge_reasons["invalid_edge_type"] = dropped_edge_reasons.get("invalid_edge_type", 0) + 1
-            continue
-
-        source_label = clean_text(node_map[source_id].get("label"))
-        target_label = clean_text(node_map[target_id].get("label"))
-
-        if not is_edge_direction_plausible(edge_type, source_label, target_label):
-            dropped_edge_reasons["implausible_direction"] = dropped_edge_reasons.get("implausible_direction", 0) + 1
             continue
 
         if evidence_text is None:
@@ -931,13 +1303,6 @@ def sanitize_repair_payload(
         if not isinstance(attributes, dict):
             attributes = {}
 
-        condition_text = clean_text(attributes.get("condition_text")) or ""
-        signature = (source_id, edge_type, target_id, condition_text)
-
-        if signature in existing_signatures:
-            dropped_edge_reasons["duplicate_edge"] = dropped_edge_reasons.get("duplicate_edge", 0) + 1
-            continue
-
         sanitized_payload["add_edges"].append(
             {
                 "source_id": source_id,
@@ -950,13 +1315,13 @@ def sanitize_repair_payload(
                 "attributes": attributes,
             }
         )
-        existing_signatures.add(signature)
 
         if len(sanitized_payload["add_edges"]) >= max_add_edges:
             break
 
     sanitization_summary = {
-        "raw_add_edge_count": len(raw_add_edges),
+        "salvaged_partial_json": bool(payload.get("_salvaged_partial_json")),
+        "raw_add_edge_count": len(add_edges),
         "kept_add_edge_count": len(sanitized_payload["add_edges"]),
         "dropped_edge_reasons": dropped_edge_reasons,
     }
@@ -977,24 +1342,15 @@ async def call_model_for_record(
         "response_format": {
             "type": "json_schema",
             "json_schema": {
-                "name": "search_relation_repair",
+                "name": "relation_repair",
                 "strict": True,
                 "schema": build_repair_output_schema(config.max_add_edges),
             },
         },
     }
-    enable_thinking_env = os.getenv("REPAIR_ENABLE_THINKING")
-
-    if enable_thinking_env is not None:
-        # DashScope qwen3 系列结构化输出时关闭 thinking 更稳定；非 DashScope 服务可不设置该变量。
-        request_kwargs["extra_body"] = {
-            "enable_thinking": enable_thinking_env.strip().lower() in {"1", "true", "yes", "on"}
-        }
-    elif "dashscope" in config.base_url.lower():
-        request_kwargs["extra_body"] = {"enable_thinking": False}
-
     response = await client.chat.completions.create(**request_kwargs)
-    return parse_json_content(extract_assistant_content(response))
+    content = extract_assistant_content(response)
+    return parse_json_content(content)
 
 
 def build_added_edge_id(
@@ -1011,6 +1367,91 @@ def build_added_edge_id(
     return f"repair_edge_{digest}"
 
 
+def edge_signature(edge: Dict[str, Any]) -> Tuple[str, str, str, str]:
+    source_id = clean_text(edge.get("source_id")) or ""
+    edge_type = clean_text(edge.get("type")) or ""
+    target_id = clean_text(edge.get("target_id")) or ""
+    condition_text = clean_text(edge.get("condition_text")) or ""
+    return source_id, edge_type, target_id, condition_text
+
+
+def is_edge_direction_plausible(edge_type: str, source_label: Optional[str], target_label: Optional[str]) -> bool:
+    if source_label is None or target_label is None:
+        return False
+
+    if edge_type == "RECOMMENDS":
+        return source_label == "Recommendation" and target_label != "Recommendation"
+
+    if edge_type == "COMPLICATED_BY":
+        return (
+            source_label in {"Disease", "DiseasePhase"}
+            and target_label in {"OpportunisticInfection", "Comorbidity", "Tumor", "SyndromeOrComplication"}
+        )
+
+    if edge_type == "HAS_LAB_FINDING":
+        return (
+            source_label in {
+                "Disease",
+                "DiseasePhase",
+                "OpportunisticInfection",
+                "Comorbidity",
+                "Tumor",
+                "SyndromeOrComplication",
+                "PopulationGroup",
+                "ExposureScenario",
+            }
+            and target_label == "LabFinding"
+        )
+
+    if edge_type == "DIAGNOSED_BY":
+        return (
+            source_label in {
+                "Disease",
+                "DiseasePhase",
+                "OpportunisticInfection",
+                "Comorbidity",
+                "Tumor",
+                "SyndromeOrComplication",
+            }
+            and target_label in {"LabTest", "DiagnosticCriterion"}
+        )
+
+    if edge_type == "TREATED_WITH":
+        return (
+            source_label in {
+                "Disease",
+                "DiseasePhase",
+                "OpportunisticInfection",
+                "Comorbidity",
+                "Tumor",
+                "SyndromeOrComplication",
+                "Recommendation",
+            }
+            and target_label in {"Medication", "TreatmentRegimen", "ManagementAction"}
+        )
+
+    if edge_type == "MANIFESTS_AS":
+        return (
+            source_label in {
+                "Disease",
+                "DiseasePhase",
+                "OpportunisticInfection",
+                "Comorbidity",
+                "Tumor",
+                "SyndromeOrComplication",
+            }
+            and target_label in {"Symptom", "Sign"}
+        )
+
+    if edge_type == "REQUIRES_DETAIL":
+        return (
+            source_label in {"Symptom", "Sign", "DiagnosticCriterion", "ManagementAction", "LabTest"}
+            and target_label == "ClinicalAttribute"
+        )
+
+    return True
+
+
 def apply_repair_to_record(
     record: Dict[str, Any],
     payload: Dict[str, Any],
@@ -1024,7 +1465,19 @@ def apply_repair_to_record(
     edges = extraction["edges"]
     suspicious_node_ids = {node.node_id for node in suspicious_nodes}
     chunk_id = str(repaired_record.get("chunk_id", "unknown_chunk"))
-    node_map = build_node_map(nodes)
+    original_node_map: Dict[str, Dict[str, Any]] = {}
+
+    for raw_node in nodes:
+        if not isinstance(raw_node, dict):
+            continue
+
+        node_id = clean_text(raw_node.get("id"))
+
+        if node_id is None:
+            continue
+
+        original_node_map[node_id] = raw_node
+
     surviving_nodes: List[Dict[str, Any]] = []
     dropped_node_ids: set[str] = set()
     suggested_drop_node_ids: List[str] = []
@@ -1035,8 +1488,10 @@ def apply_repair_to_record(
 
         suggested_drop_node_ids.append(drop_node_id)
 
-        if apply_drop_node_ids:
-            dropped_node_ids.add(drop_node_id)
+        if not apply_drop_node_ids:
+            continue
+
+        dropped_node_ids.add(drop_node_id)
 
     for raw_node in nodes:
         if not isinstance(raw_node, dict):
@@ -1044,7 +1499,10 @@ def apply_repair_to_record(
 
         node_id = clean_text(raw_node.get("id"))
 
-        if node_id is None or node_id in dropped_node_ids:
+        if node_id is None:
+            continue
+
+        if node_id in dropped_node_ids:
             continue
 
         surviving_nodes.append(raw_node)
@@ -1055,6 +1513,7 @@ def apply_repair_to_record(
         if isinstance(node, dict) and clean_text(node.get("id")) is not None
     }
     surviving_node_ids = {node_id for node_id in surviving_node_ids if node_id is not None}
+
     surviving_edges: List[Dict[str, Any]] = []
 
     for raw_edge in edges:
@@ -1064,13 +1523,21 @@ def apply_repair_to_record(
         source_id = clean_text(raw_edge.get("source_id"))
         target_id = clean_text(raw_edge.get("target_id"))
 
-        if source_id in surviving_node_ids and target_id in surviving_node_ids:
-            surviving_edges.append(raw_edge)
+        if source_id is None or target_id is None:
+            continue
+
+        if source_id in dropped_node_ids or target_id in dropped_node_ids:
+            continue
+
+        surviving_edges.append(raw_edge)
 
     existing_signatures = {edge_signature(edge) for edge in surviving_edges if isinstance(edge, dict)}
     added_edges: List[Dict[str, Any]] = []
 
     for candidate_edge in payload["add_edges"]:
+        if not isinstance(candidate_edge, dict):
+            continue
+
         confidence = float(candidate_edge.get("confidence", 0))
 
         if confidence < min_confidence:
@@ -1086,6 +1553,15 @@ def apply_repair_to_record(
         if source_id not in surviving_node_ids or target_id not in surviving_node_ids:
             continue
 
+        if source_id == target_id:
+            continue
+
+        source_label = clean_text(original_node_map.get(source_id, {}).get("label"))
+        target_label = clean_text(original_node_map.get(target_id, {}).get("label"))
+
+        if not is_edge_direction_plausible(edge_type, source_label, target_label):
+            continue
+
         attributes = candidate_edge.get("attributes")
 
         if not isinstance(attributes, dict):
@@ -1099,6 +1575,7 @@ def apply_repair_to_record(
 
         attributes["evidence_text"] = clean_text(candidate_edge.get("evidence_text")) or ""
         attributes["repair_confidence"] = confidence
+
         added_edge = {
             "id": build_added_edge_id(
                 chunk_id=chunk_id,
@@ -1122,7 +1599,6 @@ def apply_repair_to_record(
     extraction["nodes"] = surviving_nodes
     extraction["edges"] = surviving_edges + added_edges
     repaired_record["relation_repair"] = {
-        "repair_schema": "search_only_v1",
         "candidate_node_ids": [node.node_id for node in suspicious_nodes],
         "candidate_reasons": {node.node_id: node.reasons for node in suspicious_nodes},
         "apply_drop_node_ids": apply_drop_node_ids,
@@ -1135,7 +1611,8 @@ def apply_repair_to_record(
         "notes": payload["notes"],
         "status": "repaired" if len(added_edges) > 0 or len(dropped_node_ids) > 0 else "reviewed_no_change",
     }
-    summary = {
+
+    repair_summary = {
         "chunk_id": chunk_id,
         "relative_path": repaired_record.get("relative_path"),
         "candidate_node_count": len(suspicious_nodes),
@@ -1144,20 +1621,49 @@ def apply_repair_to_record(
         "dropped_node_count": len(dropped_node_ids),
         "status": repaired_record["relation_repair"]["status"],
     }
-    return repaired_record, summary
+    return repaired_record, repair_summary
 
 
 def summarize_exception_for_retry(exc: BaseException) -> str:
-    message = clean_text(str(exc)) or exc.__class__.__name__
+    error_type = exc.__class__.__name__
+    message = clean_text(str(exc)) or error_type
+
+    if "Failed to parse model JSON output" in message:
+        return (
+            "上一轮失败原因：输出不是合法 JSON，或 JSON 在末尾被截断。"
+            "请只输出一个严格 JSON 对象，确保所有大括号和方括号都正确闭合，"
+            "不要输出 JSON 之外的解释文字。"
+            f" 上一轮错误摘要：{summarize_text_for_prompt(message, limit=520)}"
+        )
+
+    if "timed out" in message.lower():
+        return (
+            "上一轮失败原因：请求超时。请减少输出量，只返回最关键的少量边，"
+            "避免冗长 notes，保持 JSON 简洁。"
+            f" 上一轮错误摘要：{summarize_text_for_prompt(message, limit=300)}"
+        )
+
+    if isinstance(exc, RepairValidationError):
+        return (
+            "上一轮失败原因：输出虽然是 JSON，但不符合本地校验规则。"
+            "请严格使用 existing_nodes 中已有的节点 id，确保 evidence_text 非空，"
+            "并遵守允许的关系类型。"
+            f" 上一轮错误摘要：{summarize_text_for_prompt(message, limit=420)}"
+        )
 
     return (
-        "上一轮失败。请只输出严格 JSON，使用 existing_nodes 中已有 id，"
-        "遵守搜索专用关系类型和方向，且 evidence_text 非空。"
-        f" 错误摘要：{summarize_text(message, 420)}"
+        "上一轮失败原因：输出未通过本地处理。请在保持严格 JSON 的前提下，"
+        "更保守地补边，只输出有明确依据且字段完整的边。"
+        f" 上一轮错误摘要：{summarize_text_for_prompt(message, limit=360)}"
     )
 
 
-async def with_retry(coro_factory, retry_count: int, retry_delay_ms: int, context_label: str) -> Any:
+async def with_retry(
+    coro_factory: Callable[[int, Optional[str]], Any],
+    retry_count: int,
+    retry_delay_ms: int,
+    context_label: str,
+) -> Any:
     attempt = 0
     last_error: Optional[BaseException] = None
     retry_feedback: Optional[str] = None
@@ -1206,7 +1712,6 @@ async def process_record(
     if len(suspicious_nodes) == 0:
         passthrough_record = json.loads(json.dumps(record, ensure_ascii=False))
         passthrough_record["relation_repair"] = {
-            "repair_schema": "search_only_v1",
             "candidate_node_ids": [],
             "candidate_reasons": {},
             "dropped_node_ids": [],
@@ -1219,8 +1724,12 @@ async def process_record(
         return passthrough_record, {"status": "skipped_no_candidates"}
 
     chunk_id = str(record.get("chunk_id", "unknown_chunk"))
-    node_map = build_node_map(extraction["nodes"])
-    existing_signatures = {edge_signature(edge) for edge in extraction["edges"] if isinstance(edge, dict)}
+    node_ids = {
+        clean_text(node.get("id"))
+        for node in extraction["nodes"]
+        if isinstance(node, dict) and clean_text(node.get("id")) is not None
+    }
+    node_ids = {node_id for node_id in node_ids if node_id is not None}
     suspicious_node_ids = {node.node_id for node in suspicious_nodes}
 
     async with semaphore:
@@ -1228,10 +1737,9 @@ async def process_record(
             f"[repair:start] {chunk_id} {record.get('relative_path')} "
             f"candidates={len(suspicious_nodes)}"
         )
-
         try:
             raw_payload = await with_retry(
-                lambda _attempt, retry_feedback: call_model_for_record(
+                lambda attempt, retry_feedback: call_model_for_record(
                     client,
                     record,
                     suspicious_nodes,
@@ -1244,9 +1752,8 @@ async def process_record(
             )
             payload, sanitization_summary = sanitize_repair_payload(
                 raw_payload,
-                node_map,
+                node_ids,
                 suspicious_node_ids,
-                existing_signatures,
                 config.max_add_edges,
             )
             repaired_record, summary = apply_repair_to_record(
@@ -1266,7 +1773,6 @@ async def process_record(
         except Exception as exc:  # noqa: BLE001
             failure_record = json.loads(json.dumps(record, ensure_ascii=False))
             failure_record["relation_repair"] = {
-                "repair_schema": "search_only_v1",
                 "candidate_node_ids": [node.node_id for node in suspicious_nodes],
                 "candidate_reasons": {node.node_id: node.reasons for node in suspicious_nodes},
                 "dropped_node_ids": [],
@@ -1329,12 +1835,17 @@ async def run_async(config: RepairConfig) -> Tuple[List[Dict[str, Any]], Dict[st
     )
     total_added_edges = sum(int(summary.get("added_edge_count", 0) or 0) for summary in chunk_summaries)
     total_dropped_nodes = sum(int(summary.get("dropped_node_count", 0) or 0) for summary in chunk_summaries)
+    salvaged_partial_json_chunk_count = sum(
+        1
+        for summary in chunk_summaries
+        if bool((summary.get("sanitization") or {}).get("salvaged_partial_json"))
+    )
     total_filtered_invalid_edges = sum(
         sum(int(count or 0) for count in ((summary.get("sanitization") or {}).get("dropped_edge_reasons") or {}).values())
         for summary in chunk_summaries
     )
+
     report = {
-        "repair_schema": "search_only_v1",
         "input_file": str(config.input_file),
         "output_file": str(config.output_file),
         "model": config.model,
@@ -1359,6 +1870,7 @@ async def run_async(config: RepairConfig) -> Tuple[List[Dict[str, Any]], Dict[st
                 int(summary.get("suggested_drop_node_count", 0) or 0) for summary in chunk_summaries
             ),
             "total_dropped_nodes": total_dropped_nodes,
+            "salvaged_partial_json_chunk_count": salvaged_partial_json_chunk_count,
             "total_filtered_invalid_edges": total_filtered_invalid_edges,
         },
         "chunk_summaries": chunk_summaries,
@@ -1392,10 +1904,14 @@ def main() -> None:
         json.dumps(report, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+
     summary = report["summary"]
     print(f"[repair] input={config.input_file}")
     print(f"[repair] output={config.output_file}")
     print(f"[repair] report={config.report_file}")
+    if report.get("retry_mode"):
+        print(f"[repair] retry_chunk_count={len(report.get('retry_chunk_ids') or [])}")
+        print(f"[repair] baseline_output_file={report.get('baseline_output_file')}")
     print(
         "[repair] "
         f"chunks={summary['chunk_record_count']} "

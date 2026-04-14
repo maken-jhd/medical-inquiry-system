@@ -45,3 +45,32 @@ def test_action_builder_tracks_joint_recommended_evidence_match() -> None:
     assert metadata["hypothesis_recommended_match_score"] > 0.0
     assert metadata["joint_recommended_match_score"] > 0.0
     assert "imaging" in metadata["evidence_tags"]
+
+
+# 验证 ImagingFinding 对应的 A3 问句使用影像学语境，而不是普通症状模板。
+def test_action_builder_renders_imaging_question() -> None:
+    builder = ActionBuilder()
+    action = builder.build_verification_actions(
+        [
+            {
+                "node_id": "imaging_ground_glass",
+                "label": "ImagingFinding",
+                "name": "双肺弥漫磨玻璃影",
+                "relation_type": "HAS_IMAGING_FINDING",
+                "relation_weight": 0.9,
+                "node_weight": 1.0,
+                "similarity_confidence": 1.0,
+                "contradiction_priority": 1.0,
+                "question_type_hint": "imaging",
+                "priority": 2.0,
+                "is_red_flag": True,
+                "topic_id": "Disease",
+            }
+        ],
+        hypothesis_id="pcp",
+    )[0]
+
+    question = builder.render_question_text(action)
+
+    assert "胸部影像或 CT" in question
+    assert "双肺弥漫磨玻璃影" in question

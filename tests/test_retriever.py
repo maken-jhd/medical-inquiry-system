@@ -106,7 +106,7 @@ class SemanticFakeNeo4jClient(FakeNeo4jClient):
                     "matched_feature_count": 1,
                     "candidate_weight": 1.0,
                     "direction_confidence": 0.65,
-                    "relation_types": ["ASSOCIATED_WITH"],
+                    "relation_types": ["APPLIES_TO"],
                     "evidence_names": ["呼吸困难"],
                     "evidence_node_ids": ["symptom_dyspnea"],
                 },

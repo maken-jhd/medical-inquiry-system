@@ -1,0 +1,49 @@
+{
+  "merge_groups": [
+    {
+      "canonical_name": "艾滋病相关型卡波西肉瘤",
+      "aliases": [
+        "艾滋病相关型卡波西肉瘤",
+        "艾滋病相关型KS"
+      ],
+      "confidence": "high",
+      "reason": "同一疾病临床分型的中文全称与包含英文缩写的变体"
+    },
+    {
+      "canonical_name": "经典型卡波西肉瘤",
+      "aliases": [
+        "经典型卡波西肉瘤",
+        "经典型KS"
+      ],
+      "confidence": "high",
+      "reason": "同一疾病临床分型的中文全称与包含英文缩写的变体"
+    },
+    {
+      "canonical_name": "医源性卡波西肉瘤",
+      "aliases": [
+        "医源性卡波西肉瘤",
+        "医源性KS"
+      ],
+      "confidence": "high",
+      "reason": "同一疾病临床分型的中文全称与包含英文缩写的变体"
+    },
+    {
+      "canonical_name": "慢性肺组织胞浆菌病",
+      "aliases": [
+        "慢性肺组织胞浆菌病",
+        "Chronic Pulmonary Histoplasmosis"
+      ],
+      "confidence": "high",
+      "reason": "同一疾病阶段（或分型）的中英文等价表述"
+    },
+    {
+      "canonical_name": "播散性感染",
+      "aliases": [
+        "播散性感染",
+        "播散型"
+      ],
+      "confidence": "high",
+      "reason": "同一种感染扩散状态的完整医学名词与省略表述"
+    }
+  ]
+}

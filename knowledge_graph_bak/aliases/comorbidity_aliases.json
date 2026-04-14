@@ -28,6 +28,15 @@
       "reason": "同一病毒感染的中英文全称及缩写变体"
     },
     {
+      "canonical_name": "心血管疾病",
+      "aliases": [
+        "心血管疾病",
+        "心血管疾病（CVD）"
+      ],
+      "confidence": "high",
+      "reason": "同一疾病是否包含英文缩写（CVD）的变体"
+    },
+    {
       "canonical_name": "免疫缺陷或免疫抑制",
       "aliases": [
         "已知类型的免疫缺陷或免疫抑制",

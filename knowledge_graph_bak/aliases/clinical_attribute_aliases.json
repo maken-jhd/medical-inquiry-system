@@ -1,0 +1,41 @@
+{
+  "merge_groups": [
+    {
+      "canonical_name": "体重",
+      "aliases": [
+        "体重",
+        "体质量"
+      ],
+      "confidence": "high",
+      "reason": "临床上描述患者身体质量的完全同义词"
+    },
+    {
+      "canonical_name": "CD4+ T淋巴细胞计数",
+      "aliases": [
+        "CD4+ T淋巴细胞计数",
+        "CD4+ T 淋巴细胞计数",
+        "CD4+ T细胞计数"
+      ],
+      "confidence": "high",
+      "reason": "同一检验指标的空格排版差异及省略“淋巴”二字的精简表达变体"
+    },
+    {
+      "canonical_name": "CD4+ T淋巴细胞计数 <100/μL",
+      "aliases": [
+        "CD4+ T 淋巴细胞计数 < 100 /μL",
+        "CD4+ T 淋巴细胞计数 <100/μL"
+      ],
+      "confidence": "high",
+      "reason": "同一检验指标与阈值判断的空格排版差异变体"
+    },
+    {
+      "canonical_name": "年龄>50岁",
+      "aliases": [
+        "年龄 >50岁",
+        "年龄>50岁"
+      ],
+      "confidence": "high",
+      "reason": "相同年龄段条件判断的空格排版差异"
+    }
+  ]
+}

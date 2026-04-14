@@ -24,6 +24,14 @@ from frontend.config_loader import (
     load_frontend_config,
 )
 from frontend.demo_cases import get_demo_by_key, list_demo_replays
+from frontend.output_browser import (
+    build_case_replay,
+    case_record_label,
+    list_case_records,
+    list_output_runs,
+    load_run_overview,
+    summarize_case_record,
+)
 from frontend.ui_adapter import (
     boolean_label,
     format_score,
@@ -131,6 +139,8 @@ def main() -> None:
         _render_chat_panel(turns)
 
     with right_col:
+        if st.session_state.mode == "实验复盘模式":
+            _render_experiment_overview_card()
         _render_decision_panel(current_turn)
 
 
@@ -146,6 +156,14 @@ def _ensure_session_defaults() -> None:
     st.session_state.setdefault("live_turns", [])
     st.session_state.setdefault("live_error", "")
     st.session_state.setdefault("frontend_config", load_frontend_config())
+    st.session_state.setdefault("experiment_run_key", "")
+    st.session_state.setdefault("experiment_run_path", "")
+    st.session_state.setdefault("experiment_overview", {})
+    st.session_state.setdefault("experiment_case_records", [])
+    st.session_state.setdefault("experiment_case_index", 0)
+    st.session_state.setdefault("experiment_replay", None)
+    st.session_state.setdefault("experiment_turn_index", 0)
+    st.session_state.setdefault("experiment_error", "")
 
     if st.session_state.demo_replay is None:
         _load_demo(st.session_state.demo_key)
@@ -169,16 +187,21 @@ def _render_sidebar() -> None:
 
     with st.sidebar:
         st.header("演示控制")
+        mode_options = ["演示回放模式", "实验复盘模式", "实时运行模式"]
+        current_mode = st.session_state.mode
+        mode_index = mode_options.index(current_mode) if current_mode in mode_options else 0
         mode = st.radio(
             "运行模式",
-            ["演示回放模式", "实时运行模式"],
-            index=0 if st.session_state.mode == "演示回放模式" else 1,
-            help="回放模式不依赖 Neo4j / LLM，适合现场保底展示。",
+            mode_options,
+            index=mode_index,
+            help="回放模式不依赖 Neo4j / LLM；实验复盘模式读取本地 test_outputs；实时模式调用后端。",
         )
         st.session_state.mode = mode
 
         if mode == "演示回放模式":
             _render_replay_controls()
+        elif mode == "实验复盘模式":
+            _render_experiment_controls()
         else:
             _render_live_controls()
 
@@ -274,13 +297,95 @@ def _render_live_controls() -> None:
         st.error(st.session_state.live_error)
 
 
+def _render_experiment_controls() -> None:
+    """渲染实验输出复盘模式控制区。"""
+
+    st.info("实验复盘模式会扫描 `test_outputs/simulator_replay`，适合回看 focused replay、acceptance sweep 和 ablation 输出。")
+    if st.button("刷新实验索引", use_container_width=True):
+        _cached_output_runs.clear()
+        st.session_state.experiment_run_key = ""
+        st.session_state.experiment_replay = None
+        st.session_state.experiment_case_records = []
+        st.rerun()
+
+    runs = _cached_output_runs()
+    if not runs:
+        st.warning("暂未在 `test_outputs/simulator_replay` 下找到可识别的实验输出文件。")
+        return
+
+    current_key = st.session_state.experiment_run_key
+    current_index = next((idx for idx, run in enumerate(runs) if run.key == current_key), 0)
+    labels = [run.label for run in runs]
+    selected_label = st.selectbox("选择实验输出目录", labels, index=current_index)
+    selected_run = runs[labels.index(selected_label)]
+
+    if selected_run.key != current_key:
+        _load_experiment_run(selected_run.key, selected_run.path)
+
+    if st.session_state.experiment_error:
+        st.error(st.session_state.experiment_error)
+        return
+
+    records = st.session_state.experiment_case_records
+    if not records:
+        st.warning("该目录只有汇总或审计文件，暂未找到可逐病例浏览的 JSONL。")
+        return
+
+    case_labels = [case_record_label(record) for record in records]
+    current_case_index = min(st.session_state.experiment_case_index, len(records) - 1)
+    selected_case_label = st.selectbox("选择病例记录", case_labels, index=current_case_index)
+    selected_case_index = case_labels.index(selected_case_label)
+    if selected_case_index != st.session_state.experiment_case_index or st.session_state.experiment_replay is None:
+        _load_experiment_case(selected_case_index)
+
+    replay = st.session_state.experiment_replay or {}
+    turns = replay.get("turns", [])
+    max_index = max(len(turns) - 1, 0)
+    st.session_state.experiment_turn_index = min(st.session_state.experiment_turn_index, max_index)
+    slider_key = f"experiment_turn_slider_{_safe_widget_key(selected_run.key)}_{selected_case_index}"
+
+    if slider_key not in st.session_state:
+        st.session_state[slider_key] = st.session_state.experiment_turn_index + 1
+
+    st.markdown(f"**病例简介：** {replay.get('description', '')}")
+    st.caption(f"当前显示：第 {st.session_state.experiment_turn_index + 1} / {len(turns) if turns else 0} 轮")
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.button(
+            "上一轮",
+            use_container_width=True,
+            disabled=st.session_state.experiment_turn_index <= 0,
+            on_click=_change_experiment_turn,
+            args=(-1, max_index, slider_key),
+        )
+    with col_b:
+        st.button(
+            "下一轮",
+            use_container_width=True,
+            disabled=st.session_state.experiment_turn_index >= max_index,
+            on_click=_change_experiment_turn,
+            args=(1, max_index, slider_key),
+        )
+
+    if turns:
+        st.slider(
+            "复盘轮次",
+            min_value=1,
+            max_value=len(turns),
+            key=slider_key,
+            on_change=_sync_experiment_slider,
+            args=(slider_key, max_index),
+        )
+
+
 def _render_chat_panel(turns: list[dict[str, Any]]) -> None:
     """渲染左侧问诊对话区。"""
 
     st.subheader("问诊对话区")
 
     if not turns:
-        st.info("请选择一个示例病例，或切换到实时运行模式后输入患者描述。")
+        st.info("请选择一个示例病例、实验输出病例，或切换到实时运行模式后输入患者描述。")
 
     for turn in turns:
         turn_index = turn.get("turn_index", 0)
@@ -543,11 +648,100 @@ def _render_safety_card(safety: dict[str, Any]) -> None:
             st.success("本轮接受使用了 provisional evidence family：说明模糊但高价值的证据被结构化纳入安全判断。")
 
 
+def _render_experiment_overview_card() -> None:
+    """展示实验目录级与病例级摘要，帮助快速复盘。"""
+
+    overview = st.session_state.experiment_overview or {}
+    replay = st.session_state.experiment_replay or {}
+    records = st.session_state.experiment_case_records or []
+    if not overview and not replay:
+        return
+
+    with st.container(border=True):
+        st.markdown("### 实验复盘总览")
+        st.caption("该模块直接读取 `test_outputs/simulator_replay` 下的历史实验输出，便于测试后复盘。")
+        if overview.get("relative_path"):
+            st.markdown(f"**当前输出目录：** `{overview.get('relative_path')}`")
+        if overview.get("available_files"):
+            st.caption("识别到的文件：" + "、".join(overview.get("available_files", [])))
+
+        metrics = _pick_experiment_metrics(overview)
+        col_a, col_b, col_c, col_d = st.columns(4)
+        col_a.metric("病例数", _metric_value(metrics, "case_count", len(records)))
+        col_b.metric("正确接受", _metric_value(metrics, "accepted_correct_count", "—"))
+        col_c.metric("错误接受", _metric_value(metrics, "accepted_wrong_count", "—"))
+        col_d.metric("正确但被拒停", _metric_value(metrics, "correct_best_answer_but_rejected_count", "—"))
+
+        col_e, col_f, col_g = st.columns(3)
+        col_e.metric("repair 轮数", _metric_value(metrics, "repair_turns", "—"))
+        col_f.metric("语义重复轮数", _metric_value(metrics, "semantic_repeat_turns", "—"))
+        col_g.metric("闸门拒绝次数", _metric_value(metrics, "verifier_positive_but_gate_rejected_count", "—"))
+
+        if records:
+            case_summary = summarize_case_record(records[st.session_state.experiment_case_index])
+            st.markdown("**当前病例摘要**")
+            st.table(
+                [
+                    {"指标": "病例 ID", "值": case_summary.get("case_id", "")},
+                    {"指标": "真实诊断", "值": "、".join(case_summary.get("true_conditions", [])) or "未标注"},
+                    {"指标": "最终答案", "值": case_summary.get("best_answer", "") or "暂无"},
+                    {"指标": "停止原因", "值": case_summary.get("stop_reason", "") or "暂无"},
+                    {"指标": "接受分类", "值": case_summary.get("acceptance_category", "") or "未标注"},
+                    {
+                        "指标": "是否正确",
+                        "值": boolean_label(case_summary.get("is_best_answer_correct"))
+                        if case_summary.get("is_best_answer_correct") is not None
+                        else "未标注",
+                    },
+                ]
+            )
+
+        if overview.get("profile_summary"):
+            with st.expander("查看 profile_summary.tsv", expanded=False):
+                st.table(overview["profile_summary"])
+        if overview.get("status"):
+            with st.expander("查看 status.json", expanded=False):
+                st.json(overview["status"])
+        if overview.get("log_tail"):
+            with st.expander("查看 run.log 末尾", expanded=False):
+                st.code(overview["log_tail"], language="text")
+
+
+def _pick_experiment_metrics(overview: dict[str, Any]) -> dict[str, Any]:
+    """从不同类型汇总文件中选一个最适合展示的 metrics dict。"""
+
+    for key in ("metrics", "ablation_metrics", "benchmark_summary"):
+        payload = overview.get(key)
+        if not isinstance(payload, dict) or not payload:
+            continue
+        if "metrics" in payload and isinstance(payload["metrics"], dict):
+            return payload["metrics"]
+        return payload
+    return {}
+
+
+def _metric_value(metrics: dict[str, Any], key: str, fallback: Any) -> Any:
+    """兼容不同实验脚本的指标命名。"""
+
+    if key in metrics:
+        return metrics[key]
+    for value in metrics.values():
+        if isinstance(value, dict) and key in value:
+            return value[key]
+    return fallback
+
+
 def _current_turns() -> list[dict[str, Any]]:
     """根据当前模式返回需要展示到左侧聊天区的轮次。"""
 
     if st.session_state.mode == "实时运行模式":
         return st.session_state.live_turns
+    if st.session_state.mode == "实验复盘模式":
+        replay = st.session_state.experiment_replay or {}
+        turns = replay.get("turns", [])
+        if not turns:
+            return []
+        return turns[: st.session_state.experiment_turn_index + 1]
 
     replay = st.session_state.demo_replay or {}
     turns = replay.get("turns", [])
@@ -579,6 +773,69 @@ def _change_demo_turn(delta: int, max_index: int, slider_key: str) -> None:
     next_index = max(0, min(max_index, int(st.session_state.demo_turn_index) + delta))
     st.session_state.demo_turn_index = next_index
     st.session_state[slider_key] = next_index + 1
+
+
+@st.cache_data(show_spinner=False)
+def _cached_output_runs() -> list[Any]:
+    """缓存实验输出目录索引，避免 Streamlit 每次刷新都重新扫描。"""
+
+    return list_output_runs()
+
+
+def _load_experiment_run(run_key: str, run_path: Path) -> None:
+    """加载一个实验输出目录的汇总与病例记录。"""
+
+    st.session_state.experiment_error = ""
+    st.session_state.experiment_run_key = run_key
+    st.session_state.experiment_run_path = str(run_path)
+    st.session_state.experiment_case_index = 0
+    st.session_state.experiment_turn_index = 0
+    st.session_state.experiment_replay = None
+    try:
+        st.session_state.experiment_overview = load_run_overview(run_path)
+        st.session_state.experiment_case_records = list_case_records(run_path)
+        if st.session_state.experiment_case_records:
+            _load_experiment_case(0)
+    except Exception as exc:  # noqa: BLE001 - 复盘模式需要容忍历史文件格式差异
+        st.session_state.experiment_error = f"加载实验输出失败：{exc}"
+        st.session_state.experiment_overview = {}
+        st.session_state.experiment_case_records = []
+
+
+def _load_experiment_case(case_index: int) -> None:
+    """加载选中的实验病例，并转换成可逐轮展示的 replay。"""
+
+    records = st.session_state.experiment_case_records
+    if not records:
+        st.session_state.experiment_replay = None
+        return
+    bounded_index = max(0, min(case_index, len(records) - 1))
+    record = records[bounded_index]
+    st.session_state.experiment_case_index = bounded_index
+    st.session_state.experiment_turn_index = 0
+    st.session_state.experiment_replay = build_case_replay(record)
+
+
+def _sync_experiment_slider(slider_key: str, max_index: int) -> None:
+    """同步实验复盘 slider 与当前轮次索引。"""
+
+    value = int(st.session_state.get(slider_key, 1))
+    st.session_state.experiment_turn_index = max(0, min(max_index, value - 1))
+
+
+def _change_experiment_turn(delta: int, max_index: int, slider_key: str) -> None:
+    """通过上一轮 / 下一轮按钮改变实验复盘轮次。"""
+
+    next_index = max(0, min(max_index, int(st.session_state.experiment_turn_index) + delta))
+    st.session_state.experiment_turn_index = next_index
+    st.session_state[slider_key] = next_index + 1
+
+
+def _safe_widget_key(value: str) -> str:
+    """把路径变成适合 Streamlit widget key 的短字符串。"""
+
+    safe = "".join(ch if ch.isalnum() else "_" for ch in value)
+    return safe[-120:] or "root"
 
 
 def _start_live_session() -> None:

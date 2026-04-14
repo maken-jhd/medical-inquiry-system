@@ -1,0 +1,61 @@
+{
+  "merge_groups": [
+    {
+      "canonical_name": "体重下降",
+      "aliases": [
+        "体重下降",
+        "体重减轻",
+        "进行性体质量下降"
+      ],
+      "confidence": "high",
+      "reason": "同一临床症状（体重流失）的不同日常习惯用语与医学术语（体质量）表述"
+    },
+    {
+      "canonical_name": "呼吸困难",
+      "aliases": [
+        "呼吸困难",
+        "进行性呼吸困难",
+        "呼吸窘迫"
+      ],
+      "confidence": "high",
+      "reason": "指代主观或客观存在的呼吸费力、气促症状及其不同严重程度、发病进程和诱发因素的表述"
+    },
+    {
+      "canonical_name": "恶心呕吐",
+      "aliases": [
+        "恶心呕吐",
+        "呕吐"
+      ],
+      "confidence": "high",
+      "reason": "消化系统常见且常相伴发生的症状组合及单独症状表述"
+    },
+    {
+      "canonical_name": "意识改变",
+      "aliases": [
+        "意识改变",
+        "意识模糊",
+        "意识混乱"
+      ],
+      "confidence": "high",
+      "reason": "中枢神经系统受累导致的精神或意识状态异常的同义或近义递进表述"
+    },
+    {
+      "canonical_name": "癫痫发作",
+      "aliases": [
+        "癫痫发作",
+        "癫痫"
+      ],
+      "confidence": "high",
+      "reason": "疾病诊断名词（癫痫）与作为临床表现的具体症状（抽搐发作）在病历描述中的混用与等价表述"
+    },
+    {
+      "canonical_name": "HIV急性期感染症状",
+      "aliases": [
+        "HIV 急性期感染症状和体征",
+        "HIV急性感染相关症状"
+      ],
+      "confidence": "high",
+      "reason": "指代同一特定疾病初期综合症状群的不同文本和空格变体"
+    }
+  ]
+}

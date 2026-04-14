@@ -1,0 +1,127 @@
+{
+  "merge_groups": [
+    {
+      "canonical_name": "抗逆转录病毒治疗 (ART)",
+      "aliases": [
+        "抗逆转录病毒治疗",
+        "抗反转录病毒治疗",
+        "抗逆转录病毒治疗（ART）",
+        "抗逆转录病毒治疗 (ART)",
+        "抗反转录病毒治疗（ART）",
+        "抗HIV治疗（ART）",
+        "抗病毒治疗",
+        "ART",
+        "ART治疗",
+        "接受抗逆转录病毒治疗"
+      ],
+      "confidence": "high",
+      "reason": "同一核心治疗方案（Anti-Retroviral Therapy）的不同中文翻译（逆转录/反转录）、缩写、中英混合及习惯性简称表述"
+    },
+    {
+      "canonical_name": "启动抗逆转录病毒治疗",
+      "aliases": [
+        "启动抗逆转录病毒治疗",
+        "启动抗逆转录病毒治疗 (ART)",
+        "启动抗逆转录病毒治疗（ART）",
+        "启动抗病毒治疗",
+        "ART启动",
+        "ART 启动",
+        "启动ART",
+        "启动cART"
+      ],
+      "confidence": "high",
+      "reason": "指代“开始ART治疗”这一临床决策动作的等价中英文及空格变体"
+    },
+    {
+      "canonical_name": "剖宫产",
+      "aliases": [
+        "剖宫产",
+        "剖腹产"
+      ],
+      "confidence": "high",
+      "reason": "同一种外科分娩手术的医学标准命名与民间/临床习惯称呼"
+    },
+    {
+      "canonical_name": "ART方案调整",
+      "aliases": [
+        "ART换药",
+        "ART方案调整",
+        "更换抗病毒药物方案"
+      ],
+      "confidence": "high",
+      "reason": "在抗病毒治疗过程中改变用药方案的等价临床操作表述"
+    },
+    {
+      "canonical_name": "体重与BMI监测",
+      "aliases": [
+        "体重监测",
+        "体质量与BMI监测"
+      ],
+      "confidence": "high",
+      "reason": "同一项基本人体测量学随访指标的简写与完整医学表述"
+    },
+    {
+      "canonical_name": "心理支持与干预",
+      "aliases": [
+        "心理支持",
+        "心理干预"
+      ],
+      "confidence": "high",
+      "reason": "同属于精神卫生层面的非药物临床管理手段"
+    },
+    {
+      "canonical_name": "随访监测",
+      "aliases": [
+        "随访",
+        "随访监测"
+      ],
+      "confidence": "high",
+      "reason": "临床出院后或慢性病长程管理中同一动作的简称与全称"
+    },
+    {
+      "canonical_name": "颅内压管理",
+      "aliases": [
+        "降颅压治疗",
+        "颅内压管理"
+      ],
+      "confidence": "high",
+      "reason": "针对中枢神经系统感染（如隐球菌脑膜炎）控制高颅压的等价治疗目标描述"
+    },
+    {
+      "canonical_name": "心血管疾病 (CVD) 风险评估",
+      "aliases": [
+        "CVD风险评估",
+        "CVD风险评分"
+      ],
+      "confidence": "high",
+      "reason": "同一种量化评估心血管发病风险的临床管理动作"
+    },
+    {
+      "canonical_name": "眼底检查",
+      "aliases": [
+        "眼底检查",
+        "定期眼底检查"
+      ],
+      "confidence": "high",
+      "reason": "同一种专科检查手段，后者仅增加了频次定语（可合并为检查项目节点）"
+    },
+    {
+      "canonical_name": "抗结核治疗2周内启动ART",
+      "aliases": [
+        "抗结核治疗2周内开始ART",
+        "合并结核病者抗结核后2周内启动ART"
+      ],
+      "confidence": "high",
+      "reason": "针对特定共感染人群的特定治疗时机指南建议的等效表述"
+    },
+    {
+      "canonical_name": "暴露前预防 (PrEP)",
+      "aliases": [
+        "暴露前预防（PrEP）",
+        "启动PrEP"
+      ],
+      "confidence": "high",
+      "reason": "HIV暴露前预防措施的概念本体与启动该措施的动作（在管理措施节点中通常合并为主干名词）"
+    }
+  ]
+}

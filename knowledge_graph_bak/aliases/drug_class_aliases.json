@@ -1,0 +1,102 @@
+{
+  "merge_groups": [
+    {
+      "canonical_name": "核苷类反转录酶抑制剂 (NRTIs)",
+      "aliases": [
+        "核苷类反转录酶抑制剂",
+        "核苷类逆转录酶抑制剂",
+        "NRTIs",
+        "NRTI类抗HIV药物"
+      ],
+      "confidence": "high",
+      "reason": "同一抗病毒药物分类的不同中文翻译习惯（反转录/逆转录）及英文缩写变体"
+    },
+    {
+      "canonical_name": "非核苷类反转录酶抑制剂 (NNRTIs)",
+      "aliases": [
+        "非核苷类反转录酶抑制剂",
+        "非核苷类逆转录酶抑制剂",
+        "NNRTIs",
+        "非核苷类反转录酶抑制剂 (NNRTI)"
+      ],
+      "confidence": "high",
+      "reason": "同一抗病毒药物分类的不同中文翻译习惯（反转录/逆转录）、中英混合及英文缩写变体"
+    },
+    {
+      "canonical_name": "整合酶抑制剂 (INSTIs)",
+      "aliases": [
+        "整合酶抑制剂",
+        "INSTIs",
+        "整合酶抑制剂 (INSTI)",
+        "整合酶抑制剂（INSTI）"
+      ],
+      "confidence": "high",
+      "reason": "同一抗病毒药物分类的中英文全称、缩写及不同括号格式的变体"
+    },
+    {
+      "canonical_name": "蛋白酶抑制剂 (PIs)",
+      "aliases": [
+        "蛋白酶抑制剂",
+        "PIs",
+        "蛋白酶抑制剂 (PI)"
+      ],
+      "confidence": "high",
+      "reason": "同一抗病毒药物分类的中文、英文缩写及中英混合表述"
+    },
+    {
+      "canonical_name": "唑类抗真菌药 (Azoles)",
+      "aliases": [
+        "唑类抗真菌药",
+        "唑类药物",
+        "Azoles"
+      ],
+      "confidence": "high",
+      "reason": "同一类抗真菌药物的中英文名称及省略“抗真菌”的简称"
+    },
+    {
+      "canonical_name": "三唑类抗真菌药",
+      "aliases": [
+        "三唑类",
+        "三唑类抗真菌药"
+      ],
+      "confidence": "high",
+      "reason": "同类药物的分类全称与省略“抗真菌药”的简称"
+    },
+    {
+      "canonical_name": "多烯类抗真菌药 (Polyenes)",
+      "aliases": [
+        "多烯类抗真菌药",
+        "Polyenes"
+      ],
+      "confidence": "high",
+      "reason": "同一类抗真菌药物的中英文等价表述"
+    },
+    {
+      "canonical_name": "棘白菌素类 (Echinocandins)",
+      "aliases": [
+        "棘白菌素类",
+        "Echinocandins"
+      ],
+      "confidence": "high",
+      "reason": "同一类抗真菌药物的中英文等价表述"
+    },
+    {
+      "canonical_name": "磺胺类药物",
+      "aliases": [
+        "磺胺类",
+        "磺胺类药物"
+      ],
+      "confidence": "high",
+      "reason": "同一类抗菌药物包含与不包含“药物”二字的习惯表达差异"
+    },
+    {
+      "canonical_name": "氟喹诺酮类药物",
+      "aliases": [
+        "氟喹诺酮类",
+        "氟喹诺酮类药物"
+      ],
+      "confidence": "high",
+      "reason": "同一类抗菌药物包含与不包含“药物”二字的习惯表达差异"
+    }
+  ]
+}

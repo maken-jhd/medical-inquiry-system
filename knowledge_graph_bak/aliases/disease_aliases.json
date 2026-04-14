@@ -1,0 +1,133 @@
+{
+  "merge_groups": [
+    {
+      "canonical_name": "艾滋病 (HIV/AIDS)",
+      "aliases": [
+        "HIV感染",
+        "HIV/AIDS",
+        "艾滋病",
+        "获得性免疫缺陷综合征",
+        "HIV感染/AIDS",
+        "人类免疫缺陷病毒感染",
+        "AIDS",
+        "人类免疫缺陷病毒感染/艾滋病",
+        "人类免疫缺陷病毒感染（HIV）",
+        "艾滋病(AIDS)"
+      ],
+      "confidence": "high",
+      "reason": "同一种疾病（人类免疫缺陷病毒感染及获得性免疫缺陷综合征）的中英文全称、缩写及不同书写变体"
+    },
+    {
+      "canonical_name": "肺孢子菌肺炎 (PCP)",
+      "aliases": [
+        "肺孢子菌肺炎",
+        "PCP"
+      ],
+      "confidence": "high",
+      "reason": "同一种疾病的中文全称与英文缩写"
+    },
+    {
+      "canonical_name": "组织胞浆菌病",
+      "aliases": [
+        "组织胞浆菌病",
+        "Histoplasmosis",
+        "荚膜组织胞浆菌病"
+      ],
+      "confidence": "high",
+      "reason": "同一种真菌感染的中英文名称及病原体全称变体"
+    },
+    {
+      "canonical_name": "巨细胞病毒性视网膜炎 (CMVR)",
+      "aliases": [
+        "CMV视网膜炎",
+        "巨细胞病毒性视网膜炎",
+        "CMVR"
+      ],
+      "confidence": "high",
+      "reason": "同一种疾病的中英文混合缩写、中文全称及纯英文缩写"
+    },
+    {
+      "canonical_name": "人乳头瘤病毒感染 (HPV感染)",
+      "aliases": [
+        "HPV感染",
+        "人乳头瘤病毒感染"
+      ],
+      "confidence": "high",
+      "reason": "同一种病毒感染的中英文缩写与中文全称"
+    },
+    {
+      "canonical_name": "乙型肝炎病毒感染 (HBV)",
+      "aliases": [
+        "乙型肝炎",
+        "乙型肝炎病毒（HBV）感染"
+      ],
+      "confidence": "high",
+      "reason": "同一种疾病的简称与包含英文缩写的全称"
+    },
+    {
+      "canonical_name": "动脉粥样硬化性心血管疾病 (ASCVD)",
+      "aliases": [
+        "动脉粥样硬化性心血管疾病",
+        "ASCVD"
+      ],
+      "confidence": "high",
+      "reason": "同一种疾病的中文全称与英文缩写"
+    },
+    {
+      "canonical_name": "非结核分枝杆菌感染 (NTM)",
+      "aliases": [
+        "非结核分枝杆菌感染",
+        "非结核分枝杆菌病"
+      ],
+      "confidence": "high",
+      "reason": "同一种病原体感染的不同表述习惯"
+    },
+    {
+      "canonical_name": "HIV合并结核分枝杆菌感染",
+      "aliases": [
+        "HIV感染/AIDS合并结核分枝杆菌感染",
+        "HIV/AIDS合并结核分枝杆菌感染",
+        "HIV感染合并结核分枝杆菌感染"
+      ],
+      "confidence": "high",
+      "reason": "同一种共感染状态（双重感染）的细微字面变体"
+    },
+    {
+      "canonical_name": "潜伏性结核感染 (LTBI)",
+      "aliases": [
+        "潜伏性结核感染",
+        "潜伏结核感染"
+      ],
+      "confidence": "high",
+      "reason": "有无“性”字的中文表述差异"
+    },
+    {
+      "canonical_name": "艾滋病相关性瘙痒",
+      "aliases": [
+        "HIV/AIDS相关性瘙痒",
+        "HIV相关性瘙痒",
+        "艾滋病皮肤瘙痒"
+      ],
+      "confidence": "high",
+      "reason": "同一种HIV/AIDS相关皮肤并发症的不同命名方式"
+    },
+    {
+      "canonical_name": "免疫功能重建不全 (INR)",
+      "aliases": [
+        "艾滋病免疫功能重建不全",
+        "免疫功能重建不全（INR）"
+      ],
+      "confidence": "high",
+      "reason": "特定于HIV治疗背景下同一种临床状态的中文及包含缩写的表述"
+    },
+    {
+      "canonical_name": "血脂异常",
+      "aliases": [
+        "高脂血症",
+        "血脂紊乱"
+      ],
+      "confidence": "medium",
+      "reason": "临床上常作为同义词交替使用的代谢异常诊断状态"
+    }
+  ]
+}

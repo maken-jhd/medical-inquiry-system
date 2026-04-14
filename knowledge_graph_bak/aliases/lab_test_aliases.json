@@ -1,0 +1,284 @@
+{
+  "merge_groups": [
+    {
+      "canonical_name": "CD4+ T淋巴细胞计数",
+      "aliases": [
+        "CD4+ T 淋巴细胞计数",
+        "CD4+ T淋巴细胞计数",
+        "CD4细胞计数",
+        "CD4 细胞计数",
+        "CD4+T淋巴细胞计数",
+        "CD4计数"
+      ],
+      "confidence": "high",
+      "reason": "同一免疫学检测项目的不同空格、缩写及省略表述"
+    },
+    {
+      "canonical_name": "HIV RNA病毒载量检测",
+      "aliases": [
+        "HIV RNA",
+        "HIV病毒载量",
+        "HIV RNA检测",
+        "HIV RNA病毒载量",
+        "HIV RNA 水平",
+        "HIV 病毒载量",
+        "HIV病毒载量检测",
+        "HIV-1 核酸定量检测"
+      ],
+      "confidence": "high",
+      "reason": "指代同一种用于反映HIV病毒复制活跃程度的定量检测"
+    },
+    {
+      "canonical_name": "HIV核酸检测 (NAT)",
+      "aliases": [
+        "HIV核酸检测",
+        "HIV 核酸检测",
+        "HIV核酸检测（NAT）"
+      ],
+      "confidence": "high",
+      "reason": "同一类分子生物学检测的中英文缩写变体"
+    },
+    {
+      "canonical_name": "HIV抗原抗体联合检测",
+      "aliases": [
+        "HIV 抗原/抗体联合检测",
+        "HIV抗原抗体联合检测"
+      ],
+      "confidence": "high",
+      "reason": "同一种第四代HIV筛查检测的不同标点符号表述"
+    },
+    {
+      "canonical_name": "估算肾小球滤过率 (eGFR)",
+      "aliases": [
+        "估算肾小球滤过率 (eGFR)",
+        "eGFR",
+        "估算肾小球滤过率",
+        "估算肾小球滤过率（eGFR）"
+      ],
+      "confidence": "high",
+      "reason": "同一肾功能评估指标的中英文缩写与全称"
+    },
+    {
+      "canonical_name": "肌酐清除率 (CrCl)",
+      "aliases": [
+        "估计肌酐清除率 (eCrCl)",
+        "肌酐清除率",
+        "肌酐清除率检测"
+      ],
+      "confidence": "high",
+      "reason": "同一肾功能评估指标及不同测试表述"
+    },
+    {
+      "canonical_name": "(1,3)-β-D-葡聚糖检测 (G试验)",
+      "aliases": [
+        "(1,3)-β-D-葡聚糖检测",
+        "(1,3)-β-D-葡聚糖检测（G试验）",
+        "1,3-β-D-葡聚糖检测(G试验)",
+        "G试验（1-3-β-D葡聚糖）",
+        "血清 1,3-β-D 葡聚糖"
+      ],
+      "confidence": "high",
+      "reason": "同一真菌感染标志物（G试验）的不同生化命名、括号及连字符用法差异"
+    },
+    {
+      "canonical_name": "半乳甘露聚糖检测 (GM试验)",
+      "aliases": [
+        "GM试验（半乳甘露聚糖）",
+        "半乳糖甘露聚糖检测(GM试验)",
+        "血清 GM 试验"
+      ],
+      "confidence": "high",
+      "reason": "同一真菌（多为曲霉菌）感染标志物检测的中英文及医学缩写变体"
+    },
+    {
+      "canonical_name": "γ干扰素释放试验 (IGRA)",
+      "aliases": [
+        "IGRA",
+        "IGRA检测",
+        "γ干扰素释放试验",
+        "干扰素-γ释放试验"
+      ],
+      "confidence": "high",
+      "reason": "同一结核潜伏感染检测项目（IGRA）的中英文及缩写"
+    },
+    {
+      "canonical_name": "结核菌素皮肤试验 (TST)",
+      "aliases": [
+        "结核菌素皮肤试验",
+        "TST"
+      ],
+      "confidence": "high",
+      "reason": "同一结核潜伏感染检测项目的中英文及缩写"
+    },
+    {
+      "canonical_name": "Xpert MTB/RIF",
+      "aliases": [
+        "Xpert MTB/RIF",
+        "GeneXpert MTB/RIF"
+      ],
+      "confidence": "high",
+      "reason": "同一结核分枝杆菌及利福平耐药快速分子诊断测试的厂商及商品名变体"
+    },
+    {
+      "canonical_name": "胸部CT检查",
+      "aliases": [
+        "胸部CT",
+        "胸部CT检查",
+        "肺部CT检查"
+      ],
+      "confidence": "high",
+      "reason": "同一部位影像学检查的不同习惯用语"
+    },
+    {
+      "canonical_name": "胸部X线检查",
+      "aliases": [
+        "胸部X线检查",
+        "胸部X线"
+      ],
+      "confidence": "high",
+      "reason": "同一影像学检查项目的完整称呼与省略"
+    },
+    {
+      "canonical_name": "隐球菌抗原检测 (CrAg)",
+      "aliases": [
+        "隐球菌抗原检测",
+        "隐球菌抗原（CrAg）筛查",
+        "隐球菌荚膜抗原检测"
+      ],
+      "confidence": "high",
+      "reason": "同一血清学/脑脊液诊断检测及目标抗原不同细致程度的表述"
+    },
+    {
+      "canonical_name": "脑脊液墨汁染色",
+      "aliases": [
+        "脑脊液墨汁染色",
+        "墨汁染色"
+      ],
+      "confidence": "medium",
+      "reason": "墨汁染色主要用于脑脊液隐球菌检测，存在部位省略"
+    },
+    {
+      "canonical_name": "丙氨酸转氨酶 (ALT)",
+      "aliases": [
+        "ALT",
+        "丙氨酸转氨酶"
+      ],
+      "confidence": "high",
+      "reason": "同一肝功能生化指标的中英文缩写"
+    },
+    {
+      "canonical_name": "肝功能检测",
+      "aliases": [
+        "肝功能",
+        "肝功能指标",
+        "肝功能检测"
+      ],
+      "confidence": "high",
+      "reason": "临床生化检查组合包的不同表述"
+    },
+    {
+      "canonical_name": "乳酸脱氢酶 (LDH)",
+      "aliases": [
+        "乳酸脱氢酶",
+        "血乳酸脱氢酶",
+        "血乳酸脱氢酶 (LDH)",
+        "血清乳酸脱氢酶"
+      ],
+      "confidence": "high",
+      "reason": "同一酶学检验项目的全称、标本来源前缀及英文缩写"
+    },
+    {
+      "canonical_name": "CMV DNA检测",
+      "aliases": [
+        "CMV DNA PCR检测",
+        "CMV DNA检测"
+      ],
+      "confidence": "high",
+      "reason": "巨细胞病毒核酸检测的方法学（PCR）省略或包含"
+    },
+    {
+      "canonical_name": "弓形虫IgG抗体检测",
+      "aliases": [
+        "弓形虫IgG抗体",
+        "弓形虫IgG抗体检测",
+        "抗弓形虫IgG抗体"
+      ],
+      "confidence": "high",
+      "reason": "同一特异性抗原检测的项目名与指标名变体"
+    },
+    {
+      "canonical_name": "快速血浆反应素试验 (RPR)",
+      "aliases": [
+        "RPR检测",
+        "快速血浆反应素试验 (RPR)"
+      ],
+      "confidence": "high",
+      "reason": "同一梅毒非特异性抗体检测的中英缩写变体"
+    },
+    {
+      "canonical_name": "梅毒螺旋体颗粒凝集试验 (TPPA)",
+      "aliases": [
+        "TPPA检测",
+        "梅毒螺旋体颗粒凝集试验 (TPPA)"
+      ],
+      "confidence": "high",
+      "reason": "同一梅毒特异性抗体检测的中英缩写变体"
+    },
+    {
+      "canonical_name": "乙型肝炎表面抗原 (HBsAg)",
+      "aliases": [
+        "HBsAg检测",
+        "乙型肝炎表面抗原 (HBsAg)"
+      ],
+      "confidence": "high",
+      "reason": "同一乙肝病毒血清学标志物的中英文缩写变体"
+    },
+    {
+      "canonical_name": "宫颈细胞学检查 (Pap涂片)",
+      "aliases": [
+        "Pap涂片",
+        "宫颈细胞学检查（Pap涂片）"
+      ],
+      "confidence": "high",
+      "reason": "同一项筛查检测的医学名与英文简称"
+    },
+    {
+      "canonical_name": "双能X线吸收法 (DEXA)",
+      "aliases": [
+        "双能X射线吸收测定法",
+        "双能X线吸收法（DEXA）"
+      ],
+      "confidence": "high",
+      "reason": "同一骨密度测定技术的不同中文翻译变体与英文缩写"
+    },
+    {
+      "canonical_name": "抗酸染色涂片镜检",
+      "aliases": [
+        "抗酸染色涂片",
+        "抗酸杆菌涂片检查",
+        "抗酸染色涂片镜检",
+        "痰抗酸染色涂片镜检"
+      ],
+      "confidence": "high",
+      "reason": "同一经典的分枝杆菌染色镜检技术及标本来源省略变体"
+    },
+    {
+      "canonical_name": "低密度脂蛋白胆固醇 (LDL-C)",
+      "aliases": [
+        "低密度脂蛋白胆固醇",
+        "低密度脂蛋白胆固醇 (LDL-C)"
+      ],
+      "confidence": "high",
+      "reason": "同一血脂检测项目的中英文缩写变体"
+    },
+    {
+      "canonical_name": "甘油三酯 (TG)",
+      "aliases": [
+        "甘油三酯",
+        "甘油三酯 (TG)"
+      ],
+      "confidence": "high",
+      "reason": "同一血脂检测项目的中英文缩写变体"
+    }
+  ]
+}

@@ -8,6 +8,7 @@
 - 下一问选择与 repair action
 - 搜索摘要
 - 复核器与安全接受闸门
+- 历史实验输出复盘
 
 前端采用 `Streamlit + Python`，不引入 React / Vue 等前后端分离方案。
 
@@ -79,7 +80,7 @@ brain.service.build_default_brain_from_env()
 ConsultationBrain.process_turn(...)
 ```
 
-需要环境变量：
+实时模式最终会把配置映射到后端需要的环境变量。推荐使用 `configs/frontend.yaml` 与可选的 `configs/frontend.local.yaml`，等价字段如下：
 
 ```bash
 export NEO4J_URI="bolt://localhost:7687"
@@ -154,12 +155,46 @@ conda run -n GraduationDesign streamlit run frontend/app.py --browser.gatherUsag
 
 页面启动后，实时模式会自动读取 `configs/frontend.yaml` 与可选的 `configs/frontend.local.yaml`。
 
+## 模式 C：实验复盘模式
+
+实验复盘模式会直接扫描：
+
+```text
+test_outputs/simulator_replay/
+```
+
+它适合在跑完 focused replay、acceptance sweep 或 ablation 后，回到前端中逐病例复盘。该模式不重新调用 Neo4j 或 LLM，只读取本地历史输出文件。
+
+当前可识别的文件包括：
+
+- `focused_repair_summary.jsonl`：优先使用，包含逐病例、逐轮 repair / verifier / guarded gate 摘要
+- `replay_results.jsonl`：普通 replay 输出，包含自动病人问答和 final_report
+- `ablation_summary.jsonl`：病例级 ablation 摘要
+- `focused_metrics.json` / `ablation_metrics.json` / `benchmark_summary.json`：实验指标汇总
+- `profile_summary.tsv`：acceptance profile 对比汇总
+- `status.json` / `run.log`：运行状态和日志尾部
+- `a4_evidence_audit.jsonl` / `guarded_gate_audit.jsonl`：A4 证据记录与安全闸门审计
+
+页面中会新增“实验复盘模式”：
+
+- 左侧仍按轮次展示问诊对话或实验摘要
+- 右侧继续复用 A1 / A2 / A3 / A4、搜索摘要和安全机制卡片
+- 顶部额外展示实验目录、识别到的文件、病例数、正确接受、错误接受、正确但被拒停、repair 轮数、语义重复轮数和闸门拒绝次数
+- 可以通过“刷新实验索引”按钮重新扫描新生成的输出目录
+
+说明：
+
+- 如果一个目录只有 `profile_summary.tsv`、`status.json` 或 `run.log`，页面会展示目录汇总，但不会出现逐病例轮次
+- 如果需要完整逐轮复盘，优先选择包含 `focused_repair_summary.jsonl` 的子目录，例如 `.../turns_5__verifier_guarded_lenient__stop_baseline/baseline`
+- 新跑出的实验目录无需手动登记，刷新索引后会自动进入下拉列表
+
 ## 文件说明
 
 ```text
 frontend/
   app.py                    Streamlit 主页面
   ui_adapter.py             将后端 process_turn / replay JSON 转为中文 UI 视图模型
+  output_browser.py         扫描 test_outputs/simulator_replay 并适配实验复盘数据
   demo_cases.py             内置 demo registry
   demo_replays/             离线演示 JSON
   README.md                 启动与模式说明

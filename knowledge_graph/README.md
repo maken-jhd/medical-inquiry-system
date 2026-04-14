@@ -1,386 +1,347 @@
-# Knowledge Graph Pipeline
+# Knowledge Graph Pipeline（搜索专用版）
 
-本目录保存本项目第一阶段“医学知识工程与底层图谱搭建”的主要脚本、规则文件和运行入口。它负责把 `HIV/` 目录下的非结构化指南、专家共识和专题资料，逐步加工为可导入 Neo4j 的结构化知识图谱。
+本目录是当前激活的知识图谱抽取端。它已经从旧版“全量医学指南知识图谱”收缩为“问诊搜索专用图谱”，目标不是完整存档指南知识，而是直接服务第二阶段问诊搜索树。
 
-## 模块定位
+旧版全量指南图谱已迁移到 [knowledge_graph_bak](/Users/loki/Workspace/GraduationDesign/knowledge_graph_bak)，仅作为历史备份和对照资料，不再作为当前推荐抽取链路。
 
-这一阶段的目标不是直接做问诊前端，而是先把 HIV/AIDS 场景下的医学资料沉淀为一个尽可能稳定、可追溯、可人工校正的知识底座。
+## 当前定位
 
-当前采用的总体路线是：
+当前图谱只围绕问诊主链路建模：
 
-- 原始资料清理
-- 大模型抽取 `nodes / edges`
-- 定向关系修补
-- 人工维护 `aliases`
-- 规则合并节点与边
-- 导入 Neo4j
+- `A1`：患者原话线索抽取后，需要把症状、风险、检查等线索链接到图谱节点
+- `A2`：根据症状、风险因素、影像、实验室或病原线索生成候选诊断
+- `A3`：根据候选诊断反向检索关键待验证证据，并构造下一问
+- `A4`：根据患者回答更新证据状态、假设分数和后续路由
 
-这条路线强调：
+因此当前抽取器优先支持：
 
-- 大模型参与抽取和局部修补
-- 关键合并决策由人工控制
-- 中间产物全部保留，便于回溯和重跑
+- `R1`：症状 / 风险 / 检查 / 影像 / 病原线索 -> 候选疾病
+- `R2`：候选疾病 -> 关键待验证证据
+- 下一问构造：把临床证据转换成适合问诊的问题
+- 安全接受闸门：为 `imaging`、`oxygenation`、`immune_status`、`pathogen`、`pcp_specific` 等 evidence family 提供更稳定的图谱来源
+- 证据获取方式预留：为证据节点保留 `acquisition_mode` 和 `evidence_cost`，方便后续区分“可直接询问”和“依赖检查”的下一问
 
-## 当前状态
+当前不再抽取或维护：
 
-当前这一阶段已经可以独立跑通，主流程已经收敛为：
+- 用药方案
+- 治疗推荐
+- 预防策略
+- 指南条目编号
+- 文档证据链
+- recommendation / assertion 级别的存档图谱
 
-1. [clean_markdown.py](/Users/loki/Workspace/GraduationDesign/knowledge_graph/clean_markdown.py)
-2. [pipeline.py](/Users/loki/Workspace/GraduationDesign/knowledge_graph/pipeline.py)
-3. [repair_relations_with_llm.py](/Users/loki/Workspace/GraduationDesign/knowledge_graph/repair_relations_with_llm.py)
-4. [collect_normalization_candidates.py](/Users/loki/Workspace/GraduationDesign/knowledge_graph/collect_normalization_candidates.py)
-5. `aliases/*.json`
-6. [merge_nodes_by_aliases.py](/Users/loki/Workspace/GraduationDesign/knowledge_graph/merge_nodes_by_aliases.py)
-7. [import_merged_graph.py](/Users/loki/Workspace/GraduationDesign/knowledge_graph/import_merged_graph.py)
+## 当前推荐主流程
 
-当前推荐策略是：
+当前推荐把 [pipeline.py](/Users/loki/Workspace/GraduationDesign/knowledge_graph/pipeline.py) 作为搜索专用抽取主入口：
 
-- 抽取阶段允许大模型输出结构化节点和边
-- 修补阶段默认“只补边，不删业务节点”
-- 同义节点合并以人工维护的 `aliases/` 为准
-- 最终图谱以合并后的 `merged_graph_by_aliases.json` 为准入库
+1. 清理原始 Markdown
+   - 入口：[run_clean_markdown.sh](/Users/loki/Workspace/GraduationDesign/knowledge_graph/run_clean_markdown.sh)
+   - 脚本：[clean_markdown.py](/Users/loki/Workspace/GraduationDesign/knowledge_graph/clean_markdown.py)
 
-为了便于后续论文撰写、实验复盘和版本追踪，本目录还单独整理了一份第一阶段建设历程文档：
+2. 抽取搜索专用 `nodes / edges`
+   - 入口：[run_pipeline.sh](/Users/loki/Workspace/GraduationDesign/knowledge_graph/run_pipeline.sh)
+   - 脚本：[pipeline.py](/Users/loki/Workspace/GraduationDesign/knowledge_graph/pipeline.py)
 
-- [build_retrospective.md](/Users/loki/Workspace/GraduationDesign/knowledge_graph/build_retrospective.md)
+3. 提取待统一名称
+   - 入口：[run_collect_normalization_candidates.sh](/Users/loki/Workspace/GraduationDesign/knowledge_graph/run_collect_normalization_candidates.sh)
+   - 脚本：[collect_normalization_candidates.py](/Users/loki/Workspace/GraduationDesign/knowledge_graph/collect_normalization_candidates.py)
 
-这份文档重点记录：
+4. 人工维护 `aliases/`
+   - 目录：[aliases](/Users/loki/Workspace/GraduationDesign/knowledge_graph/aliases)
 
-- 最初方案为何效果不理想
-- 为什么要加入前置处理、后置 alias 合并与 repair
-- 这些迭代各自解决了什么问题
-- 当前图谱的最终验收结论
-- 后续还需要继续清理的重点关系类型
+5. 按 alias 合并图谱
+   - 入口：[run_merge_nodes_by_aliases.sh](/Users/loki/Workspace/GraduationDesign/knowledge_graph/run_merge_nodes_by_aliases.sh)
+   - 脚本：[merge_nodes_by_aliases.py](/Users/loki/Workspace/GraduationDesign/knowledge_graph/merge_nodes_by_aliases.py)
 
-## 当前质量判断
+6. 导入 Neo4j
+   - 入口：[run_import_merged_graph.sh](/Users/loki/Workspace/GraduationDesign/knowledge_graph/run_import_merged_graph.sh)
+   - 脚本：[import_merged_graph.py](/Users/loki/Workspace/GraduationDesign/knowledge_graph/import_merged_graph.py)
 
-基于当前版本的入库验收结果，可以对第一阶段图谱做如下判断：
+说明：
 
-- 已达到“可入库、可浏览、可继续开发”的状态
-- 已适合作为第二阶段问诊原型的知识底座
-- 基础字段质量较好，关键结构字段已较稳定
-- alias 合并效果较好，图谱冗余已明显下降
-- 但仍有少量孤立节点和少量语义方向可疑的关系
+- [repair_relations_with_llm.py](/Users/loki/Workspace/GraduationDesign/knowledge_graph/repair_relations_with_llm.py) 是可选的搜索专用孤立节点关系修补器，当前不作为默认必要步骤。
+- 如果 Neo4j 校验或合并报告显示孤立节点偏高，可通过 [run_repair_relations_with_llm.sh](/Users/loki/Workspace/GraduationDesign/knowledge_graph/run_repair_relations_with_llm.sh) 对最近一次搜索图谱输出进行补边、重新提取候选名称并重新 alias 合并。
+- 当前 repair 只允许补充搜索本体关系，不会生成旧的治疗、推荐或文档证据链关系。
+- [scripts/neo4j_init.cypher](/Users/loki/Workspace/GraduationDesign/knowledge_graph/scripts/neo4j_init.cypher) 可用于初始化 Neo4j 约束和索引；历史遗留索引不代表当前抽取器会继续生成旧标签。
 
-当前如果继续提升图谱质量，最值得优先盯住的关系类型包括：
+## 当前本体
 
+### 节点标签
+
+当前抽取器只保留问诊搜索树会消费的标签：
+
+- `Disease`
+- `DiseasePhase`
+- `OpportunisticInfection`
+- `Comorbidity`
+- `SyndromeOrComplication`
+- `Tumor`
+- `Pathogen`
+- `Symptom`
+- `Sign`
+- `ClinicalAttribute`
+- `LabTest`
+- `LabFinding`
+- `ImagingFinding`
+- `RiskFactor`
+- `RiskBehavior`
+- `PopulationGroup`
+
+### 节点级证据获取元数据
+
+当前抽取端为证据节点预留两个可选字段：
+
+- `acquisition_mode`：证据通常如何获得
+- `evidence_cost`：证据获取的相对成本
+
+`acquisition_mode` 当前允许：
+
+- `direct_ask`：患者可直接回答，例如发热、干咳、气促、盗汗、体重下降、高危性行为
+- `history_known`：通常来自既往史或已知背景，例如 HIV 感染者、免疫抑制人群、孕产妇
+- `needs_lab_test`：需要实验室检查，例如 CD4、HIV RNA、LDH、β-D 葡聚糖
+- `needs_imaging`：需要影像检查，例如胸部 CT 磨玻璃影、空洞、粟粒样结节
+- `needs_pathogen_test`：需要病原学检测，例如 BAL PCR、培养、抗原、核酸检测
+- `needs_clinician_assessment`：需要医生查体或临床判断，例如听诊异常、体格检查发现
+
+`evidence_cost` 当前允许：
+
+- `low`
+- `medium`
+- `high`
+
+默认倾向：
+
+- `Symptom`、`Sign`、`RiskBehavior`、`RiskFactor`：通常为 `direct_ask / low`
+- `PopulationGroup`：通常为 `history_known / low`
+- `LabFinding`、大部分 `LabTest`：通常为 `needs_lab_test / high`
+- `ImagingFinding`：通常为 `needs_imaging / high`
+- `Pathogen` 或病原学阳性证据：通常为 `needs_pathogen_test / high`
+- `ClinicalAttribute`：根据名称启发式判断，普通问诊细节偏 `direct_ask / low`，检查量化属性偏高成本检查型
+
+这两个字段目前只作为抽取端和数据结构层面的预留，当前搜索算法不会直接消费它们。
+
+### 关系类型
+
+当前抽取器只保留或新增以下关系：
+
+- `MANIFESTS_AS`：疾病 -> 症状 / 体征 / 临床表现
+- `HAS_LAB_FINDING`：疾病 -> 实验室发现
+- `HAS_IMAGING_FINDING`：疾病 -> 影像学发现
+- `HAS_PATHOGEN`：疾病 -> 病原体或病原线索
+- `DIAGNOSED_BY`：疾病 -> 关键检查 / 诊断依据
+- `REQUIRES_DETAIL`：疾病或症状 -> 需要继续追问的临床细节
+- `RISK_FACTOR_FOR`：风险因素 / 风险行为 -> 疾病
+- `COMPLICATED_BY`：疾病 -> 并发症 / 综合征 / 肿瘤
+- `APPLIES_TO`：疾病或证据 -> 适用人群
+
+## 与问诊搜索树的对齐
+
+当前图谱抽取端和第二阶段检索语义的对应关系如下：
+
+- `Symptom`、`Sign`、`ClinicalAttribute` 支持患者主诉、症状细节和 A3 追问
+- `RiskFactor`、`RiskBehavior`、`PopulationGroup` 支持 HIV 风险史、免疫抑制背景和人群特征
+- `LabTest`、`LabFinding` 支持 CD4、PaO2、β-D 葡聚糖、PCR 等实验室证据
+- `ImagingFinding` 支持胸部 CT、磨玻璃影、空洞、粟粒样结节等影像证据
+- `Pathogen` 支持 PCP、结核、真菌等病原学线索
+- `Disease`、`OpportunisticInfection`、`Comorbidity`、`SyndromeOrComplication`、`Tumor` 支持候选诊断和鉴别诊断
+- `REQUIRES_DETAIL` 用于生成“还需要问什么”的细节槽位
+- `HAS_IMAGING_FINDING`、`HAS_PATHOGEN` 用于减少前端和 action builder 对关键词猜测的依赖
+
+## 已移除的旧版本体
+
+以下标签属于旧版全量指南图谱，当前搜索专用抽取端不再生成：
+
+- `GuidelineDocument`
+- `GuidelineSection`
+- `EvidenceSpan`
+- `Assertion`
+- `Recommendation`
+- `Medication`
+- `DrugClass`
+- `TreatmentRegimen`
+- `PreventionStrategy`
+- `TransmissionRoute`
+- `ManagementAction`
+- `ExposureScenario`
+
+以下关系属于旧版治疗、推荐或证据链建模，当前不再使用：
+
+- `RECOMMENDS`
+- `TREATED_WITH`
+- `CONSISTS_OF`
 - `BELONGS_TO_CLASS`
-- `COMPLICATED_BY`
-- `CAUSED_BY`
-- `APPLIES_TO`
+- `PREVENTED_BY`
+- `MONITORED_BY`
+- `SCREENED_BY`
+- `TRANSMITTED_VIA`
+- `INTERACTS_WITH`
+- `INITIATED_AFTER`
+- `CONTRAINDICATED_IN`
+- `NOT_RECOMMENDED_FOR`
+- `HAS_SECTION`
+- `HAS_EVIDENCE`
+- `SUBJECT`
+- `OBJECT`
+- `SUPPORTED_BY`
 
-## 目录结构
+如果新的抽取结果中再次大量出现这些旧标签或旧关系，通常说明跑错了旧链路、旧 prompt 或 [knowledge_graph_bak](/Users/loki/Workspace/GraduationDesign/knowledge_graph_bak) 里的历史脚本。
 
-当前 `knowledge_graph/` 目录如下：
+## 主要文件
 
-```text
-knowledge_graph/
-├── aliases/
-├── build_retrospective.md
-├── scripts/
-│   └── neo4j_init.cypher
-├── clean_markdown.py
-├── pipeline.py
-├── repair_relations_with_llm.py
-├── collect_normalization_candidates.py
-├── merge_nodes_by_aliases.py
-├── import_merged_graph.py
-├── run_clean_markdown.sh
-├── run_pipeline.sh
-├── run_repair_relations_with_llm.sh
-├── run_collect_normalization_candidates.sh
-├── run_merge_nodes_by_aliases.sh
-├── run_import_merged_graph.sh
-└── README.md
-```
+- [clean_markdown.py](/Users/loki/Workspace/GraduationDesign/knowledge_graph/clean_markdown.py)：清理原始 Markdown，统一标题、空白、单位、符号和复杂表格表达
+- [pipeline.py](/Users/loki/Workspace/GraduationDesign/knowledge_graph/pipeline.py)：当前搜索专用知识图谱抽取器，包含 schema constitution、抽取、校验、LabFinding repair、ImagingFinding / RiskBehavior 支持和 dangling edge 修复
+- [collect_normalization_candidates.py](/Users/loki/Workspace/GraduationDesign/knowledge_graph/collect_normalization_candidates.py)：提取 `label -> name[]` 候选，供人工维护别名
+- [merge_nodes_by_aliases.py](/Users/loki/Workspace/GraduationDesign/knowledge_graph/merge_nodes_by_aliases.py)：按 `aliases/` 规则合并节点并重写边
+- [import_merged_graph.py](/Users/loki/Workspace/GraduationDesign/knowledge_graph/import_merged_graph.py)：将合并后的图谱导入 Neo4j
+- [build_retrospective.md](/Users/loki/Workspace/GraduationDesign/knowledge_graph/build_retrospective.md)：第一阶段早期建设历程和旧链路复盘，阅读时需要注意其中部分内容对应旧版全量图谱
 
-其中：
+## 输入与输出
 
-- [aliases](/Users/loki/Workspace/GraduationDesign/knowledge_graph/aliases) 保存按标签维护的人工别名合并规则
-- [build_retrospective.md](/Users/loki/Workspace/GraduationDesign/knowledge_graph/build_retrospective.md) 记录第一阶段知识图谱建设历程、踩坑、修复策略与最终验收结果
-- [scripts/neo4j_init.cypher](/Users/loki/Workspace/GraduationDesign/knowledge_graph/scripts/neo4j_init.cypher) 用于初始化 Neo4j 约束和索引
-- 各 `run_*.sh` 文件是第一阶段的标准运行入口
+主要输入：
 
-## 上下游目录关系
+- 原始资料：[HIV](/Users/loki/Workspace/GraduationDesign/HIV)
+- 清理后资料：[HIV_cleaned](/Users/loki/Workspace/GraduationDesign/HIV_cleaned)
 
-虽然脚本集中放在本目录，但它们会读写项目根目录下的资料和产物。
+主要输出：
 
-主要相关目录包括：
+- 原始抽取结果：[output_graph_test.jsonl](/Users/loki/Workspace/GraduationDesign/output_graph_test.jsonl)
+- 抽取错误日志：[output_graph_test_errors.jsonl](/Users/loki/Workspace/GraduationDesign/output_graph_test_errors.jsonl)
+- 待统一名称目录：[normalization_candidates](/Users/loki/Workspace/GraduationDesign/test_outputs/normalization_candidates)
+- alias 合并输出目录：[alias_merge](/Users/loki/Workspace/GraduationDesign/test_outputs/alias_merge)
+- 推荐入库源：[merged_graph_by_aliases.json](/Users/loki/Workspace/GraduationDesign/test_outputs/alias_merge/merged_graph_by_aliases.json)
 
-- 原始资料目录：
-  - [HIV](/Users/loki/Workspace/GraduationDesign/HIV)
-- 清理后资料目录：
-  - [HIV_cleaned](/Users/loki/Workspace/GraduationDesign/HIV_cleaned)
-- 小范围测试输入：
-  - [test](/Users/loki/Workspace/GraduationDesign/test)
-- 中间产物目录：
-  - [test_outputs](/Users/loki/Workspace/GraduationDesign/test_outputs)
+## 运行方式
 
-目前 `HIV/` 资料的组织方式主要是：
-
-- `HIV AIDS 本身`
-- `HIV 合并机会性感染`
-- `HIV阳性的孕产妇`
-- 各类单独专题文件，例如慢性肾病、肥胖、骨质疏松、高血脂等
-
-这意味着该阶段处理的不只是单一指南，而是一个逐渐扩展的 HIV 领域资料库。
-
-## 当前工程环境
-
-推荐环境：
-
-- conda 环境：`GraduationDesign`
-- Python：`3.10.x`
-
-已用到的主要依赖：
-
-- `openai`
-- `neo4j`
-- `langchain`
-- `langchain_community`
-
-推荐先执行：
+推荐先进入项目环境：
 
 ```bash
 conda activate GraduationDesign
 ```
 
-## 当前已实现脚本与功能
+### 一键构建搜索专用图谱
 
-### 1. Neo4j 初始化脚本
+当前最推荐的入口是：
 
-文件：
+```bash
+./knowledge_graph/run_search_kg_pipeline.sh
+```
 
-- [neo4j_init.cypher](/Users/loki/Workspace/GraduationDesign/knowledge_graph/scripts/neo4j_init.cypher)
+这个脚本会按顺序执行：
 
-功能：
+1. 搜索专用图谱抽取
+2. 候选名称提取
+3. alias 合并
 
-- 创建核心标签唯一约束
-- 创建高频查询索引
-- 覆盖 `Disease`、`Symptom`、`LabFinding`、`Recommendation`、`Assertion` 等核心标签
+默认不会运行可选的 `repair_relations_with_llm.py` 孤立节点关系修补，也不会自动导入 Neo4j。
 
-### 2. 原始文档清理脚本
+默认输出目录为：
 
-文件：
+```text
+test_outputs/search_kg/search_kg_<timestamp>/
+```
 
-- [clean_markdown.py](/Users/loki/Workspace/GraduationDesign/knowledge_graph/clean_markdown.py)
+并会写入 latest 指针：
 
-功能：
+```text
+test_outputs/search_kg/latest_output_dir.txt
+```
 
-- 遍历 `HIV/` 或指定目录下的 Markdown 文件
-- 统一换行、去除 BOM 和零宽字符
-- 统一标题格式，支持到 `#####`
-- 去除重复标题、折叠多余空行
-- 统一术语写法，例如 `CD4+ T`、`CD4⁺T`、`CD4 T`
-- 统一单位和符号写法，例如 `个/μL`、`cells/μL`、`~`、`～`、`≥`
-- 识别复杂 Markdown 表格
-- 调用大模型将复杂表格转写为更适合抽取的正文
-- 可选对表格转写结果做二次校验
-- 支持并发处理多个文件
-- 生成清理报告与表格首轮草稿文件
+主要输出包括：
 
-### 3. 图谱抽取脚本
+- `output_graph.jsonl`
+- `output_graph_errors.jsonl`
+- `normalization_candidates/node_names_by_label.json`
+- `alias_merge/merged_graph_by_aliases.json`
+- `alias_merge/merged_graph_by_aliases_report.json`
+- `run.log`
+- `status.json`
 
-文件：
+如果确认合并图谱无误并希望导入 Neo4j，可以运行：
 
-- [pipeline.py](/Users/loki/Workspace/GraduationDesign/knowledge_graph/pipeline.py)
+```bash
+IMPORT_TO_NEO4J=true ./knowledge_graph/run_search_kg_pipeline.sh
+```
 
-功能：
+也可以只导入最近一次构建结果：
 
-- 按标题层级切分 Markdown 文本
-- 保持医学上下文完整，避免过碎切片
-- 调用大模型输出 `nodes / edges`
-- 对关键节点做结构校验
-- 对 `LabFinding`、`Recommendation` 等节点做本地修复
-- 将结果按 JSONL 逐块追加写入
-- 对失败块生成单独错误日志
-- 支持按错误日志定向重试失败块
+```bash
+./knowledge_graph/run_import_merged_graph.sh
+```
 
-### 4. 关系修补脚本
+如果需要先清空 Neo4j 旧图谱，再应用搜索专用 schema、导入新图谱并生成结构校验报告，使用：
 
-文件：
+```bash
+./knowledge_graph/run_reload_search_kg_neo4j.sh
+```
 
-- [repair_relations_with_llm.py](/Users/loki/Workspace/GraduationDesign/knowledge_graph/repair_relations_with_llm.py)
+该脚本会执行：
 
-功能：
+1. 清空当前 Neo4j 数据库中的节点和关系
+2. 应用 [neo4j_init.cypher](/Users/loki/Workspace/GraduationDesign/knowledge_graph/scripts/neo4j_init.cypher) 中的搜索专用约束和索引
+3. 导入 `${SEARCH_KG_OUTPUT_ROOT}/alias_merge/merged_graph_by_aliases.json`
+4. 输出 `${SEARCH_KG_OUTPUT_ROOT}/neo4j_validation_report.json`
 
-- 读取原始抽取结果
-- 自动识别孤立节点
-- 自动识别缺少业务出边的 `Recommendation`
-- 仅在单个 chunk 内补边，避免跨 chunk 串联
-- 通过大模型补充关系
-- 本地拦截明显反向或不合理的边
-- 默认不自动删业务节点
-- 支持对失败 chunk 做定向 retry
+如果已经有一轮抽取结果，只是人工整理了该轮目录下的 `aliases/`，可以不重跑 LLM，直接复用最新输出并重新合并：
 
-### 5. 候选名称提取脚本
+```bash
+SKIP_EXTRACTION=true ./knowledge_graph/run_search_kg_pipeline.sh
+```
 
-文件：
+也可以指定某一次输出目录：
 
-- [collect_normalization_candidates.py](/Users/loki/Workspace/GraduationDesign/knowledge_graph/collect_normalization_candidates.py)
+```bash
+SEARCH_KG_OUTPUT_ROOT="/Users/loki/Workspace/GraduationDesign/test_outputs/search_kg/search_kg_20260413_231209" \
+SKIP_EXTRACTION=true \
+./knowledge_graph/run_search_kg_pipeline.sh
+```
 
-功能：
+alias 读取优先级为：
 
-- 读取抽取或修补后的 JSONL
-- 只提取节点 `label` 和 `name`
-- 输出 `label -> name[]` 的唯一名称列表
-- 供后续人工审阅和补充 `aliases/`
+1. 显式设置的 `ALIAS_DIR`
+2. `${SEARCH_KG_OUTPUT_ROOT}/aliases`
+3. [knowledge_graph/aliases](/Users/loki/Workspace/GraduationDesign/knowledge_graph/aliases)
 
-### 6. alias 合并脚本
+因此你在 `test_outputs/search_kg/search_kg_20260413_231209/aliases/` 下人工维护的清单会优先被使用。
 
-文件：
+如需本地密钥或 Neo4j 密码，可新建 `configs/kg_pipeline.local.sh`，例如：
 
-- [merge_nodes_by_aliases.py](/Users/loki/Workspace/GraduationDesign/knowledge_graph/merge_nodes_by_aliases.py)
+```bash
+export DASHSCOPE_API_KEY="你的 key"
+export OPENAI_BASE_URL="https://dashscope.aliyuncs.com/compatible-mode/v1"
+export OPENAI_MODEL="qwen3-max"
+export NEO4J_PASSWORD="你的 Neo4j 密码"
+```
 
-功能：
+如果已经在 `configs/frontend.local.yaml` 中配置了 `llm.api_key`，`run_pipeline.sh` 也会尝试读取它作为 LLM key。
 
-- 读取抽取或修补后的 JSONL
-- 根据 `aliases/` 中人工确认过的规则合并节点
-- 同步重写边的 `source_id` 和 `target_id`
-- 输出统一的合并图谱 JSON
-- 输出合并报告
+### 分步运行
 
-### 7. Neo4j 导入脚本
-
-文件：
-
-- [import_merged_graph.py](/Users/loki/Workspace/GraduationDesign/knowledge_graph/import_merged_graph.py)
-
-功能：
-
-- 读取 `merged_graph_by_aliases.json`
-- 按节点标签和关系类型分批写入 Neo4j
-- 使用 `id` 做幂等 `MERGE`
-- 支持通过环境变量配置 Neo4j 连接参数和批大小
-
-## 运行方式
-
-### 推荐主流程
-
-推荐按下面顺序执行：
+按当前搜索专用链路运行：
 
 ```bash
 ./knowledge_graph/run_clean_markdown.sh
 ./knowledge_graph/run_pipeline.sh
-./knowledge_graph/run_repair_relations_with_llm.sh
 ./knowledge_graph/run_collect_normalization_candidates.sh
 ```
 
-人工补充 `aliases/` 后继续：
+人工补充或检查 `aliases/` 后继续：
 
 ```bash
 ./knowledge_graph/run_merge_nodes_by_aliases.sh
 ./knowledge_graph/run_import_merged_graph.sh
 ```
 
-### 常见说明
-
-- `run_clean_markdown.sh` 会优先处理原始资料并输出到 `HIV_cleaned/`
-- `run_pipeline.sh` 默认优先读取 `HIV_cleaned/`，不存在时回退到 `HIV/`
-- `run_repair_relations_with_llm.sh` 默认“只补边，不删业务节点”
-- `run_collect_normalization_candidates.sh` 建议读取修补后的 JSONL
-- `run_merge_nodes_by_aliases.sh` 建议同样读取修补后的 JSONL
-- `run_import_merged_graph.sh` 建议以最终的 `merged_graph_by_aliases.json` 为准导入
-
-### Retry 说明
-
-抽取阶段支持：
+抽取阶段支持按错误日志重试：
 
 ```bash
 ./knowledge_graph/run_pipeline.sh retry
 ```
 
-关系修补阶段支持：
+## 维护原则
 
-```bash
-./knowledge_graph/run_repair_relations_with_llm.sh retry
-```
-
-关系修补的 `retry` 模式会只重跑上一轮失败的 chunk，并将成功结果自动回填到基线结果里。
-
-## 主要输入与输出
-
-### 输入
-
-- 原始资料：
-  - [HIV](/Users/loki/Workspace/GraduationDesign/HIV)
-- 清理后资料：
-  - [HIV_cleaned](/Users/loki/Workspace/GraduationDesign/HIV_cleaned)
-
-### 核心中间产物
-
-- 原始抽取结果：
-  - [output_graph_test.jsonl](/Users/loki/Workspace/GraduationDesign/output_graph_test.jsonl)
-- 原始抽取错误日志：
-  - [output_graph_test_errors.jsonl](/Users/loki/Workspace/GraduationDesign/output_graph_test_errors.jsonl)
-- 关系修补输出目录：
-  - [relation_repair](/Users/loki/Workspace/GraduationDesign/test_outputs/relation_repair)
-- 待统一名称目录：
-  - [normalization_candidates](/Users/loki/Workspace/GraduationDesign/test_outputs/normalization_candidates)
-- alias 合并输出目录：
-  - [alias_merge](/Users/loki/Workspace/GraduationDesign/test_outputs/alias_merge)
-
-### 推荐最终入库源
-
-- [merged_graph_by_aliases.json](/Users/loki/Workspace/GraduationDesign/test_outputs/alias_merge/merged_graph_by_aliases.json)
-
-## 当前建模约定
-
-当前图谱采用“可查询 + 可解释”的折中建模方式，重点包含：
-
-- 临床事实层：
-  - `Disease`
-  - `DiseasePhase`
-  - `Symptom`
-  - `Sign`
-  - `LabTest`
-  - `LabFinding`
-  - `OpportunisticInfection`
-  - `Comorbidity`
-
-- 干预决策层：
-  - `Medication`
-  - `DrugClass`
-  - `TreatmentRegimen`
-  - `PreventionStrategy`
-  - `ManagementAction`
-  - `Recommendation`
-
-- 证据与解释层：
-  - `GuidelineDocument`
-  - `GuidelineSection`
-  - `EvidenceSpan`
-  - `Assertion`
-
-当前特别约定：
-
-- `Recommendation` 作为独立节点保留
-- `LabFinding` 尽量结构化记录 `operator / value / unit`
-- 对无法稳定数值化的结果，允许保留 `value_text`
-- `REQUIRES_DETAIL` 用于支持问诊追问
-- `CONTRAINDICATED_IN` 与 `NOT_RECOMMENDED_FOR` 用于表达禁忌与限制条件
-- 跨文档同义实体优先通过人工维护 `aliases/` 后再合并
-
-## 当前别名规则策略
-
-目前节点统一不再依赖复杂自动后处理，而是采用人工维护的别名规则文件。
-
-主要特点：
-
-- 每个标签一个 alias 文件
-- 由人工确认哪些名称应归并为同一节点
-- `merge_nodes_by_aliases.py` 严格按这些规则执行
-
-这种策略的优点是：
-
-- 更可控
-- 更适合医学场景下的高风险实体合并
-- 更便于后续专家在环修正
-
-## 后续可继续做的事
-
-- 继续补充 `aliases/` 中高频别名规则
-- 对残余孤立节点做定向质量检查
-- 增加图谱质检脚本，自动筛明显异常边
-- 优化 `merge_nodes_by_aliases.py` 的字段保留与报告能力
-- 进一步细化 Neo4j 导入后的校验流程
+- 优先让图谱服务问诊搜索，而不是追求医学百科式完备。
+- 新增标签和关系前，先确认 `brain/retriever.py`、`brain/action_builder.py` 或安全 gate 是否真的消费它们。
+- 不要把治疗方案、用药推荐、指南证据链重新加回当前 schema。
+- `RiskBehavior`、`ImagingFinding`、`Pathogen`、`ClinicalAttribute` 是当前搜索质量的关键标签，后续应优先保证抽取稳定性。
+- `LabFinding` 仍然要求尽量结构化记录 `test_id`、`operator`、`value`、`value_text`、`unit` 和必要的 `reference_value_text`。
+- 同义实体合并继续以人工维护 `aliases/` 为准，避免医学高风险实体被过度自动合并。

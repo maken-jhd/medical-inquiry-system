@@ -96,7 +96,7 @@ class ActionBuilder:
                             0.0,
                             1.0 - relation_weight * 0.7 - alternative_overlap * 0.2 + recommended_match_score * 0.15,
                         ),
-                        "patient_burden": 0.6 if question_type_hint == "lab" else 0.25,
+                        "patient_burden": 0.55 if question_type_hint in {"lab", "imaging", "pathogen"} else 0.25,
                         "is_red_flag": bool(row.get("is_red_flag", False)),
                         "competing_hypothesis_count": len(alternatives),
                         "alternative_overlap": alternative_overlap,
@@ -144,6 +144,12 @@ class ActionBuilder:
 
         if question_type_hint == "lab":
             return f"我想确认一下，之前有没有做过和“{target_name}”相关的检查，结果是否提示异常？"
+
+        if question_type_hint == "imaging":
+            return f"我想确认一下，胸部影像或 CT 是否提示“{target_name}”？"
+
+        if question_type_hint == "pathogen":
+            return f"我想确认一下，是否有“{target_name}”相关的病原学证据或检测结果？"
 
         if question_type_hint == "risk":
             return f"我需要再核实一下，近期是否存在“{target_name}”相关情况？"

@@ -1,0 +1,106 @@
+{
+  "merge_groups": [
+    {
+      "canonical_name": "人类免疫缺陷病毒 (HIV)",
+      "aliases": [
+        "人类免疫缺陷病毒",
+        "人类免疫缺陷病毒 (HIV)",
+        "人类免疫缺陷病毒(HIV)",
+        "HIV"
+      ],
+      "confidence": "high",
+      "reason": "同一病毒的中英文全称及缩写变体"
+    },
+    {
+      "canonical_name": "结核分枝杆菌 (MTB)",
+      "aliases": [
+        "结核分枝杆菌",
+        "结核分枝杆菌(MTB)"
+      ],
+      "confidence": "high",
+      "reason": "同一病原体的中文全称与包含英文缩写的变体"
+    },
+    {
+      "canonical_name": "非结核分枝杆菌 (NTM)",
+      "aliases": [
+        "非结核分枝杆菌",
+        "非结核分枝杆菌(NTM)"
+      ],
+      "confidence": "high",
+      "reason": "同一类细菌群的中文全称与包含英文缩写的变体"
+    },
+    {
+      "canonical_name": "新型冠状病毒 (SARS-CoV-2)",
+      "aliases": [
+        "新型冠状病毒",
+        "SARS-CoV-2"
+      ],
+      "confidence": "high",
+      "reason": "同一病毒的中文通用名与国际病毒学分类学名"
+    },
+    {
+      "canonical_name": "耶氏肺孢子菌",
+      "aliases": [
+        "肺孢子菌",
+        "耶氏肺孢子菌",
+        "Pneumocystis jiroveci"
+      ],
+      "confidence": "high",
+      "reason": "同一病原体的中英文学名及临床惯用简称（临床上肺孢子菌常指代耶氏肺孢子菌）"
+    },
+    {
+      "canonical_name": "新生隐球菌",
+      "aliases": [
+        "新生隐球菌",
+        "新型隐球菌"
+      ],
+      "confidence": "high",
+      "reason": "同一真菌（Cryptococcus neoformans）的不同中文翻译习惯"
+    },
+    {
+      "canonical_name": "荚膜组织胞浆菌",
+      "aliases": [
+        "荚膜组织胞浆菌",
+        "Histoplasma capsulatum"
+      ],
+      "confidence": "high",
+      "reason": "同一真菌的中英文学名变体"
+    },
+    {
+      "canonical_name": "曲霉",
+      "aliases": [
+        "曲霉",
+        "曲菌"
+      ],
+      "confidence": "high",
+      "reason": "同一属真菌（Aspergillus）的医学全称与惯用俗称"
+    },
+    {
+      "canonical_name": "JC病毒",
+      "aliases": [
+        "JC病毒",
+        "JC 病毒"
+      ],
+      "confidence": "high",
+      "reason": "空格引起的格式差异"
+    },
+    {
+      "canonical_name": "猴痘病毒 (MPXV)",
+      "aliases": [
+        "猴痘病毒",
+        "猴痘病毒 (MPXV)"
+      ],
+      "confidence": "high",
+      "reason": "同一病毒的中文名称与包含英文缩写的变体"
+    },
+    {
+      "canonical_name": "鸟-胞内分枝杆菌复合群 (MAC)",
+      "aliases": [
+        "鸟-胞内分枝杆菌复合群",
+        "鸟分枝杆菌复合群"
+      ],
+      "confidence": "high",
+      "reason": "同一分枝杆菌复合群（MAC）的完整翻译与简略表述"
+    }
+  ]
+}
