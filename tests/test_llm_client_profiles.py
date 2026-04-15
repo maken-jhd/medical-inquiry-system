@@ -29,3 +29,17 @@ def test_trajectory_verifier_prompt_requires_accept_reason(monkeypatch) -> None:
     assert "key_support_sufficient" in prompt
     assert "alternatives_reasonably_ruled_out" in prompt
     assert "trajectory_stable" in prompt
+
+
+def test_llm_client_reads_timeout_from_environment(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_TIMEOUT_SECONDS", "12")
+    client = LlmClient(api_key="")
+
+    assert client.timeout_seconds == 12
+
+
+def test_llm_client_timeout_has_safe_minimum(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_TIMEOUT_SECONDS", "1")
+    client = LlmClient(api_key="")
+
+    assert client.timeout_seconds == 5.0

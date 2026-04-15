@@ -26,6 +26,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
         "model": "qwen3-max",
         "api_key": "",
+        "timeout_seconds": 60,
     },
     "brain": {
         "acceptance_profile": "guarded_lenient",
@@ -59,6 +60,7 @@ def apply_config_to_environment(config: dict[str, Any]) -> None:
     _set_env_if_present("OPENAI_BASE_URL", llm.get("base_url"))
     _set_env_if_present("OPENAI_MODEL", llm.get("model"))
     _set_env_if_present("DASHSCOPE_API_KEY", llm.get("api_key"))
+    _set_env_if_present("OPENAI_TIMEOUT_SECONDS", llm.get("timeout_seconds"))
 
     acceptance_profile = str(brain.get("acceptance_profile") or "guarded_lenient")
     verifier_profile = str(brain.get("verifier_acceptance_profile") or acceptance_profile)
@@ -100,6 +102,7 @@ def get_config_display_rows(config: dict[str, Any]) -> list[dict[str, str]]:
         {"配置项": "Neo4j 数据库", "当前值": str(neo4j.get("database") or "")},
         {"配置项": "LLM Base URL", "当前值": str(llm.get("base_url") or "")},
         {"配置项": "LLM 模型", "当前值": str(llm.get("model") or "")},
+        {"配置项": "LLM 请求超时", "当前值": f"{llm.get('timeout_seconds') or 60} 秒"},
         {"配置项": "LLM API Key", "当前值": "已配置" if api_key else "未配置"},
         {"配置项": "安全接受策略", "当前值": str(brain.get("acceptance_profile") or "")},
         {"配置项": "复核器接受策略", "当前值": str(brain.get("verifier_acceptance_profile") or "")},
@@ -137,4 +140,3 @@ def _set_env_if_present(name: str, value: Any) -> None:
 
 def _as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
-

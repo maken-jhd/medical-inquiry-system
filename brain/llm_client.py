@@ -19,21 +19,35 @@ class LlmClient:
         model: str | None = None,
         base_url: str | None = None,
         api_key: str | None = None,
+        timeout_seconds: float | None = None,
     ) -> None:
         self.model = model or os.getenv("OPENAI_MODEL", "qwen3-max")
         self.base_url = base_url or os.getenv("OPENAI_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
         self.api_key = api_key or os.getenv("DASHSCOPE_API_KEY") or os.getenv("OPENAI_API_KEY")
+        self.timeout_seconds = timeout_seconds if timeout_seconds is not None else self._read_timeout_seconds()
         self._client: OpenAI | None = None
 
         if self.api_key:
             self._client = OpenAI(
                 api_key=self.api_key,
                 base_url=self.base_url,
+                timeout=self.timeout_seconds,
             )
 
     # 判断当前是否具备可用的大模型调用条件。
     def is_available(self) -> bool:
         return self._client is not None
+
+    # 读取 LLM 请求超时时间，避免实时前端因网络或模型端阻塞而一直转圈。
+    def _read_timeout_seconds(self) -> float:
+        raw_value = os.getenv("OPENAI_TIMEOUT_SECONDS") or os.getenv("DASHSCOPE_TIMEOUT_SECONDS") or "60"
+
+        try:
+            timeout = float(raw_value)
+        except ValueError:
+            timeout = 60.0
+
+        return max(timeout, 5.0)
 
     # 执行结构化 Prompt，并尝试将输出反序列化为指定 schema。
     def run_structured_prompt(self, prompt_name: str, variables: dict, schema: Type[Any]) -> Any:

@@ -10,6 +10,8 @@ neo4j:
 llm:
   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
   model: qwen3-max
+  # 单次 LLM 请求超时时间，避免实时演示因网络/模型端阻塞导致页面一直转圈。
+  timeout_seconds: 60
   # 不建议把真实 API Key 写入版本库。
   # 如需实时模式，请在 configs/frontend.local.yaml 中填写 api_key，
   # 或继续使用 DASHSCOPE_API_KEY / OPENAI_API_KEY 环境变量。
@@ -19,4 +21,3 @@ brain:
   acceptance_profile: guarded_lenient
   verifier_acceptance_profile: guarded_lenient
   agent_eval_mode: llm_verifier
-
