@@ -11,14 +11,15 @@ SlotCertainty = Literal["certain", "uncertain", "unknown"]
 EvidenceExistence = Literal["exist", "non_exist", "unknown"]
 EvidenceCertainty = Literal["confident", "doubt", "unknown"]
 ReasoningStage = Literal["A1", "A2", "A3", "A4", "STOP", "FALLBACK"]
-ExamKind = Literal["lab", "imaging", "pathogen"]
+ExamKind = Literal["general", "lab", "imaging", "pathogen"]
 ExamAvailability = Literal["unknown", "done", "not_done"]
 
 
 def default_exam_context() -> Dict[str, "ExamContextState"]:
-    """为每个新会话初始化三类检查上下文状态。"""
+    """为每个新会话初始化统一检查入口和内部三类检查上下文状态。"""
 
     return {
+        "general": ExamContextState(exam_kind="general"),
         "lab": ExamContextState(exam_kind="lab"),
         "imaging": ExamContextState(exam_kind="imaging"),
         "pathogen": ExamContextState(exam_kind="pathogen"),

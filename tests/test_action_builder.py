@@ -104,10 +104,59 @@ def test_action_builder_collects_exam_context_before_high_cost_evidence() -> Non
     )
 
     assert len(actions) == 1
-    assert actions[0].action_type == "collect_exam_context"
-    assert actions[0].metadata["exam_kind"] == "lab"
+    assert actions[0].action_type == "collect_general_exam_context"
+    assert actions[0].metadata["exam_kind"] == "general"
+    assert actions[0].metadata["candidate_exam_kinds"] == ["lab"]
     assert "CD4+ T淋巴细胞计数 < 200/μL" in actions[0].metadata["exam_examples"]
-    assert "最近有没有做过" in builder.render_question_text(actions[0])
+    question = builder.render_question_text(actions[0])
+    assert "最近有没有去医院做过检查" in question
+    assert "抽血化验" in question
+    assert "CT" in question
+    assert "PCR" in question
+
+
+# 验证 lab / imaging / pathogen 高成本证据会合并成一个统一检查入口，而不是三轮分别追问。
+def test_action_builder_merges_exam_context_kinds_into_general_entry() -> None:
+    builder = ActionBuilder()
+    state = SessionState(session_id="s_general")
+    actions = builder.build_verification_actions(
+        [
+            {
+                "node_id": "lab_cd4_low",
+                "label": "LabFinding",
+                "name": "CD4+ T淋巴细胞计数 < 200/μL",
+                "question_type_hint": "lab",
+                "acquisition_mode": "needs_lab_test",
+                "evidence_cost": "high",
+                "priority": 2.0,
+            },
+            {
+                "node_id": "ct_ground_glass",
+                "label": "ImagingFinding",
+                "name": "胸部CT磨玻璃影",
+                "question_type_hint": "imaging",
+                "acquisition_mode": "needs_imaging",
+                "evidence_cost": "high",
+                "priority": 2.1,
+            },
+            {
+                "node_id": "pcr_positive",
+                "label": "LabFinding",
+                "name": "PCP PCR 阳性",
+                "question_type_hint": "pathogen",
+                "acquisition_mode": "needs_pathogen_test",
+                "evidence_cost": "high",
+                "priority": 2.2,
+            },
+        ],
+        hypothesis_id="pcp",
+        session_state=state,
+    )
+
+    assert len(actions) == 1
+    assert actions[0].action_type == "collect_general_exam_context"
+    assert set(actions[0].metadata["candidate_exam_kinds"]) == {"lab", "imaging", "pathogen"}
+    assert len(actions[0].metadata["exam_candidate_evidence"]) == 3
 
 
 # 验证患者明确没做过某类检查后，具体高成本结果问题会被暂时屏蔽。

@@ -133,12 +133,13 @@ class EvidenceParser:
     ) -> ExamContextResult:
         exam_kind = str(action.metadata.get("exam_kind") or "lab")
 
-        if exam_kind not in {"lab", "imaging", "pathogen"}:
-            exam_kind = "lab"
+        if exam_kind not in {"general", "lab", "imaging", "pathogen"}:
+            exam_kind = "general"
 
         availability = self._infer_exam_availability(patient_text, exam_kind)
         mentioned_tests = self._extract_mentioned_tests(patient_text, exam_kind)
         mentioned_results = self._extract_mentioned_exam_results(patient_text, mentioned_tests, exam_kind)
+        mentioned_exam_kinds = self._infer_exam_kinds_from_mentions(mentioned_tests, mentioned_results)
 
         if availability == "unknown" and (len(mentioned_tests) > 0 or len(mentioned_results) > 0):
             availability = "done"
@@ -178,6 +179,7 @@ class EvidenceParser:
                 "action_id": action.action_id,
                 "raw_text": patient_text,
                 "candidate_evidence_count": len(action.metadata.get("exam_candidate_evidence", [])),
+                "mentioned_exam_kinds": sorted(mentioned_exam_kinds),
             },
         )
 
@@ -590,8 +592,13 @@ class EvidenceParser:
             ],
         }
         values: List[str] = []
+        pattern_groups = (
+            test_patterns.get(exam_kind, [])
+            if exam_kind != "general"
+            else test_patterns["lab"] + test_patterns["imaging"] + test_patterns["pathogen"]
+        )
 
-        for name, keywords in test_patterns.get(exam_kind, []):
+        for name, keywords in pattern_groups:
             if any(keyword in normalized for keyword in keywords) and name not in values:
                 values.append(name)
 
@@ -691,6 +698,14 @@ class EvidenceParser:
             "imaging": ("ct", "胸片", "影像"),
             "pathogen": ("pcr", "核酸", "痰", "灌洗", "bal", "balf"),
         }
+        if exam_kind == "general":
+            keywords = (
+                numeric_test_keywords["lab"]
+                + numeric_test_keywords["imaging"]
+                + numeric_test_keywords["pathogen"]
+            )
+            return any(keyword in normalized for keyword in keywords)
+
         return any(keyword in normalized for keyword in numeric_test_keywords.get(exam_kind, ()))
 
     # 给结果分句选择最可能对应的检查名。
@@ -701,13 +716,19 @@ class EvidenceParser:
             if self._normalize_exam_text(test_name) in normalized:
                 return test_name
 
-        if exam_kind == "imaging" and any(keyword in normalized for keyword in ("ct", "胸片", "影像", "磨玻璃")):
+        if exam_kind in {"imaging", "general"} and any(
+            keyword in normalized for keyword in ("ct", "胸片", "影像", "磨玻璃")
+        ):
             return "胸部影像"
 
-        if exam_kind == "pathogen" and any(keyword in normalized for keyword in ("pcr", "核酸", "痰", "灌洗", "阳性")):
+        if exam_kind in {"pathogen", "general"} and any(
+            keyword in normalized for keyword in ("pcr", "核酸", "痰", "灌洗", "bal", "balf", "阳性")
+        ):
             return "病原学检查"
 
-        if exam_kind == "lab" and any(keyword in normalized for keyword in ("cd4", "葡聚糖", "血氧", "病毒载量")):
+        if exam_kind in {"lab", "general"} and any(
+            keyword in normalized for keyword in ("cd4", "葡聚糖", "血氧", "病毒载量", "pao2", "spo2")
+        ):
             return "化验"
 
         if len(mentioned_tests) > 0:
@@ -845,12 +866,15 @@ class EvidenceParser:
                 keyword in normalized_text for keyword in ("ct", "影像", "磨玻璃", "胸片")
             )
 
-        if exam_kind == "pathogen" or candidate_label == "Pathogen":
+        if exam_kind == "pathogen" or candidate_label == "Pathogen" or (
+            exam_kind == "general"
+            and any(keyword in normalized_candidate for keyword in ("pcr", "核酸", "病原", "肺孢子", "痰", "灌洗", "bal"))
+        ):
             return any(keyword in normalized_candidate for keyword in ("pcr", "核酸", "病原", "肺孢子", "痰", "灌洗", "bal")) and any(
                 keyword in normalized_text for keyword in ("pcr", "核酸", "病原", "肺孢子", "痰", "灌洗", "bal", "阳性", "检出")
             )
 
-        if exam_kind == "lab":
+        if exam_kind in {"lab", "general"}:
             lab_family_rules = (
                 (("cd4", "t淋巴"), ("cd4", "t淋巴", "很低", "偏低", "小于", "不到")),
                 (("βd葡聚糖", "bdg", "葡聚糖", "g试验"), ("βd葡聚糖", "bdg", "葡聚糖", "g试验", "升高", "阳性")),
@@ -865,6 +889,30 @@ class EvidenceParser:
                     return True
 
         return False
+
+    # 将患者提到的检查名 / 结果内部映射回 lab、imaging、pathogen，供状态更新和具体结果追问使用。
+    def _infer_exam_kinds_from_mentions(
+        self,
+        mentioned_tests: Sequence[str],
+        mentioned_results: Sequence[ExamMentionedResult],
+    ) -> set[str]:
+        values: set[str] = set()
+
+        for text in list(mentioned_tests) + [item.test_name for item in mentioned_results] + [
+            item.raw_text for item in mentioned_results
+        ]:
+            normalized = self._normalize_exam_text(text)
+
+            if any(keyword in normalized for keyword in ("cd4", "hivrna", "病毒载量", "βd葡聚糖", "bdg", "葡聚糖", "g试验", "pao2", "spo2", "血氧", "氧分压", "ldh", "乳酸脱氢酶")):
+                values.add("lab")
+
+            if any(keyword in normalized for keyword in ("胸部ct", "ct", "胸片", "x线", "x光", "影像", "磨玻璃")):
+                values.add("imaging")
+
+            if any(keyword in normalized for keyword in ("pcr", "核酸", "痰检", "痰培养", "痰涂片", "支气管肺泡", "肺泡灌洗", "bal", "balf", "抗酸", "tspot", "xpert")):
+                values.add("pathogen")
+
+        return values
 
     # 检查上下文解析使用的统一归一化。
     def _normalize_exam_text(self, text: str) -> str:

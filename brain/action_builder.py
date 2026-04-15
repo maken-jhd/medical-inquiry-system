@@ -14,6 +14,7 @@ class ActionBuilderConfig:
 
     default_action_type: str = "verify_evidence"
     exam_context_action_type: str = "collect_exam_context"
+    general_exam_context_action_type: str = "collect_general_exam_context"
     red_flag_bonus: float = 1.5
 
 
@@ -88,15 +89,17 @@ class ActionBuilder:
             patient_burden = self._estimate_patient_burden(acquisition_mode, evidence_cost, question_type_hint)
 
             if exam_kind is not None and session_state is not None and self._is_high_cost_exam_mode(acquisition_mode):
+                general_availability = self._get_exam_availability(session_state, "general")
                 availability = self._get_exam_availability(session_state, exam_kind)
 
-                if availability == "not_done":
+                if general_availability == "not_done" or availability == "not_done":
                     continue
 
-                if availability == "unknown":
+                if general_availability == "unknown":
                     self._accumulate_exam_context_action(
                         exam_context_actions,
-                        exam_kind=exam_kind,
+                        exam_kind="general",
+                        candidate_exam_kind=exam_kind,
                         row=row,
                         hypothesis_id=hypothesis_id,
                         topic_id=topic_id,
@@ -183,6 +186,9 @@ class ActionBuilder:
         if action.action_type == self.config.exam_context_action_type:
             return self._render_exam_context_question(action)
 
+        if action.action_type == self.config.general_exam_context_action_type:
+            return self._render_exam_context_question(action)
+
         if question_type_hint == "lab":
             return f"如果你手头记得检查结果，我想确认一下和“{target_name}”相关的结果是否提示异常？"
 
@@ -219,6 +225,7 @@ class ActionBuilder:
         actions_by_kind: dict[str, MctsAction],
         *,
         exam_kind: str,
+        candidate_exam_kind: str,
         row: dict,
         hypothesis_id: str,
         topic_id: Optional[str],
@@ -240,6 +247,7 @@ class ActionBuilder:
             "question_type_hint": row.get("question_type_hint", exam_kind),
             "acquisition_mode": acquisition_mode,
             "evidence_cost": evidence_cost,
+            "exam_kind": candidate_exam_kind,
             "priority": float(row.get("priority", priority)),
             "contradiction_priority": float(row.get("contradiction_priority", 0.0)),
             "discriminative_gain": discriminative_gain,
@@ -249,9 +257,14 @@ class ActionBuilder:
         }
 
         if action is None:
+            action_type = (
+                self.config.general_exam_context_action_type
+                if exam_kind == "general"
+                else self.config.exam_context_action_type
+            )
             action = MctsAction(
                 action_id=f"collect_exam::{hypothesis_id}::{exam_kind}",
-                action_type=self.config.exam_context_action_type,
+                action_type=action_type,
                 target_node_id=f"__exam_context__::{exam_kind}",
                 target_node_label="ExamContext",
                 target_node_name=self._exam_context_display_name(exam_kind),
@@ -260,17 +273,21 @@ class ActionBuilder:
                 prior_score=max(priority - 0.05, 0.0),
                 metadata={
                     "exam_kind": exam_kind,
-                    "question_type_hint": exam_kind,
-                    "acquisition_mode": acquisition_mode,
+                    "question_type_hint": "exam_context" if exam_kind == "general" else exam_kind,
+                    "acquisition_mode": "needs_medical_exam_context" if exam_kind == "general" else acquisition_mode,
                     "evidence_cost": evidence_cost,
                     "patient_burden": 0.35,
                     "accessibility_bias": -0.05,
                     "exam_candidate_evidence": [candidate_payload],
                     "exam_examples": [candidate_payload["name"]],
-                    "evidence_tags": sorted(evidence_tags | {f"type:{exam_kind}", "exam_context"}),
+                    "evidence_tags": sorted(
+                        evidence_tags | {f"type:{exam_kind}", f"type:{candidate_exam_kind}", "exam_context"}
+                    ),
                     "is_red_flag": bool(row.get("is_red_flag", False)),
                     "relation_type": row.get("relation_type"),
                     "collects_exam_availability": True,
+                    "collects_general_exam_context": exam_kind == "general",
+                    "candidate_exam_kinds": [candidate_exam_kind],
                 },
             )
             actions_by_kind[exam_kind] = action
@@ -286,7 +303,15 @@ class ActionBuilder:
         if candidate_payload["name"] not in examples:
             examples.append(candidate_payload["name"])
 
-        merged_tags = set(action.metadata.get("evidence_tags", [])) | evidence_tags | {f"type:{exam_kind}", "exam_context"}
+        candidate_kinds = action.metadata.setdefault("candidate_exam_kinds", [])
+        if candidate_exam_kind not in candidate_kinds:
+            candidate_kinds.append(candidate_exam_kind)
+
+        merged_tags = set(action.metadata.get("evidence_tags", [])) | evidence_tags | {
+            f"type:{exam_kind}",
+            f"type:{candidate_exam_kind}",
+            "exam_context",
+        }
         action.metadata["evidence_tags"] = sorted(merged_tags)
 
     # 根据图谱提供的 acquisition / cost 字段做缺省修补。
@@ -319,6 +344,15 @@ class ActionBuilder:
 
     # 将检查获取方式压缩到三类检查上下文。
     def _infer_exam_kind(self, acquisition_mode: str, question_type_hint: str, label: str) -> str | None:
+        if acquisition_mode == "needs_pathogen_test" or question_type_hint == "pathogen":
+            return "pathogen"
+
+        if acquisition_mode == "needs_imaging" or question_type_hint == "imaging":
+            return "imaging"
+
+        if acquisition_mode == "needs_lab_test" or question_type_hint == "lab":
+            return "lab"
+
         if acquisition_mode == "needs_lab_test" or question_type_hint == "lab" or label in {"LabFinding", "LabTest"}:
             return "lab"
 
@@ -375,6 +409,7 @@ class ActionBuilder:
     # 检查上下文动作的展示名。
     def _exam_context_display_name(self, exam_kind: str) -> str:
         return {
+            "general": "医院检查情况",
             "lab": "化验检查情况",
             "imaging": "胸部影像检查情况",
             "pathogen": "病原学检查情况",
@@ -389,6 +424,12 @@ class ActionBuilder:
             if len(str(item).strip()) > 0
         ][:3]
         example_text = "、".join(examples)
+
+        if exam_kind == "general":
+            return (
+                "最近有没有去医院做过检查呀？比如抽血化验、拍片或 CT、痰检 / PCR 之类。"
+                "如果做过，也可以顺便说一下你记得的检查名称，或者报告里提到过哪些异常。"
+            )
 
         if exam_kind == "imaging":
             return "最近有没有做过胸部 CT 或胸片？如果做过，也可以顺便说一下报告里有没有提到明显异常。"

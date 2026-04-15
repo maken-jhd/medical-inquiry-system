@@ -192,7 +192,7 @@ class ConsultationBrain:
                 [],
             )
 
-        if pending_action.action_type == "collect_exam_context":
+        if pending_action.action_type in {"collect_exam_context", "collect_general_exam_context"}:
             return self._update_from_exam_context_action(
                 session_id,
                 pending_action,
@@ -295,6 +295,7 @@ class ConsultationBrain:
                 "last_followup_reason": exam_result.followup_reason,
             },
         )
+        self._sync_general_exam_context_to_specific_kinds(session_id, exam_result, turn_index)
 
         if len(exam_updates) > 0:
             tracker.apply_slot_updates(session_id, exam_updates)
@@ -324,6 +325,79 @@ class ConsultationBrain:
             },
         )
         return a4_result, None, route_after_a4, exam_updates
+
+    # 将检查上下文中映射到具体证据节点的结果写入 evidence_states 并反馈 hypothesis。
+    def _sync_general_exam_context_to_specific_kinds(
+        self,
+        session_id: str,
+        exam_result: ExamContextResult,
+        turn_index: int,
+    ) -> None:
+        if exam_result.exam_kind != "general":
+            return
+
+        tracker = self.deps.state_tracker
+
+        if exam_result.availability == "not_done":
+            for exam_kind in ("lab", "imaging", "pathogen"):
+                tracker.update_exam_context(
+                    session_id,
+                    exam_kind,
+                    availability="not_done",
+                    turn_index=turn_index,
+                    metadata={
+                        "source": "general_exam_context",
+                        "last_reasoning": exam_result.reasoning,
+                    },
+                )
+            return
+
+        if exam_result.availability != "done":
+            return
+
+        mentioned_kinds = self._mentioned_exam_kinds_from_result(exam_result)
+
+        for exam_kind in mentioned_kinds:
+            tracker.update_exam_context(
+                session_id,
+                exam_kind,
+                availability="done",
+                mentioned_exam_names=exam_result.mentioned_tests,
+                mentioned_exam_results=exam_result.mentioned_results,
+                turn_index=turn_index,
+                metadata={
+                    "source": "general_exam_context",
+                    "last_reasoning": exam_result.reasoning,
+                },
+            )
+
+    # 读取解析器写入的内部类别映射；缺失时按关键词兜底。
+    def _mentioned_exam_kinds_from_result(self, exam_result: ExamContextResult) -> list[str]:
+        metadata_kinds = exam_result.metadata.get("mentioned_exam_kinds", [])
+
+        if isinstance(metadata_kinds, list):
+            values = [str(item) for item in metadata_kinds if str(item) in {"lab", "imaging", "pathogen"}]
+
+            if len(values) > 0:
+                return values
+
+        kinds: set[str] = set()
+
+        for text in list(exam_result.mentioned_tests) + [item.test_name for item in exam_result.mentioned_results] + [
+            item.raw_text for item in exam_result.mentioned_results
+        ]:
+            normalized = self._normalize_match_text(text)
+
+            if any(keyword in normalized for keyword in ("cd4", "hivrna", "病毒载量", "βd葡聚糖", "bdg", "葡聚糖", "pao2", "spo2", "血氧")):
+                kinds.add("lab")
+
+            if any(keyword in normalized for keyword in ("ct", "胸片", "x线", "x光", "影像", "磨玻璃")):
+                kinds.add("imaging")
+
+            if any(keyword in normalized for keyword in ("pcr", "核酸", "痰", "支气管肺泡", "肺泡灌洗", "bal", "balf", "抗酸", "xpert")):
+                kinds.add("pathogen")
+
+        return sorted(kinds)
 
     # 将检查上下文中映射到具体证据节点的结果写入 evidence_states 并反馈 hypothesis。
     def _apply_exam_context_evidence_feedback(
@@ -489,7 +563,9 @@ class ConsultationBrain:
     def _exam_candidate_name_match_score(self, candidate: dict, exam_result: ExamContextResult) -> float:
         candidate_name = self._normalize_match_text(str(candidate.get("name") or ""))
         candidate_label = str(candidate.get("label") or "")
-        exam_kind = exam_result.exam_kind
+        exam_kind = str(candidate.get("exam_kind") or exam_result.exam_kind)
+        if exam_kind == "general":
+            exam_kind = self._candidate_exam_kind(candidate)
         best = 0.0
 
         for test_name in exam_result.mentioned_tests:
@@ -542,9 +618,10 @@ class ConsultationBrain:
         node_id = str(candidate.get("node_id") or "").strip()
         target_name = str(candidate.get("name") or node_id).strip()
         label = str(candidate.get("label") or "Unknown")
-        question_type_hint = str(candidate.get("question_type_hint") or exam_result.exam_kind)
+        exam_kind = self._candidate_exam_kind(candidate) if exam_result.exam_kind == "general" else exam_result.exam_kind
+        question_type_hint = str(candidate.get("question_type_hint") or exam_kind)
         mentioned_tests = [item for item in exam_result.mentioned_tests if len(item.strip()) > 0]
-        question_text = self._render_specific_exam_result_question(exam_result.exam_kind, mentioned_tests, target_name)
+        question_text = self._render_specific_exam_result_question(exam_kind, mentioned_tests, target_name)
 
         return MctsAction(
             action_id=f"verify::{source_action.hypothesis_id or 'unknown'}::{node_id}",
@@ -568,7 +645,8 @@ class ConsultationBrain:
                 "question_text": question_text,
                 "exam_context_followup": True,
                 "exam_followup_mode": "specific_result",
-                "exam_kind": exam_result.exam_kind,
+                "exam_kind": exam_kind,
+                "source_exam_kind": exam_result.exam_kind,
                 "mentioned_tests": mentioned_tests,
                 "source_exam_context_action_id": source_action.action_id,
                 "evidence_tags": self._normalize_string_list(source_action.metadata.get("evidence_tags", [])),
@@ -591,6 +669,31 @@ class ConsultationBrain:
             return f"你刚才提到做过 {test_text}。结果有没有提示“{target_name}”，比如阳性、检出或阴性？"
 
         return f"你刚才提到做过 {test_text}。这个结果大概是否提示“{target_name}”，比如偏低、升高、阳性或阴性？"
+
+    # 从候选证据 metadata / 标签中恢复内部检查类别。
+    def _candidate_exam_kind(self, candidate: dict) -> str:
+        exam_kind = str(candidate.get("exam_kind") or "").strip()
+
+        if exam_kind in {"lab", "imaging", "pathogen"}:
+            return exam_kind
+
+        question_type_hint = str(candidate.get("question_type_hint") or "").strip()
+
+        if question_type_hint in {"lab", "imaging", "pathogen"}:
+            return question_type_hint
+
+        label = str(candidate.get("label") or "")
+
+        if label in {"LabFinding", "LabTest"}:
+            return "lab"
+
+        if label == "ImagingFinding":
+            return "imaging"
+
+        if label == "Pathogen":
+            return "pathogen"
+
+        return "lab"
 
     # 取出检查上下文澄清动作，避免重复使用。
     def _pop_exam_context_followup_action(self, session_id: str) -> MctsAction | None:
@@ -1046,7 +1149,7 @@ class ConsultationBrain:
 
             if stage_stop_decision is not None:
                 stop_decision = stage_stop_decision
-                search_result.metadata["fallback_reason"] = "exam_not_done_and_no_low_cost_questions"
+                search_result.metadata["fallback_reason"] = "no_exam_and_no_low_cost_questions"
 
         if selected_action is None and not accept_decision.should_stop and not stop_decision.should_stop:
             selected_action = self._choose_cold_start_probe_action(session_id)
@@ -1067,7 +1170,11 @@ class ConsultationBrain:
         a2_evidence_profiles = self._build_a2_evidence_profiles(session_id)
 
         if self._should_emit_final_report(search_result, selected_action, stop_decision, accept_decision):
-            if stop_decision.reason in {"exam_not_done_and_no_low_cost_questions", "insufficient_observable_evidence"}:
+            if stop_decision.reason in {
+                "no_exam_and_no_low_cost_questions",
+                "exam_not_done_and_no_low_cost_questions",
+                "insufficient_observable_evidence",
+            }:
                 final_report = self.deps.report_builder.build_final_report(tracker.get_session(session_id), stop_decision)
             else:
                 final_report = (
@@ -2373,7 +2480,7 @@ class ConsultationBrain:
 
         return StopDecision(
             True,
-            "exam_not_done_and_no_low_cost_questions",
+            "no_exam_and_no_low_cost_questions",
             0.0,
             {
                 "stage_end_reason": "insufficient_observable_evidence",
@@ -2539,7 +2646,11 @@ class ConsultationBrain:
             selected_action is None
             and stop_decision.should_stop
             and stop_decision.reason
-            in {"exam_not_done_and_no_low_cost_questions", "insufficient_observable_evidence"}
+            in {
+                "no_exam_and_no_low_cost_questions",
+                "exam_not_done_and_no_low_cost_questions",
+                "insufficient_observable_evidence",
+            }
         ):
             return True
 

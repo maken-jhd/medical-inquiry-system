@@ -105,8 +105,8 @@ class StateTracker:
     def ensure_exam_context(self, session_id: str, exam_kind: str) -> ExamContextState:
         state = self.get_session(session_id)
 
-        if exam_kind not in {"lab", "imaging", "pathogen"}:
-            exam_kind = "lab"
+        if exam_kind not in {"general", "lab", "imaging", "pathogen"}:
+            exam_kind = "general"
 
         if exam_kind not in state.exam_context:
             state.exam_context[exam_kind] = ExamContextState(exam_kind=exam_kind)  # type: ignore[arg-type]

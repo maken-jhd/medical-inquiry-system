@@ -54,17 +54,18 @@ def _build_brain(tracker: StateTracker, rows: list[dict] | None = None) -> Consu
 
 def _collect_lab_action() -> MctsAction:
     return MctsAction(
-        action_id="collect_exam::pcp::lab",
-        action_type="collect_exam_context",
-        target_node_id="__exam_context__::lab",
+        action_id="collect_exam::pcp::general",
+        action_type="collect_general_exam_context",
+        target_node_id="__exam_context__::general",
         target_node_label="ExamContext",
-        target_node_name="化验检查情况",
+        target_node_name="医院检查情况",
         hypothesis_id="pcp",
         topic_id="Disease",
         prior_score=2.0,
         metadata={
-            "exam_kind": "lab",
-            "question_type_hint": "lab",
+            "exam_kind": "general",
+            "question_type_hint": "exam_context",
+            "candidate_exam_kinds": ["lab", "imaging", "pathogen"],
             "exam_candidate_evidence": [
                 {
                     "node_id": "lab_bdg_high",
@@ -76,6 +77,7 @@ def _collect_lab_action() -> MctsAction:
                     "recommended_match_score": 0.2,
                     "acquisition_mode": "needs_lab_test",
                     "evidence_cost": "high",
+                    "exam_kind": "lab",
                     "question_type_hint": "lab",
                 },
                 {
@@ -90,7 +92,21 @@ def _collect_lab_action() -> MctsAction:
                     "recommended_evidence_bonus": 0.4,
                     "acquisition_mode": "needs_lab_test",
                     "evidence_cost": "high",
+                    "exam_kind": "lab",
                     "question_type_hint": "lab",
+                },
+                {
+                    "node_id": "ct_ground_glass",
+                    "label": "ImagingFinding",
+                    "name": "胸部CT磨玻璃影",
+                    "priority": 2.4,
+                    "contradiction_priority": 0.8,
+                    "discriminative_gain": 0.7,
+                    "recommended_match_score": 0.3,
+                    "acquisition_mode": "needs_imaging",
+                    "evidence_cost": "high",
+                    "exam_kind": "imaging",
+                    "question_type_hint": "imaging",
                 },
             ],
         },
@@ -116,6 +132,7 @@ def test_service_exam_context_done_with_result_updates_slot_and_state() -> None:
     assert a4_result is not None
     assert a4_result.existence == "exist"
     assert route_after_a4.stage == "A3"
+    assert state.exam_context["general"].availability == "done"
     assert state.exam_context["lab"].availability == "done"
     assert len(updates) == 1
     assert updates[0].node_id == "lab_cd4_low"
@@ -142,6 +159,8 @@ def test_service_exam_context_with_test_name_builds_specific_result_followup() -
     assert followup_action.target_node_id == "lab_cd4_low"
     assert followup_action.metadata["exam_followup_mode"] == "specific_result"
     assert "CD4" in followup_action.metadata["question_text"]
+    assert followup_action.metadata["exam_kind"] == "lab"
+    assert followup_action.metadata["source_exam_kind"] == "general"
 
 
 # 患者明确没做过检查时，应记录 not_done，且不生成具体结果追问。
@@ -162,7 +181,10 @@ def test_service_exam_context_not_done_records_state_without_followup() -> None:
     assert a4_result is not None
     assert a4_result.existence == "non_exist"
     assert updates == []
+    assert state.exam_context["general"].availability == "not_done"
     assert state.exam_context["lab"].availability == "not_done"
+    assert state.exam_context["imaging"].availability == "not_done"
+    assert state.exam_context["pathogen"].availability == "not_done"
     assert "exam_context_followup_action" not in state.metadata
 
 
@@ -170,7 +192,7 @@ def test_service_exam_context_not_done_records_state_without_followup() -> None:
 def test_service_stage_stop_when_exam_not_done_and_no_low_cost_questions() -> None:
     tracker = StateTracker()
     state = tracker.create_session("s_stage_stop")
-    state.exam_context["lab"] = ExamContextState(exam_kind="lab", availability="not_done")
+    state.exam_context["general"] = ExamContextState(exam_kind="general", availability="not_done")
     state.candidate_hypotheses = [HypothesisScore(node_id="pcp", label="Disease", name="PCP", score=1.0)]
     brain = _build_brain(
         tracker,
@@ -189,7 +211,7 @@ def test_service_stage_stop_when_exam_not_done_and_no_low_cost_questions() -> No
 
     assert decision is not None
     assert decision.should_stop is True
-    assert decision.reason == "exam_not_done_and_no_low_cost_questions"
+    assert decision.reason == "no_exam_and_no_low_cost_questions"
     assert decision.metadata["stage_end_reason"] == "insufficient_observable_evidence"
 
 

@@ -105,8 +105,9 @@ def test_service_prefers_recommended_repair_action_for_missing_support() -> None
     )
 
     assert action is not None
-    assert action.action_type == "collect_exam_context"
-    assert action.metadata["exam_kind"] == "lab"
+    assert action.action_type == "collect_general_exam_context"
+    assert action.metadata["exam_kind"] == "general"
+    assert "lab" in action.metadata["candidate_exam_kinds"]
     assert any(item["name"] == "低氧血症" for item in action.metadata["exam_candidate_evidence"])
 
 
@@ -315,7 +316,7 @@ def test_service_pcp_combo_repair_prefers_missing_family_anchor_over_respiratory
 
     assert action is not None
     assert action.hypothesis_id == "pcp"
-    assert action.action_type == "collect_exam_context"
+    assert action.action_type == "collect_general_exam_context"
     assert any(item["name"] == "CD4+ T淋巴细胞计数 < 200/μL" for item in action.metadata["exam_candidate_evidence"])
 
 
@@ -370,7 +371,7 @@ def test_service_missing_confirmed_evidence_prefers_missing_family_before_root_s
     )
 
     assert action is not None
-    assert action.action_type == "collect_exam_context"
+    assert action.action_type == "collect_general_exam_context"
     assert any(item["name"] == "血清 β-D 葡聚糖升高" for item in action.metadata["exam_candidate_evidence"])
 
 
@@ -443,7 +444,7 @@ def test_service_can_switch_to_alternative_hypothesis_action_when_verifier_reque
 
     assert action is not None
     assert action.hypothesis_id == "covid"
-    assert action.action_type == "collect_exam_context"
+    assert action.action_type == "collect_general_exam_context"
     assert any(item["name"] == "新冠核酸阳性" for item in action.metadata["exam_candidate_evidence"])
 
 

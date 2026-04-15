@@ -94,6 +94,64 @@ def test_exam_context_parser_extracts_tests_and_results() -> None:
     assert result.needs_followup is False
 
 
+# 验证统一检查入口可以一次识别化验、影像和病原学检查名。
+def test_general_exam_context_parser_extracts_mixed_exam_names() -> None:
+    parser = EvidenceParser()
+    action = MctsAction(
+        action_id="collect_exam::pcp::general",
+        action_type="collect_general_exam_context",
+        target_node_id="__exam_context__::general",
+        target_node_label="ExamContext",
+        target_node_name="医院检查情况",
+        metadata={"exam_kind": "general"},
+    )
+
+    result = parser.interpret_exam_context_answer("做过 CD4、胸部 CT 和 PCR，但具体结果不太记得了。", action)
+
+    assert result.availability == "done"
+    assert "CD4" in result.mentioned_tests
+    assert "胸部CT" in result.mentioned_tests
+    assert "PCR" in result.mentioned_tests
+    assert set(result.metadata["mentioned_exam_kinds"]) == {"lab", "imaging", "pathogen"}
+    assert result.needs_followup is True
+
+
+# 验证统一检查入口下给出结果时，仍能映射到不同内部检查类别的候选证据。
+def test_general_exam_context_result_maps_to_mixed_candidate_evidence() -> None:
+    parser = EvidenceParser()
+    action = MctsAction(
+        action_id="collect_exam::pcp::general",
+        action_type="collect_general_exam_context",
+        target_node_id="__exam_context__::general",
+        target_node_label="ExamContext",
+        target_node_name="医院检查情况",
+        metadata={
+            "exam_kind": "general",
+            "exam_candidate_evidence": [
+                {
+                    "node_id": "lab_cd4_low",
+                    "label": "LabFinding",
+                    "name": "CD4+ T淋巴细胞计数 < 200/μL",
+                    "exam_kind": "lab",
+                },
+                {
+                    "node_id": "ct_ground_glass",
+                    "label": "ImagingFinding",
+                    "name": "胸部CT磨玻璃影",
+                    "exam_kind": "imaging",
+                },
+            ],
+        },
+    )
+    text = "做过 CD4 和胸部 CT，CD4 大概 150，CT 说有磨玻璃影。"
+    result = parser.interpret_exam_context_answer(text, action)
+
+    updates = parser.build_slot_updates_from_exam_context(action, result, text, turn_index=2)
+
+    assert {item.node_id for item in updates} == {"lab_cd4_low", "ct_ground_glass"}
+    assert all(item.status == "true" for item in updates)
+
+
 # 验证做过检查但只给出检查名时，会进入“追问具体结果”分支。
 def test_exam_context_parser_done_with_test_names_needs_specific_result_followup() -> None:
     parser = EvidenceParser()
