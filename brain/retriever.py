@@ -25,6 +25,7 @@ class RetrievalConfig:
     cold_start_limit: int = 8
     r1_limit: int = 6
     r2_limit: int = 10
+    evidence_profile_limit: int = 12
     cold_start_labels: tuple[str, ...] = (
         "RiskFactor",
         "RiskBehavior",
@@ -86,6 +87,7 @@ class RetrievalConfig:
         "RiskBehavior",
         "PopulationGroup",
     )
+    evidence_profile_group_limit: int = 4
     kg_similarity_threshold: float = 0.72
     disable_kg_below_threshold: bool = True
     r1_min_semantic_score: float = 0.48
@@ -366,6 +368,96 @@ class GraphRetriever:
         )
         return rows
 
+    # 面向前端解释展示：返回候选诊断的关键证据画像，不过滤已问/已知证据。
+    def retrieve_candidate_evidence_profile(
+        self,
+        hypothesis: HypothesisCandidate | HypothesisScore,
+        session_state: SessionState,
+        top_k: int | None = None,
+    ) -> list[dict]:
+        limit = top_k or self.config.evidence_profile_limit
+        rows = self.client.run_query(
+            """
+            CALL () {
+              MATCH (hyp)-[r]->(target)
+              WHERE hyp.id = $hypothesis_id
+                AND type(r) IN $relation_types
+                AND any(label IN labels(target) WHERE label IN $target_labels)
+              RETURN target, r, 1.0 AS direction_confidence
+              UNION
+              MATCH (target)-[r]->(hyp)
+              WHERE hyp.id = $hypothesis_id
+                AND type(r) IN $relation_types
+                AND any(label IN labels(target) WHERE label IN $target_labels)
+              RETURN target, r, 0.65 AS direction_confidence
+            }
+            RETURN target.id AS node_id,
+                   labels(target)[0] AS label,
+                   coalesce(target.canonical_name, target.name) AS name,
+                   type(r) AS relation_type,
+                   coalesce(r.weight, 0.0) AS relation_weight,
+                   coalesce(target.weight, 0.0) AS node_weight,
+                   coalesce(target.acquisition_mode,
+                     CASE
+                       WHEN labels(target)[0] IN ['Symptom', 'Sign', 'RiskBehavior', 'RiskFactor'] THEN 'direct_ask'
+                       WHEN labels(target)[0] IN ['PopulationGroup'] THEN 'history_known'
+                       WHEN labels(target)[0] IN ['LabFinding', 'LabTest'] THEN 'needs_lab_test'
+                       WHEN labels(target)[0] = 'ImagingFinding' THEN 'needs_imaging'
+                       WHEN labels(target)[0] = 'Pathogen' THEN 'needs_pathogen_test'
+                       WHEN labels(target)[0] = 'ClinicalAttribute' THEN 'direct_ask'
+                       ELSE ''
+                     END
+                   ) AS acquisition_mode,
+                   coalesce(target.evidence_cost,
+                     CASE
+                       WHEN labels(target)[0] IN ['Symptom', 'Sign', 'RiskBehavior', 'RiskFactor', 'PopulationGroup', 'ClinicalAttribute'] THEN 'low'
+                       WHEN labels(target)[0] IN ['LabFinding', 'LabTest', 'ImagingFinding', 'Pathogen'] THEN 'high'
+                       ELSE ''
+                     END
+                   ) AS evidence_cost,
+                   direction_confidence AS similarity_confidence,
+                   CASE
+                     WHEN labels(target)[0] IN ['LabFinding', 'LabTest'] THEN 'lab'
+                     WHEN labels(target)[0] = 'ImagingFinding' THEN 'imaging'
+                     WHEN labels(target)[0] = 'Pathogen' THEN 'pathogen'
+                     WHEN labels(target)[0] IN ['RiskFactor', 'RiskBehavior', 'PopulationGroup'] THEN 'risk'
+                     WHEN labels(target)[0] = 'ClinicalAttribute' THEN 'detail'
+                     ELSE 'symptom'
+                   END AS question_type_hint,
+                   CASE
+                     WHEN type(r) IN ['HAS_LAB_FINDING', 'HAS_IMAGING_FINDING', 'HAS_PATHOGEN', 'DIAGNOSED_BY'] THEN 1.0
+                     WHEN type(r) = 'MANIFESTS_AS' THEN 0.85
+                     WHEN type(r) = 'REQUIRES_DETAIL' THEN 0.55
+                     ELSE 0.45
+                   END AS relation_specificity,
+                   (coalesce(target.weight, 0.0) + coalesce(r.weight, 0.0)) * direction_confidence AS priority
+            ORDER BY priority DESC, relation_specificity DESC, name
+            LIMIT $limit
+            """,
+            {
+                "hypothesis_id": hypothesis.node_id,
+                "relation_types": list(self.config.r2_relation_types),
+                "target_labels": list(self.config.r2_target_labels),
+                "limit": max(limit * 2, limit),
+            },
+        )
+        deduped = self._dedupe_profile_rows(rows)
+        enriched: list[dict] = []
+
+        for row in deduped[:limit]:
+            status_payload = self._resolve_evidence_profile_status(row, session_state)
+            group_key = self._profile_group_key(row)
+            enriched.append(
+                {
+                    **row,
+                    "question_type_hint": row.get("question_type_hint") or group_key,
+                    "group": group_key,
+                    **status_payload,
+                }
+            )
+
+        return self._limit_profile_groups(enriched)
+
     # 对真实图谱执行一次轻量联调，验证关键标签、关系和 R1/R2 是否能正常返回结果。
     def run_live_schema_smoke_checks(self) -> dict:
         label_rows = self.client.run_query(
@@ -480,6 +572,140 @@ class GraphRetriever:
                     feature_names.append(normalized_name)
 
         return feature_names
+
+    # 去重展示证据，保留同一节点下优先级最高的一条关系。
+    def _dedupe_profile_rows(self, rows: Sequence[dict]) -> list[dict]:
+        best_by_node_id: dict[str, dict] = {}
+
+        for row in rows:
+            node_id = str(row.get("node_id") or "").strip()
+
+            if len(node_id) == 0:
+                continue
+
+            existing = best_by_node_id.get(node_id)
+
+            if existing is None or self._profile_row_sort_score(row) > self._profile_row_sort_score(existing):
+                best_by_node_id[node_id] = dict(row)
+
+        return sorted(
+            best_by_node_id.values(),
+            key=lambda item: (-self._profile_row_sort_score(item), str(item.get("name") or "")),
+        )
+
+    # 展示证据优先按关系强度与节点权重排序，而不是按是否已问过过滤。
+    def _profile_row_sort_score(self, row: dict) -> float:
+        return (
+            float(row.get("priority", 0.0))
+            + float(row.get("relation_specificity", 0.0)) * 0.45
+            + float(row.get("relation_weight", 0.0)) * 0.2
+            + float(row.get("node_weight", 0.0)) * 0.1
+        )
+
+    # 从结构化会话状态判断某条证据当前是已命中、已否定还是待验证。
+    def _resolve_evidence_profile_status(self, row: dict, session_state: SessionState) -> dict:
+        node_id = str(row.get("node_id") or "").strip()
+        name = str(row.get("name") or "").strip()
+        matched_keys = {item for item in (node_id, name) if len(item) > 0}
+
+        evidence_state = session_state.evidence_states.get(node_id)
+
+        if evidence_state is not None:
+            if evidence_state.existence == "exist":
+                return {
+                    "status": "matched",
+                    "status_label": "已命中",
+                    "certainty": evidence_state.certainty,
+                    "evidence_text": evidence_state.reasoning,
+                }
+
+            if evidence_state.existence == "non_exist":
+                return {
+                    "status": "negative",
+                    "status_label": "已否定",
+                    "certainty": evidence_state.certainty,
+                    "evidence_text": evidence_state.reasoning,
+                }
+
+        for slot in session_state.slots.values():
+            slot_keys = {
+                slot.node_id,
+                str(slot.metadata.get("normalized_name") or ""),
+                str(slot.metadata.get("target_node_name") or ""),
+            }
+            slot_keys = {item for item in slot_keys if len(item) > 0}
+
+            if len(matched_keys & slot_keys) == 0:
+                continue
+
+            if slot.status == "true":
+                return {
+                    "status": "matched",
+                    "status_label": "已命中",
+                    "certainty": slot.certainty,
+                    "evidence_text": "；".join(slot.evidence),
+                }
+
+            if slot.status == "false":
+                return {
+                    "status": "negative",
+                    "status_label": "已否定",
+                    "certainty": slot.certainty,
+                    "evidence_text": "；".join(slot.evidence),
+                }
+
+        return {
+            "status": "unknown",
+            "status_label": "待验证",
+            "certainty": "unknown",
+            "evidence_text": "",
+        }
+
+    # 将图谱标签 / 问题类型映射成前端分组。
+    def _profile_group_key(self, row: dict) -> str:
+        question_type = str(row.get("question_type_hint") or "").strip()
+        label = str(row.get("label") or "").strip()
+        relation_type = str(row.get("relation_type") or "").strip()
+
+        if question_type in {"symptom", "risk", "lab", "imaging", "pathogen", "detail"}:
+            return question_type
+
+        if label in {"Symptom", "Sign"}:
+            return "symptom"
+
+        if label in {"RiskFactor", "RiskBehavior", "PopulationGroup"} or relation_type == "RISK_FACTOR_FOR":
+            return "risk"
+
+        if label in {"LabFinding", "LabTest"} or relation_type == "HAS_LAB_FINDING":
+            return "lab"
+
+        if label == "ImagingFinding" or relation_type == "HAS_IMAGING_FINDING":
+            return "imaging"
+
+        if label == "Pathogen" or relation_type == "HAS_PATHOGEN":
+            return "pathogen"
+
+        return "detail"
+
+    # 控制每个诊断卡片里的证据数量，避免前端过长。
+    def _limit_profile_groups(self, rows: Sequence[dict]) -> list[dict]:
+        group_counts: dict[str, int] = {}
+        limited: list[dict] = []
+
+        for row in rows:
+            group = str(row.get("group") or "detail")
+            count = group_counts.get(group, 0)
+
+            if count >= self.config.evidence_profile_group_limit:
+                continue
+
+            limited.append(dict(row))
+            group_counts[group] = count + 1
+
+            if len(limited) >= self.config.evidence_profile_limit:
+                break
+
+        return limited
 
     # 判断当前链接实体是否整体都低于可信阈值。
     def _all_link_confidence_low(

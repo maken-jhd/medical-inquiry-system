@@ -69,6 +69,27 @@ QUESTION_TYPE_LABELS = {
     None: "未知类型",
 }
 
+EVIDENCE_GROUP_LABELS = {
+    "symptom": "症状 / 体征",
+    "risk": "风险背景 / 风险行为",
+    "lab": "实验室 / 化验",
+    "imaging": "影像",
+    "pathogen": "病原学",
+    "detail": "其他关键细节",
+}
+
+EVIDENCE_STATUS_LABELS = {
+    "matched": "已命中",
+    "negative": "已否定",
+    "unknown": "待验证",
+}
+
+EVIDENCE_STATUS_ICONS = {
+    "matched": "☑",
+    "negative": "✖",
+    "unknown": "☐",
+}
+
 
 # 从本地 JSON 文件读取演示回放，并补齐前端需要的默认字段。
 def load_demo_replay(path: str | Path) -> dict[str, Any]:
@@ -117,7 +138,12 @@ def normalize_backend_turn(result: dict[str, Any]) -> dict[str, Any]:
             "pending_action_name": pending_action.get("target_node_name", ""),
         },
         "a1": _adapt_a1(_as_dict(result.get("a1"))),
-        "a2": _adapt_a2(_as_dict(result.get("a2")), final_report, search_report),
+        "a2": _adapt_a2(
+            _as_dict(result.get("a2")),
+            final_report,
+            search_report,
+            _as_list(result.get("a2_evidence_profiles")),
+        ),
         "a3": _adapt_a3(a3, selected_action, root_best_action, repair_action, repair_context),
         "a4": _adapt_a4(a4, route_after_a4, deductive_decision, _as_dict(result.get("evidence_audit"))),
         "search": _adapt_search(search_report, best_score),
@@ -230,19 +256,59 @@ def _adapt_a1(a1: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _adapt_a2(a2: dict[str, Any], final_report: dict[str, Any], search_report: dict[str, Any]) -> dict[str, Any]:
+def _adapt_a2(
+    a2: dict[str, Any],
+    final_report: dict[str, Any],
+    search_report: dict[str, Any],
+    evidence_profiles: list[Any] | None = None,
+) -> dict[str, Any]:
     candidates: list[dict[str, Any]] = []
+    profiles_by_id: dict[str, dict[str, Any]] = {}
+    profiles_by_name: dict[str, dict[str, Any]] = {}
+
+    for profile in evidence_profiles or []:
+        profile_dict = _adapt_evidence_profile(_as_dict(profile))
+        candidate_id = str(profile_dict.get("candidate_id") or "")
+        candidate_name = str(profile_dict.get("name") or "")
+
+        if len(candidate_id) > 0:
+            profiles_by_id[candidate_id] = profile_dict
+
+        if len(candidate_name) > 0:
+            profiles_by_name[candidate_name] = profile_dict
+
     primary = _as_dict(a2.get("primary_hypothesis"))
 
     if primary:
-        candidates.append(_normalize_candidate(primary, is_primary=True))
+        candidates.append(
+            _merge_candidate_profile(
+                _normalize_candidate(primary, is_primary=True),
+                profiles_by_id,
+                profiles_by_name,
+            )
+        )
 
     for item in _as_list(a2.get("alternatives")):
-        candidates.append(_normalize_candidate(_as_dict(item), is_primary=False))
+        candidates.append(
+            _merge_candidate_profile(
+                _normalize_candidate(_as_dict(item), is_primary=False),
+                profiles_by_id,
+                profiles_by_name,
+            )
+        )
 
     if not candidates:
-        for item in _as_list(final_report.get("candidate_hypotheses")):
-            candidates.append(_normalize_candidate(_as_dict(item), is_primary=False))
+        if evidence_profiles:
+            candidates = [_adapt_evidence_profile(_as_dict(item)) for item in evidence_profiles]
+        else:
+            for item in _as_list(final_report.get("candidate_hypotheses")):
+                candidates.append(
+                    _merge_candidate_profile(
+                        _normalize_candidate(_as_dict(item), is_primary=False),
+                        profiles_by_id,
+                        profiles_by_name,
+                    )
+                )
 
     if not candidates:
         for item in _as_list(search_report.get("final_answer_scores")):
@@ -254,6 +320,11 @@ def _adapt_a2(a2: dict[str, Any], final_report: dict[str, Any], search_report: d
                     "score_text": format_score(candidate.get("final_score")),
                     "reasoning": "来自搜索路径聚合评分。",
                     "is_primary": False,
+                    "evidence_groups": {},
+                    "matched_count": 0,
+                    "negative_count": 0,
+                    "unknown_count": 0,
+                    "score_breakdown": "当前仅有搜索路径聚合评分，暂未形成候选诊断证据画像。",
                 }
             )
 
@@ -395,11 +466,103 @@ def _adapt_safety(
 
 def _normalize_candidate(candidate: dict[str, Any], is_primary: bool) -> dict[str, Any]:
     return {
+        "candidate_id": candidate.get("node_id") or candidate.get("answer_id") or "",
         "name": candidate.get("name") or candidate.get("answer_name") or "未知候选",
         "score": candidate.get("score", candidate.get("final_score", 0)),
         "score_text": format_score(candidate.get("score", candidate.get("final_score", 0))),
         "reasoning": candidate.get("reasoning") or candidate.get("metadata", {}).get("reasoning", ""),
         "is_primary": is_primary,
+        "evidence_groups": {},
+        "matched_count": 0,
+        "negative_count": 0,
+        "unknown_count": 0,
+        "score_breakdown": "当前分数主要由 A2 候选排序和患者已知线索共同决定。",
+    }
+
+
+def _merge_candidate_profile(
+    candidate: dict[str, Any],
+    profiles_by_id: dict[str, dict[str, Any]],
+    profiles_by_name: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    candidate_id = str(candidate.get("candidate_id") or "")
+    candidate_name = str(candidate.get("name") or "")
+    profile = profiles_by_id.get(candidate_id) or profiles_by_name.get(candidate_name)
+
+    if profile is None:
+        return candidate
+
+    return {
+        **candidate,
+        "candidate_id": profile.get("candidate_id") or candidate.get("candidate_id", ""),
+        "name": profile.get("name") or candidate.get("name", ""),
+        "score": profile.get("score", candidate.get("score", 0)),
+        "score_text": profile.get("score_text", candidate.get("score_text", "")),
+        "is_primary": bool(profile.get("is_primary", candidate.get("is_primary", False))),
+        "evidence_groups": profile.get("evidence_groups", {}),
+        "matched_count": profile.get("matched_count", 0),
+        "negative_count": profile.get("negative_count", 0),
+        "unknown_count": profile.get("unknown_count", 0),
+        "score_breakdown": profile.get("score_breakdown", candidate.get("score_breakdown", "")),
+        "reasoning": profile.get("reasoning") or candidate.get("reasoning", ""),
+    }
+
+
+def _adapt_evidence_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    evidence_groups = {
+        key: [_adapt_evidence_item(_as_dict(item)) for item in _as_list(items)]
+        for key, items in _as_dict(profile.get("evidence_groups")).items()
+        if len(_as_list(items)) > 0
+    }
+    matched_count = int(profile.get("matched_count", 0) or 0)
+    negative_count = int(profile.get("negative_count", 0) or 0)
+    unknown_count = int(profile.get("unknown_count", 0) or 0)
+
+    if matched_count == 0 and negative_count == 0 and unknown_count == 0:
+        for items in evidence_groups.values():
+            for item in items:
+                status = item.get("status")
+                if status == "matched":
+                    matched_count += 1
+                elif status == "negative":
+                    negative_count += 1
+                else:
+                    unknown_count += 1
+
+    return {
+        "candidate_id": profile.get("candidate_id", ""),
+        "name": profile.get("candidate_name") or profile.get("name") or "未知候选",
+        "score": profile.get("score", 0),
+        "score_text": profile.get("score_text") or format_score(profile.get("score")),
+        "reasoning": profile.get("reasoning", ""),
+        "is_primary": bool(profile.get("is_primary", False)),
+        "evidence_groups": evidence_groups,
+        "matched_count": matched_count,
+        "negative_count": negative_count,
+        "unknown_count": unknown_count,
+        "score_breakdown": profile.get("score_breakdown", ""),
+    }
+
+
+def _adapt_evidence_item(item: dict[str, Any]) -> dict[str, Any]:
+    status = str(item.get("status") or "unknown")
+
+    if status not in EVIDENCE_STATUS_LABELS:
+        status = "unknown"
+
+    group = str(item.get("question_type") or item.get("group") or "detail")
+    return {
+        "node_id": item.get("node_id", ""),
+        "name": item.get("name", "未命名证据"),
+        "label": item.get("label", ""),
+        "relation_type": item.get("relation_type", ""),
+        "question_type": group,
+        "group_label": EVIDENCE_GROUP_LABELS.get(group, "其他关键细节"),
+        "status": status,
+        "status_label": item.get("status_label") or EVIDENCE_STATUS_LABELS[status],
+        "status_icon": EVIDENCE_STATUS_ICONS[status],
+        "certainty": item.get("certainty", ""),
+        "evidence_text": item.get("evidence_text", ""),
     }
 
 

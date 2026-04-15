@@ -118,6 +118,43 @@ st.markdown(
         font-weight: 750;
         font-size: 1.02rem;
     }
+    .candidate-title {
+        font-weight: 800;
+        font-size: 1.02rem;
+        margin-bottom: 0.15rem;
+    }
+    .candidate-badge {
+        display: inline-block;
+        padding: 0.1rem 0.45rem;
+        border-radius: 999px;
+        font-size: 0.74rem;
+        font-weight: 750;
+        border: 1px solid #d1d5db;
+        background: #f9fafb;
+        color: #374151;
+        margin-left: 0.35rem;
+    }
+    .primary-badge {
+        background: #ecfdf5;
+        border-color: #bbf7d0;
+        color: #166534;
+    }
+    .evidence-line {
+        font-size: 0.89rem;
+        line-height: 1.48;
+        margin: 0.08rem 0;
+    }
+    .evidence-matched {
+        color: #166534;
+        font-weight: 650;
+    }
+    .evidence-negative {
+        color: #991b1b;
+        font-weight: 650;
+    }
+    .evidence-unknown {
+        color: #374151;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -512,11 +549,11 @@ def _render_a1_card(a1: dict[str, Any]) -> None:
 
 
 def _render_a2_card(a2: dict[str, Any]) -> None:
-    """展示 A2 候选诊断排序。"""
+    """展示 A2 候选诊断证据画像。"""
 
     with st.container(border=True):
         st.markdown("### A2 候选诊断排序")
-        st.caption("系统结合患者上下文与知识图谱候选，动态更新 top-k 诊断。")
+        st.caption("系统结合患者上下文与知识图谱候选，动态更新 top-k 诊断；分数仅作辅助，重点看证据命中、否定与待验证情况。")
         candidates = a2.get("candidates", [])
         if not candidates:
             st.info("暂无候选诊断排序。")
@@ -526,10 +563,84 @@ def _render_a2_card(a2: dict[str, Any]) -> None:
         for idx, item in enumerate(candidates[:3], start=1):
             name = item.get("name", "未知候选")
             label = "主假设" if item.get("is_primary") or idx == 1 else "备选假设"
-            st.markdown(f"**{idx}. {name}** · {label} · 分数 {format_score(item.get('score'))}")
-            st.progress(score_to_progress(item.get("score"), fallback_max=max_score))
-            if item.get("reasoning"):
-                st.caption(item["reasoning"])
+            badge_class = "candidate-badge primary-badge" if label == "主假设" else "candidate-badge"
+
+            with st.container(border=True):
+                st.markdown(
+                    f"""
+                    <div class="candidate-title">
+                      {idx}. {name}
+                      <span class="{badge_class}">{label}</span>
+                      <span class="candidate-badge">分数 {format_score(item.get('score'))}</span>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                st.progress(score_to_progress(item.get("score"), fallback_max=max_score))
+
+                count_cols = st.columns(3)
+                count_cols[0].success(f"☑ 已命中 {int(item.get('matched_count', 0) or 0)}")
+                count_cols[1].warning(f"☐ 待验证 {int(item.get('unknown_count', 0) or 0)}")
+                count_cols[2].error(f"✖ 已否定 {int(item.get('negative_count', 0) or 0)}")
+
+                if item.get("score_breakdown"):
+                    st.caption(item["score_breakdown"])
+                elif item.get("reasoning"):
+                    st.caption(item["reasoning"])
+
+                evidence_groups = item.get("evidence_groups") or {}
+                if evidence_groups:
+                    _render_candidate_evidence_groups(evidence_groups)
+                else:
+                    st.caption("暂无可展示的关键证据画像，当前仅显示候选排序结果。")
+
+
+def _render_candidate_evidence_groups(evidence_groups: dict[str, Any]) -> None:
+    """渲染只读复选框风格的候选诊断证据清单。"""
+
+    group_labels = {
+        "symptom": "症状 / 体征",
+        "risk": "风险背景 / 风险行为",
+        "lab": "实验室 / 化验",
+        "imaging": "影像",
+        "pathogen": "病原学",
+        "detail": "其他关键细节",
+    }
+    ordered_groups = ["symptom", "risk", "lab", "imaging", "pathogen", "detail"]
+
+    for group_key in ordered_groups:
+        items = evidence_groups.get(group_key) or []
+
+        if not items:
+            continue
+
+        st.markdown(f"**{group_labels.get(group_key, '其他关键细节')}**")
+
+        for evidence in items[:5]:
+            status = str(evidence.get("status") or "unknown")
+            icon = evidence.get("status_icon") or {"matched": "☑", "negative": "✖", "unknown": "☐"}.get(status, "☐")
+            css_class = {
+                "matched": "evidence-matched",
+                "negative": "evidence-negative",
+                "unknown": "evidence-unknown",
+            }.get(status, "evidence-unknown")
+            status_label = evidence.get("status_label") or {
+                "matched": "已命中",
+                "negative": "已否定",
+                "unknown": "待验证",
+            }.get(status, "待验证")
+            name = evidence.get("name", "未命名证据")
+            relation_type = evidence.get("relation_type", "")
+            relation_text = f" · {relation_type}" if relation_type else ""
+            st.markdown(
+                f"""
+                <div class="evidence-line {css_class}">
+                  {icon} {name}
+                  <span class="small-muted">（{status_label}{relation_text}）</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
 
 def _render_a3_card(a3: dict[str, Any]) -> None:

@@ -633,6 +633,148 @@ class ConsultationBrain:
         )
         return a2_result
 
+    # 构建 A2 展示专用的候选诊断证据画像，帮助前端解释排序依据。
+    def _build_a2_evidence_profiles(self, session_id: str, limit: int = 5) -> list[dict]:
+        state = self.deps.state_tracker.get_session(session_id)
+        ranked_hypotheses = sorted(state.candidate_hypotheses, key=lambda item: (-item.score, item.name))[:limit]
+        profiles: list[dict] = []
+
+        for index, hypothesis in enumerate(ranked_hypotheses):
+            evidence_items = self._retrieve_display_evidence_profile(hypothesis, state)
+            evidence_groups = self._group_display_evidence_items(evidence_items)
+            status_counts = self._count_evidence_profile_statuses(evidence_items)
+            profiles.append(
+                {
+                    "candidate_id": hypothesis.node_id,
+                    "candidate_name": hypothesis.name,
+                    "candidate_label": hypothesis.label,
+                    "is_primary": index == 0,
+                    "score": hypothesis.score,
+                    "score_text": f"{hypothesis.score:.2f}",
+                    "evidence_groups": evidence_groups,
+                    "matched_count": status_counts["matched"],
+                    "negative_count": status_counts["negative"],
+                    "unknown_count": status_counts["unknown"],
+                    "score_breakdown": self._build_evidence_profile_score_breakdown(status_counts, evidence_groups),
+                    "reasoning": str(hypothesis.metadata.get("reasoning") or ""),
+                }
+            )
+
+        return profiles
+
+    # 读取展示用证据画像；当 retriever 不支持时优雅降级为空证据组。
+    def _retrieve_display_evidence_profile(self, hypothesis: HypothesisScore, state: SessionState) -> list[dict]:
+        retriever = self.deps.retriever
+
+        if not hasattr(retriever, "retrieve_candidate_evidence_profile"):
+            return []
+
+        try:
+            rows = retriever.retrieve_candidate_evidence_profile(hypothesis, state)
+        except Exception as exc:
+            state.metadata["last_a2_evidence_profile_error"] = str(exc)
+            return []
+
+        return [dict(item) for item in rows if isinstance(item, dict)]
+
+    # 将证据画像按老师更容易理解的临床证据类别分组。
+    def _group_display_evidence_items(self, evidence_items: list[dict]) -> dict[str, list[dict]]:
+        groups: dict[str, list[dict]] = {
+            "symptom": [],
+            "risk": [],
+            "lab": [],
+            "imaging": [],
+            "pathogen": [],
+            "detail": [],
+        }
+
+        for item in evidence_items:
+            group_key = self._normalize_display_evidence_group(item)
+            groups.setdefault(group_key, []).append(
+                {
+                    "node_id": item.get("node_id"),
+                    "name": item.get("name", "未命名证据"),
+                    "label": item.get("label", ""),
+                    "relation_type": item.get("relation_type", ""),
+                    "question_type": item.get("question_type_hint", group_key),
+                    "status": item.get("status", "unknown"),
+                    "status_label": item.get("status_label", "待验证"),
+                    "certainty": item.get("certainty", "unknown"),
+                    "evidence_text": item.get("evidence_text", ""),
+                    "acquisition_mode": item.get("acquisition_mode", ""),
+                    "evidence_cost": item.get("evidence_cost", ""),
+                }
+            )
+
+        return {key: value for key, value in groups.items() if len(value) > 0}
+
+    # 兼容 retriever 旧字段或测试桩未提供 group 的情况。
+    def _normalize_display_evidence_group(self, item: dict) -> str:
+        group = str(item.get("group") or item.get("question_type_hint") or "").strip()
+
+        if group in {"symptom", "risk", "lab", "imaging", "pathogen", "detail"}:
+            return group
+
+        label = str(item.get("label") or "")
+        relation_type = str(item.get("relation_type") or "")
+
+        if label in {"Symptom", "Sign"}:
+            return "symptom"
+
+        if label in {"RiskFactor", "RiskBehavior", "PopulationGroup"} or relation_type == "RISK_FACTOR_FOR":
+            return "risk"
+
+        if label in {"LabFinding", "LabTest"} or relation_type == "HAS_LAB_FINDING":
+            return "lab"
+
+        if label == "ImagingFinding" or relation_type == "HAS_IMAGING_FINDING":
+            return "imaging"
+
+        if label == "Pathogen" or relation_type == "HAS_PATHOGEN":
+            return "pathogen"
+
+        return "detail"
+
+    # 统计证据画像里的已命中 / 已否定 / 待验证数量。
+    def _count_evidence_profile_statuses(self, evidence_items: list[dict]) -> dict[str, int]:
+        counts = {"matched": 0, "negative": 0, "unknown": 0}
+
+        for item in evidence_items:
+            status = str(item.get("status") or "unknown")
+
+            if status not in counts:
+                status = "unknown"
+
+            counts[status] += 1
+
+        return counts
+
+    # 生成一句面向展示的分数解释，不做复杂数学拆解。
+    def _build_evidence_profile_score_breakdown(
+        self,
+        status_counts: dict[str, int],
+        evidence_groups: dict[str, list[dict]],
+    ) -> str:
+        group_labels = {
+            "symptom": "症状 / 体征",
+            "risk": "风险背景",
+            "lab": "化验",
+            "imaging": "影像",
+            "pathogen": "病原学",
+            "detail": "关键细节",
+        }
+        active_groups = [group_labels.get(key, key) for key, items in evidence_groups.items() if len(items) > 0]
+        base = (
+            f"当前已有 {status_counts.get('matched', 0)} 条支持证据、"
+            f"{status_counts.get('negative', 0)} 条反向证据、"
+            f"{status_counts.get('unknown', 0)} 条待验证证据。"
+        )
+
+        if len(active_groups) == 0:
+            return base + "分数主要来自 A2 候选排序与已有患者线索。"
+
+        return base + "分数主要结合 " + "、".join(active_groups[:4]) + " 与当前患者线索共同形成。"
+
     # 运行局部树搜索，生成下一问动作、候选轨迹和最终答案评分。
     def run_reasoning_search(
         self,
@@ -922,6 +1064,8 @@ class ConsultationBrain:
                 selected_action,
             )
 
+        a2_evidence_profiles = self._build_a2_evidence_profiles(session_id)
+
         if self._should_emit_final_report(search_result, selected_action, stop_decision, accept_decision):
             if stop_decision.reason in {"exam_not_done_and_no_low_cost_questions", "insufficient_observable_evidence"}:
                 final_report = self.deps.report_builder.build_final_report(tracker.get_session(session_id), stop_decision)
@@ -939,6 +1083,7 @@ class ConsultationBrain:
                 "linked_entities": [asdict(item) for item in linked_entities],
                 "a1": asdict(a1_result),
                 "a2": asdict(a2_result),
+                "a2_evidence_profiles": a2_evidence_profiles,
                 "a3": asdict(A3VerificationResult()),
                 "a4": asdict(a4_result) if a4_result is not None else None,
                 "deductive_decision": asdict(deductive_decision) if deductive_decision is not None else None,
@@ -979,6 +1124,7 @@ class ConsultationBrain:
             "linked_entities": [asdict(item) for item in linked_entities],
             "a1": asdict(a1_result),
             "a2": asdict(a2_result),
+            "a2_evidence_profiles": a2_evidence_profiles,
             "a3": asdict(a3_result),
             "a4": asdict(a4_result) if a4_result is not None else None,
             "deductive_decision": asdict(deductive_decision) if deductive_decision is not None else None,

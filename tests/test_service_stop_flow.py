@@ -8,6 +8,7 @@ from brain.state_tracker import StateTracker
 from brain.types import (
     A1ExtractionResult,
     FinalAnswerScore,
+    HypothesisScore,
     MctsAction,
     PatientContext,
     QuestionCandidate,
@@ -38,6 +39,35 @@ class ColdStartRetriever(DummyRetriever):
                 priority=3.0,
                 graph_weight=1.0,
             )
+        ]
+
+
+class EvidenceProfileRetriever(DummyRetriever):
+    """提供固定候选证据画像，验证 service 会注入 A2 展示字段。"""
+
+    def retrieve_candidate_evidence_profile(self, hypothesis: object, session_state: SessionState) -> list[dict]:
+        _ = hypothesis, session_state
+        return [
+            {
+                "node_id": "symptom_fever",
+                "name": "发热",
+                "label": "Symptom",
+                "relation_type": "MANIFESTS_AS",
+                "question_type_hint": "symptom",
+                "group": "symptom",
+                "status": "matched",
+                "status_label": "已命中",
+            },
+            {
+                "node_id": "lab_cd4_low",
+                "name": "CD4+ T淋巴细胞计数 < 200/μL",
+                "label": "LabFinding",
+                "relation_type": "HAS_LAB_FINDING",
+                "question_type_hint": "lab",
+                "group": "lab",
+                "status": "unknown",
+                "status_label": "待验证",
+            },
         ]
 
 
@@ -346,3 +376,39 @@ def test_chief_complaint_pending_action_routes_next_reply_back_to_a1() -> None:
     assert route_result[2].stage == "A1"
     assert tracker.get_pending_action("s5") is None
     assert state.metadata["last_answered_action"].action_type == "collect_chief_complaint"
+
+
+def test_service_builds_a2_evidence_profiles_for_frontend() -> None:
+    tracker = StateTracker()
+    state = tracker.create_session("s6")
+    state.candidate_hypotheses = [
+        HypothesisScore(node_id="pcp", label="Disease", name="肺孢子菌肺炎 (PCP)", score=0.82),
+    ]
+    brain = ConsultationBrain(
+        BrainDependencies(
+            state_tracker=tracker,
+            retriever=EvidenceProfileRetriever(),
+            med_extractor=object(),
+            entity_linker=object(),
+            question_selector=object(),
+            stop_rule_engine=object(),
+            report_builder=ReportBuilder(),
+            evidence_parser=object(),
+            hypothesis_manager=object(),
+            action_builder=ActionBuilder(),
+            router=object(),
+            mcts_engine=object(),
+            simulation_engine=object(),
+            trajectory_evaluator=object(),
+            llm_client=object(),
+        )
+    )
+
+    profiles = brain._build_a2_evidence_profiles("s6")
+
+    assert len(profiles) == 1
+    assert profiles[0]["candidate_name"] == "肺孢子菌肺炎 (PCP)"
+    assert profiles[0]["matched_count"] == 1
+    assert profiles[0]["unknown_count"] == 1
+    assert profiles[0]["evidence_groups"]["symptom"][0]["name"] == "发热"
+    assert profiles[0]["evidence_groups"]["lab"][0]["status"] == "unknown"

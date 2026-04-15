@@ -1,7 +1,7 @@
 """测试图谱检索器的 R1 / R2 基础行为。"""
 
 from brain.retriever import GraphRetriever
-from brain.types import KeyFeature, SessionState, SlotState
+from brain.types import EvidenceState, HypothesisScore, KeyFeature, SessionState, SlotState
 
 
 class FakeNeo4jClient:
@@ -134,3 +134,74 @@ def test_retriever_tightens_r1_candidate_semantics() -> None:
     assert len(candidates) == 1
     assert candidates[0].node_id == "disease_good"
     assert candidates[0].metadata["feature_coverage"] > 0.6
+
+
+class ProfileFakeNeo4jClient(FakeNeo4jClient):
+    """提供候选诊断证据画像查询结果。"""
+
+    def run_query(self, query: str, params: dict | None = None) -> list[dict]:
+        self.last_query = query
+        self.last_params = params or {}
+
+        if "RETURN target.id AS node_id" in query and "NOT target.id IN" not in query:
+            return [
+                {
+                    "node_id": "symptom_fever",
+                    "label": "Symptom",
+                    "name": "发热",
+                    "relation_type": "MANIFESTS_AS",
+                    "relation_weight": 0.8,
+                    "node_weight": 0.7,
+                    "priority": 1.5,
+                    "question_type_hint": "symptom",
+                },
+                {
+                    "node_id": "lab_cd4_low",
+                    "label": "LabFinding",
+                    "name": "CD4+ T淋巴细胞计数 < 200/μL",
+                    "relation_type": "HAS_LAB_FINDING",
+                    "relation_weight": 0.9,
+                    "node_weight": 0.9,
+                    "priority": 1.8,
+                    "question_type_hint": "lab",
+                },
+                {
+                    "node_id": "ct_ground_glass",
+                    "label": "ImagingFinding",
+                    "name": "胸部CT磨玻璃影",
+                    "relation_type": "HAS_IMAGING_FINDING",
+                    "relation_weight": 0.9,
+                    "node_weight": 0.9,
+                    "priority": 1.7,
+                    "question_type_hint": "imaging",
+                },
+            ]
+
+        return super().run_query(query, params)
+
+
+# 验证候选诊断证据画像不排除已知节点，并基于结构化状态标注证据状态。
+def test_retriever_builds_candidate_evidence_profile_with_statuses() -> None:
+    retriever = GraphRetriever(ProfileFakeNeo4jClient())
+    state = SessionState(
+        session_id="s_profile",
+        slots={"发热": SlotState(node_id="发热", status="true", certainty="certain")},
+        evidence_states={
+            "lab_cd4_low": EvidenceState(
+                node_id="lab_cd4_low",
+                existence="non_exist",
+                certainty="confident",
+                reasoning="患者否认 CD4 很低。",
+            )
+        },
+    )
+    hypothesis = HypothesisScore(node_id="pcp", label="Disease", name="肺孢子菌肺炎 (PCP)", score=1.0)
+
+    rows = retriever.retrieve_candidate_evidence_profile(hypothesis, state, top_k=6)
+
+    by_id = {item["node_id"]: item for item in rows}
+    assert "NOT target.id IN" not in retriever.client.last_query
+    assert by_id["symptom_fever"]["status"] == "matched"
+    assert by_id["lab_cd4_low"]["status"] == "negative"
+    assert by_id["ct_ground_glass"]["status"] == "unknown"
+    assert by_id["ct_ground_glass"]["group"] == "imaging"
