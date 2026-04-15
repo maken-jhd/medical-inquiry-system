@@ -68,6 +68,16 @@ class ActionBuilder:
                 verifier_recommended_match_score,
                 hypothesis_recommended_match_score,
             )
+            discriminative_gain = max(
+                0.0,
+                contradiction_priority * (1.0 - alternative_overlap * 0.45)
+                + recommended_match_score * 0.35
+                + joint_recommended_match_score * 0.25,
+            )
+            novelty_score = max(
+                0.0,
+                1.0 - relation_weight * 0.7 - alternative_overlap * 0.2 + recommended_match_score * 0.15,
+            )
 
             if bool(row.get("is_red_flag", False)):
                 priority += self.config.red_flag_bonus
@@ -94,6 +104,10 @@ class ActionBuilder:
                         evidence_tags=evidence_tags,
                         acquisition_mode=acquisition_mode,
                         evidence_cost=evidence_cost,
+                        discriminative_gain=discriminative_gain,
+                        recommended_match_score=recommended_match_score,
+                        joint_recommended_match_score=joint_recommended_match_score,
+                        recommended_bonus=recommended_bonus,
                     )
                     continue
 
@@ -117,16 +131,8 @@ class ActionBuilder:
                         "acquisition_mode": acquisition_mode,
                         "evidence_cost": evidence_cost,
                         "accessibility_bias": accessibility_bias,
-                        "discriminative_gain": max(
-                            0.0,
-                            contradiction_priority * (1.0 - alternative_overlap * 0.45)
-                            + recommended_match_score * 0.35
-                            + joint_recommended_match_score * 0.25,
-                        ),
-                        "novelty_score": max(
-                            0.0,
-                            1.0 - relation_weight * 0.7 - alternative_overlap * 0.2 + recommended_match_score * 0.15,
-                        ),
+                        "discriminative_gain": discriminative_gain,
+                        "novelty_score": novelty_score,
                         "patient_burden": patient_burden,
                         "is_red_flag": bool(row.get("is_red_flag", False)),
                         "competing_hypothesis_count": len(alternatives),
@@ -220,6 +226,10 @@ class ActionBuilder:
         evidence_tags: set[str],
         acquisition_mode: str,
         evidence_cost: str,
+        discriminative_gain: float,
+        recommended_match_score: float,
+        joint_recommended_match_score: float,
+        recommended_bonus: float,
     ) -> None:
         action = actions_by_kind.get(exam_kind)
         candidate_payload = {
@@ -232,6 +242,10 @@ class ActionBuilder:
             "evidence_cost": evidence_cost,
             "priority": float(row.get("priority", priority)),
             "contradiction_priority": float(row.get("contradiction_priority", 0.0)),
+            "discriminative_gain": discriminative_gain,
+            "recommended_match_score": recommended_match_score,
+            "joint_recommended_match_score": joint_recommended_match_score,
+            "recommended_evidence_bonus": recommended_bonus,
         }
 
         if action is None:

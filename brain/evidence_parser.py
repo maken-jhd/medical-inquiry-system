@@ -635,11 +635,14 @@ class EvidenceParser:
         for clause in clauses:
             normalized_clause = self._normalize_exam_text(clause)
 
-            if not any(keyword in normalized_clause for keyword in result_keywords):
+            has_result_keyword = any(keyword in normalized_clause for keyword in result_keywords)
+            has_numeric_result = self._contains_exam_numeric_result(clause, mentioned_tests, exam_kind)
+
+            if not has_result_keyword and not has_numeric_result:
                 continue
 
             test_name = self._choose_result_test_name(clause, mentioned_tests, exam_kind)
-            normalized_result = self._classify_exam_result_text(clause)
+            normalized_result = self._classify_exam_result_text(f"{test_name} {clause}")
             result = ExamMentionedResult(
                 test_name=test_name,
                 raw_text=clause,
@@ -649,6 +652,46 @@ class EvidenceParser:
             results.append(result)
 
         return results
+
+    # 识别“CD4 150”“PaO2 68”“β-D 葡聚糖 200”等没有显式高低词的数值型结果。
+    def _contains_exam_numeric_result(
+        self,
+        clause: str,
+        mentioned_tests: Sequence[str],
+        exam_kind: str,
+    ) -> bool:
+        normalized = self._normalize_exam_text(clause)
+
+        if len(self._extract_numbers(normalized)) == 0:
+            return False
+
+        if len(mentioned_tests) > 0:
+            for test_name in mentioned_tests:
+                if self._normalize_exam_text(test_name) in normalized:
+                    return True
+
+            if len(mentioned_tests) == 1 or any(marker in normalized for marker in ("结果", "数值", "报告")):
+                return True
+
+        numeric_test_keywords = {
+            "lab": (
+                "cd4",
+                "t淋巴",
+                "pao2",
+                "spo2",
+                "氧分压",
+                "血氧",
+                "βd葡聚糖",
+                "bdg",
+                "葡聚糖",
+                "g试验",
+                "hivrna",
+                "病毒载量",
+            ),
+            "imaging": ("ct", "胸片", "影像"),
+            "pathogen": ("pcr", "核酸", "痰", "灌洗", "bal", "balf"),
+        }
+        return any(keyword in normalized for keyword in numeric_test_keywords.get(exam_kind, ()))
 
     # 给结果分句选择最可能对应的检查名。
     def _choose_result_test_name(self, clause: str, mentioned_tests: Sequence[str], exam_kind: str) -> str:
@@ -679,6 +722,11 @@ class EvidenceParser:
         if any(keyword in normalized for keyword in ("阴性", "未检出", "正常", "没有异常", "未见")):
             return "negative"
 
+        numeric_direction = self._classify_numeric_exam_result(normalized)
+
+        if numeric_direction != "unknown":
+            return numeric_direction
+
         if any(keyword in normalized for keyword in ("阳性", "检出", "异常", "磨玻璃")):
             return "positive"
 
@@ -689,6 +737,62 @@ class EvidenceParser:
             return "high"
 
         return "unknown"
+
+    # 对常见检查阈值做轻量判断，避免真实报告式数值无法进入槽位。
+    def _classify_numeric_exam_result(self, normalized_text: str) -> str:
+        numbers = self._extract_numbers(normalized_text)
+
+        if len(numbers) == 0:
+            return "unknown"
+
+        value = numbers[0]
+
+        if any(keyword in normalized_text for keyword in ("cd4", "t淋巴")):
+            if value < 200:
+                return "low"
+            if value >= 500:
+                return "negative"
+            return "unknown"
+
+        if any(keyword in normalized_text for keyword in ("pao2", "氧分压")):
+            if value < 70:
+                return "low"
+            if value >= 80:
+                return "negative"
+            return "unknown"
+
+        if any(keyword in normalized_text for keyword in ("spo2", "血氧")):
+            if value < 94:
+                return "low"
+            if value >= 95:
+                return "negative"
+            return "unknown"
+
+        if any(keyword in normalized_text for keyword in ("βd葡聚糖", "bdg", "葡聚糖", "g试验")):
+            if value >= 80:
+                return "high"
+            if value < 60:
+                return "negative"
+            return "unknown"
+
+        if any(keyword in normalized_text for keyword in ("hivrna", "病毒载量")):
+            if value > 0:
+                return "high"
+            return "negative"
+
+        return "unknown"
+
+    # 从归一化文本中抽取浮点数。
+    def _extract_numbers(self, normalized_text: str) -> list[float]:
+        values: list[float] = []
+
+        for match in re.findall(r"(?<![a-zA-Z])\d+(?:\.\d+)?(?![a-zA-Z])", normalized_text):
+            try:
+                values.append(float(match))
+            except ValueError:
+                continue
+
+        return values
 
     # 将结果分句映射到当前 collect_exam_context 动作携带的候选证据节点。
     def _match_exam_result_to_candidate(

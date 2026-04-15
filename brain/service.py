@@ -410,6 +410,11 @@ class ConsultationBrain:
         action: MctsAction,
         exam_result: ExamContextResult,
     ) -> MctsAction:
+        candidate = self._select_exam_result_followup_candidate(action, exam_result)
+
+        if candidate is not None:
+            return self._build_specific_exam_result_action(action, exam_result, candidate)
+
         mentioned_tests = [item for item in exam_result.mentioned_tests if len(item.strip()) > 0]
 
         if len(mentioned_tests) > 0:
@@ -441,6 +446,151 @@ class ConsultationBrain:
                 "mentioned_tests": mentioned_tests,
             },
         )
+
+    # 如果患者已经说出检查名称，则优先追问与该检查最匹配、价值最高的具体结果节点。
+    def _select_exam_result_followup_candidate(
+        self,
+        action: MctsAction,
+        exam_result: ExamContextResult,
+    ) -> dict | None:
+        candidates = action.metadata.get("exam_candidate_evidence", [])
+
+        if not isinstance(candidates, list) or len(exam_result.mentioned_tests) == 0:
+            return None
+
+        ranked: list[tuple[float, dict]] = []
+
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+
+            name_match = self._exam_candidate_name_match_score(candidate, exam_result)
+
+            if name_match <= 0.0:
+                continue
+
+            score = (
+                name_match * 3.0
+                + float(candidate.get("priority", 0.0)) * 0.45
+                + float(candidate.get("contradiction_priority", 0.0)) * 0.55
+                + float(candidate.get("discriminative_gain", 0.0)) * 0.8
+                + float(candidate.get("recommended_match_score", 0.0)) * 1.1
+                + float(candidate.get("joint_recommended_match_score", 0.0)) * 1.0
+                + float(candidate.get("recommended_evidence_bonus", 0.0)) * 0.7
+            )
+            ranked.append((score, candidate))
+
+        if len(ranked) == 0:
+            return None
+
+        return sorted(ranked, key=lambda item: (-item[0], str(item[1].get("name", ""))))[0][1]
+
+    # 估计患者提到的检查名和候选证据节点是否匹配。
+    def _exam_candidate_name_match_score(self, candidate: dict, exam_result: ExamContextResult) -> float:
+        candidate_name = self._normalize_match_text(str(candidate.get("name") or ""))
+        candidate_label = str(candidate.get("label") or "")
+        exam_kind = exam_result.exam_kind
+        best = 0.0
+
+        for test_name in exam_result.mentioned_tests:
+            test_text = self._normalize_match_text(test_name)
+
+            if len(test_text) == 0 or len(candidate_name) == 0:
+                continue
+
+            if test_text in candidate_name or candidate_name in test_text:
+                best = max(best, 1.0)
+
+            family_rules = {
+                "lab": (
+                    (("cd4", "t淋巴"), ("cd4", "t淋巴", "免疫")),
+                    (("βd葡聚糖", "bdg", "g试验", "葡聚糖"), ("βd葡聚糖", "bdg", "葡聚糖", "g试验")),
+                    (("hivrna", "病毒载量"), ("hivrna", "病毒载量")),
+                    (("血氧", "动脉血气", "pao2", "spo2"), ("血氧", "氧分压", "pao2", "spo2", "低氧")),
+                ),
+                "imaging": (
+                    (("胸部ct", "ct", "胸片", "x线"), ("ct", "影像", "磨玻璃", "胸片", "x线")),
+                ),
+                "pathogen": (
+                    (("pcr", "核酸"), ("pcr", "核酸", "阳性", "检出")),
+                    (("痰检", "痰培养", "痰涂片"), ("痰", "培养", "涂片", "病原")),
+                    (("支气管肺泡", "肺泡灌洗", "bal", "balf"), ("支气管肺泡", "肺泡灌洗", "bal", "balf")),
+                ),
+            }
+
+            for test_keywords, candidate_keywords in family_rules.get(exam_kind, ()):
+                if any(keyword in test_text for keyword in test_keywords) and any(
+                    keyword in candidate_name for keyword in candidate_keywords
+                ):
+                    best = max(best, 0.85)
+
+            if exam_kind == "imaging" and candidate_label == "ImagingFinding" and best == 0.0:
+                best = max(best, 0.55)
+
+            if exam_kind == "pathogen" and candidate_label in {"Pathogen", "LabFinding", "LabTest"} and best == 0.0:
+                best = max(best, 0.45)
+
+        return best
+
+    # 构造针对某个具体检查结果节点的 follow-up 动作。
+    def _build_specific_exam_result_action(
+        self,
+        source_action: MctsAction,
+        exam_result: ExamContextResult,
+        candidate: dict,
+    ) -> MctsAction:
+        node_id = str(candidate.get("node_id") or "").strip()
+        target_name = str(candidate.get("name") or node_id).strip()
+        label = str(candidate.get("label") or "Unknown")
+        question_type_hint = str(candidate.get("question_type_hint") or exam_result.exam_kind)
+        mentioned_tests = [item for item in exam_result.mentioned_tests if len(item.strip()) > 0]
+        question_text = self._render_specific_exam_result_question(exam_result.exam_kind, mentioned_tests, target_name)
+
+        return MctsAction(
+            action_id=f"verify::{source_action.hypothesis_id or 'unknown'}::{node_id}",
+            action_type="verify_evidence",
+            target_node_id=node_id,
+            target_node_label=label,
+            target_node_name=target_name,
+            hypothesis_id=source_action.hypothesis_id,
+            topic_id=source_action.topic_id,
+            prior_score=max(source_action.prior_score, float(candidate.get("priority", 0.0))),
+            metadata={
+                "relation_type": candidate.get("relation_type"),
+                "question_type_hint": question_type_hint,
+                "acquisition_mode": candidate.get("acquisition_mode", source_action.metadata.get("acquisition_mode", "")),
+                "evidence_cost": candidate.get("evidence_cost", source_action.metadata.get("evidence_cost", "")),
+                "patient_burden": source_action.metadata.get("patient_burden", 0.35),
+                "contradiction_priority": float(candidate.get("contradiction_priority", 0.0)),
+                "discriminative_gain": float(candidate.get("discriminative_gain", 0.0)),
+                "recommended_match_score": float(candidate.get("recommended_match_score", 0.0)),
+                "joint_recommended_match_score": float(candidate.get("joint_recommended_match_score", 0.0)),
+                "question_text": question_text,
+                "exam_context_followup": True,
+                "exam_followup_mode": "specific_result",
+                "exam_kind": exam_result.exam_kind,
+                "mentioned_tests": mentioned_tests,
+                "source_exam_context_action_id": source_action.action_id,
+                "evidence_tags": self._normalize_string_list(source_action.metadata.get("evidence_tags", [])),
+            },
+        )
+
+    # 为具体检查结果 follow-up 渲染更自然的问题。
+    def _render_specific_exam_result_question(
+        self,
+        exam_kind: str,
+        mentioned_tests: list[str],
+        target_name: str,
+    ) -> str:
+        test_text = "、".join(mentioned_tests[:3]) if len(mentioned_tests) > 0 else "这个检查"
+
+        if exam_kind == "imaging":
+            return f"你刚才提到做过 {test_text}。报告里有没有提到“{target_name}”，或者类似的明显异常？"
+
+        if exam_kind == "pathogen":
+            return f"你刚才提到做过 {test_text}。结果有没有提示“{target_name}”，比如阳性、检出或阴性？"
+
+        return f"你刚才提到做过 {test_text}。这个结果大概是否提示“{target_name}”，比如偏低、升高、阳性或阴性？"
 
     # 取出检查上下文澄清动作，避免重复使用。
     def _pop_exam_context_followup_action(self, session_id: str) -> MctsAction | None:
@@ -750,6 +900,13 @@ class ConsultationBrain:
             selected_action = default_search_action
 
         if selected_action is None and not accept_decision.should_stop:
+            stage_stop_decision = self._build_exam_limited_stage_stop_decision(session_id)
+
+            if stage_stop_decision is not None:
+                stop_decision = stage_stop_decision
+                search_result.metadata["fallback_reason"] = "exam_not_done_and_no_low_cost_questions"
+
+        if selected_action is None and not accept_decision.should_stop and not stop_decision.should_stop:
             selected_action = self._choose_cold_start_probe_action(session_id)
 
             if selected_action is not None and not self._has_search_signal(search_result):
@@ -766,11 +923,14 @@ class ConsultationBrain:
             )
 
         if self._should_emit_final_report(search_result, selected_action, stop_decision, accept_decision):
-            final_report = (
-                self.finalize_from_search(session_id, search_result)
-                if self._has_search_signal(search_result)
-                else self.deps.report_builder.build_final_report(tracker.get_session(session_id), stop_decision)
-            )
+            if stop_decision.reason in {"exam_not_done_and_no_low_cost_questions", "insufficient_observable_evidence"}:
+                final_report = self.deps.report_builder.build_final_report(tracker.get_session(session_id), stop_decision)
+            else:
+                final_report = (
+                    self.finalize_from_search(session_id, search_result)
+                    if self._has_search_signal(search_result)
+                    else self.deps.report_builder.build_final_report(tracker.get_session(session_id), stop_decision)
+                )
             return {
                 "session_id": session_id,
                 "turn_index": turn_index,
@@ -2048,6 +2208,89 @@ class ConsultationBrain:
 
         return self.deps.action_builder.build_probe_action_from_question_candidate(fallback_candidate)
 
+    # 当相关高成本检查明确未做、且当前已无可观测低成本问题时，输出阶段性判断而不是空转。
+    def _build_exam_limited_stage_stop_decision(self, session_id: str) -> StopDecision | None:
+        state = self.deps.state_tracker.get_session(session_id)
+        not_done_exam_kinds = [
+            kind
+            for kind, context in state.exam_context.items()
+            if context.availability == "not_done"
+        ]
+
+        if len(not_done_exam_kinds) == 0 or len(state.candidate_hypotheses) == 0:
+            return None
+
+        low_cost_candidates = self._collect_remaining_low_cost_r2_candidates(state)
+
+        if len(low_cost_candidates) > 0:
+            return None
+
+        return StopDecision(
+            True,
+            "exam_not_done_and_no_low_cost_questions",
+            0.0,
+            {
+                "stage_end_reason": "insufficient_observable_evidence",
+                "not_done_exam_kinds": not_done_exam_kinds,
+                "candidate_hypothesis_ids": [item.node_id for item in state.candidate_hypotheses[:3]],
+                "message": "相关检查尚未完成，且当前没有高价值、低成本的可继续追问证据，输出阶段性判断。",
+            },
+        )
+
+    # 查询当前候选诊断下是否仍有未问过的低成本 R2 证据。
+    def _collect_remaining_low_cost_r2_candidates(self, state: SessionState) -> list[dict]:
+        if not hasattr(self.deps.retriever, "retrieve_r2_expected_evidence"):
+            return []
+
+        remaining: list[dict] = []
+        ranked_hypotheses = sorted(state.candidate_hypotheses, key=lambda item: (-item.score, item.name))[:3]
+
+        for hypothesis in ranked_hypotheses:
+            try:
+                rows = self.deps.retriever.retrieve_r2_expected_evidence(hypothesis, state, top_k=8)
+            except TypeError:
+                rows = self.deps.retriever.retrieve_r2_expected_evidence(hypothesis, state)
+            except Exception:
+                continue
+
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+
+                node_id = str(row.get("node_id") or "").strip()
+
+                if len(node_id) == 0:
+                    continue
+
+                if node_id in state.asked_node_ids or node_id in state.slots or node_id in state.evidence_states:
+                    continue
+
+                if self._is_low_cost_observable_row(row):
+                    remaining.append(row)
+
+        return remaining[:12]
+
+    # 判断一条 R2 候选是否属于患者可直接回答或已知病史型低成本证据。
+    def _is_low_cost_observable_row(self, row: dict) -> bool:
+        acquisition_mode = str(row.get("acquisition_mode") or "").strip()
+        evidence_cost = str(row.get("evidence_cost") or "").strip()
+        label = str(row.get("label") or "").strip()
+
+        if acquisition_mode in {"direct_ask", "history_known"} or evidence_cost == "low":
+            return True
+
+        if acquisition_mode in {"needs_lab_test", "needs_imaging", "needs_pathogen_test"} or evidence_cost == "high":
+            return False
+
+        return label in {
+            "Symptom",
+            "Sign",
+            "RiskFactor",
+            "RiskBehavior",
+            "ClinicalAttribute",
+            "PopulationGroup",
+        }
+
     # 判断当前输入是否只是问候或闲聊，没有足够临床信息可进入 A2/A3。
     def _should_collect_chief_complaint(
         self,
@@ -2144,6 +2387,14 @@ class ConsultationBrain:
         accept_decision: StopDecision,
     ) -> bool:
         if accept_decision.should_stop:
+            return True
+
+        if (
+            selected_action is None
+            and stop_decision.should_stop
+            and stop_decision.reason
+            in {"exam_not_done_and_no_low_cost_questions", "insufficient_observable_evidence"}
+        ):
             return True
 
         if self._has_search_signal(search_result):

@@ -94,6 +94,69 @@ def test_exam_context_parser_extracts_tests_and_results() -> None:
     assert result.needs_followup is False
 
 
+# 验证做过检查但只给出检查名时，会进入“追问具体结果”分支。
+def test_exam_context_parser_done_with_test_names_needs_specific_result_followup() -> None:
+    parser = EvidenceParser()
+    action = MctsAction(
+        action_id="collect_exam::pcp::lab",
+        action_type="collect_exam_context",
+        target_node_id="__exam_context__::lab",
+        target_node_label="ExamContext",
+        target_node_name="化验检查情况",
+        metadata={"exam_kind": "lab"},
+    )
+
+    result = parser.interpret_exam_context_answer("做过 CD4 和 β-D 葡聚糖，但具体结果不太记得了。", action)
+
+    assert result.availability == "done"
+    assert "CD4" in result.mentioned_tests
+    assert "β-D 葡聚糖" in result.mentioned_tests
+    assert result.mentioned_results == []
+    assert result.needs_followup is True
+    assert result.followup_reason == "mentioned_tests_without_results"
+
+
+# 验证做过检查但回答模糊时，不会误写入具体证据，而是要求澄清。
+def test_exam_context_parser_done_with_vague_imaging_answer_needs_followup() -> None:
+    parser = EvidenceParser()
+    action = MctsAction(
+        action_id="collect_exam::pcp::imaging",
+        action_type="collect_exam_context",
+        target_node_id="__exam_context__::imaging",
+        target_node_label="ExamContext",
+        target_node_name="胸部影像检查情况",
+        metadata={"exam_kind": "imaging"},
+    )
+
+    result = parser.interpret_exam_context_answer("好像拍过胸片，但报告具体写了什么我记不清。", action)
+
+    assert result.availability == "done"
+    assert "胸片" in result.mentioned_tests
+    assert result.mentioned_results == []
+    assert result.needs_followup is True
+
+
+# 验证病原学检查上下文也能识别做过且给出阳性结果。
+def test_exam_context_parser_extracts_pathogen_result() -> None:
+    parser = EvidenceParser()
+    action = MctsAction(
+        action_id="collect_exam::pcp::pathogen",
+        action_type="collect_exam_context",
+        target_node_id="__exam_context__::pathogen",
+        target_node_label="ExamContext",
+        target_node_name="病原学检查情况",
+        metadata={"exam_kind": "pathogen"},
+    )
+
+    result = parser.interpret_exam_context_answer("做过 PCR，结果是阳性。", action)
+
+    assert result.availability == "done"
+    assert "PCR" in result.mentioned_tests
+    assert len(result.mentioned_results) == 1
+    assert result.mentioned_results[0].normalized_result == "positive"
+    assert result.needs_followup is False
+
+
 # 验证检查上下文结果可以映射回当前 R2 候选证据节点。
 def test_exam_context_result_maps_to_candidate_evidence() -> None:
     parser = EvidenceParser()
@@ -122,6 +185,94 @@ def test_exam_context_result_maps_to_candidate_evidence() -> None:
     assert updates[0].node_id == "lab_cd4_low"
     assert updates[0].status == "true"
     assert updates[0].certainty == "certain"
+
+
+# 验证真实报告式数值结果可以直接映射到具体高价值证据节点。
+def test_exam_context_numeric_cd4_result_maps_to_candidate_evidence() -> None:
+    parser = EvidenceParser()
+    action = MctsAction(
+        action_id="collect_exam::pcp::lab",
+        action_type="collect_exam_context",
+        target_node_id="__exam_context__::lab",
+        target_node_label="ExamContext",
+        target_node_name="化验检查情况",
+        metadata={
+            "exam_kind": "lab",
+            "exam_candidate_evidence": [
+                {
+                    "node_id": "lab_cd4_low",
+                    "label": "LabFinding",
+                    "name": "CD4+ T淋巴细胞计数 < 200/μL",
+                }
+            ],
+        },
+    )
+    result = parser.interpret_exam_context_answer("做过 CD4，结果大概是 150。", action)
+
+    updates = parser.build_slot_updates_from_exam_context(action, result, "做过 CD4，结果大概是 150。", turn_index=2)
+
+    assert len(updates) == 1
+    assert updates[0].node_id == "lab_cd4_low"
+    assert updates[0].status == "true"
+    assert updates[0].certainty == "certain"
+
+
+# 验证 β-D 葡聚糖数值升高可以被识别为支持性实验室证据。
+def test_exam_context_numeric_beta_d_glucan_result_maps_to_candidate_evidence() -> None:
+    parser = EvidenceParser()
+    action = MctsAction(
+        action_id="collect_exam::pcp::lab",
+        action_type="collect_exam_context",
+        target_node_id="__exam_context__::lab",
+        target_node_label="ExamContext",
+        target_node_name="化验检查情况",
+        metadata={
+            "exam_kind": "lab",
+            "exam_candidate_evidence": [
+                {
+                    "node_id": "lab_bdg_high",
+                    "label": "LabFinding",
+                    "name": "(1,3)-β-D-葡聚糖检测升高",
+                }
+            ],
+        },
+    )
+    result = parser.interpret_exam_context_answer("β-D 葡聚糖结果是 200。", action)
+
+    updates = parser.build_slot_updates_from_exam_context(action, result, "β-D 葡聚糖结果是 200。", turn_index=2)
+
+    assert len(updates) == 1
+    assert updates[0].node_id == "lab_bdg_high"
+    assert updates[0].status == "true"
+
+
+# 验证“未检出”类结果会映射成对应候选证据不存在。
+def test_exam_context_hiv_rna_undetected_maps_to_negative_candidate_evidence() -> None:
+    parser = EvidenceParser()
+    action = MctsAction(
+        action_id="collect_exam::phase::lab",
+        action_type="collect_exam_context",
+        target_node_id="__exam_context__::lab",
+        target_node_label="ExamContext",
+        target_node_name="化验检查情况",
+        metadata={
+            "exam_kind": "lab",
+            "exam_candidate_evidence": [
+                {
+                    "node_id": "lab_hiv_rna_high",
+                    "label": "LabFinding",
+                    "name": "HIV RNA 病毒载量升高",
+                }
+            ],
+        },
+    )
+    result = parser.interpret_exam_context_answer("HIV RNA 未检出。", action)
+
+    updates = parser.build_slot_updates_from_exam_context(action, result, "HIV RNA 未检出。", turn_index=2)
+
+    assert len(updates) == 1
+    assert updates[0].node_id == "lab_hiv_rna_high"
+    assert updates[0].status == "false"
 
 
 # 验证患者没做过检查时，不会要求追问具体结果。
