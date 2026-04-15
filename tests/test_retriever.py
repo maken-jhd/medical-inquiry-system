@@ -37,6 +37,8 @@ class FakeNeo4jClient:
                 "label": "LabFinding",
                 "name": "低氧血症",
                 "relation_type": "HAS_LAB_FINDING",
+                "acquisition_mode": "needs_lab_test",
+                "evidence_cost": "high",
                 "priority": 2.5,
                 "is_red_flag": True,
                 "topic_id": "Disease",
@@ -75,6 +77,9 @@ def test_retriever_returns_r2_expected_evidence() -> None:
     assert len(rows) == 1
     assert rows[0]["node_id"] == "lab_po2"
     assert rows[0]["relation_type"] == "HAS_LAB_FINDING"
+    assert "acquisition_mode" in retriever.client.last_query
+    assert rows[0]["acquisition_mode"] == "needs_lab_test"
+    assert rows[0]["evidence_cost"] == "high"
 
 
 class SemanticFakeNeo4jClient(FakeNeo4jClient):

@@ -36,6 +36,7 @@ from .types import (
     A2HypothesisResult,
     A3VerificationResult,
     A4DeductiveResult,
+    ExamContextResult,
     EvidenceState,
     FinalAnswerScore,
     HypothesisScore,
@@ -191,6 +192,14 @@ class ConsultationBrain:
                 [],
             )
 
+        if pending_action.action_type == "collect_exam_context":
+            return self._update_from_exam_context_action(
+                session_id,
+                pending_action,
+                patient_text,
+                turn_index,
+            )
+
         a4_result = self.deps.evidence_parser.interpret_answer_for_target(patient_text, pending_action)
         a4_updates = self.deps.evidence_parser.build_slot_updates_from_a4(
             pending_action,
@@ -257,6 +266,194 @@ class ConsultationBrain:
         )
         route_after_a4 = self.deps.router.decide_next_stage(deductive_decision, updated_state)
         return a4_result, deductive_decision, route_after_a4, a4_updates
+
+    # 处理 collect_exam_context：更新检查上下文，必要时把结果映射到具体证据节点。
+    def _update_from_exam_context_action(
+        self,
+        session_id: str,
+        pending_action: MctsAction,
+        patient_text: str,
+        turn_index: int,
+    ) -> tuple[A4DeductiveResult | None, object | None, object | None, list[SlotUpdate]]:
+        tracker = self.deps.state_tracker
+        exam_result = self.deps.evidence_parser.interpret_exam_context_answer(patient_text, pending_action)
+        exam_updates = self.deps.evidence_parser.build_slot_updates_from_exam_context(
+            pending_action,
+            exam_result,
+            patient_text,
+            turn_index=turn_index,
+        )
+        tracker.update_exam_context(
+            session_id,
+            exam_result.exam_kind,
+            availability=exam_result.availability,
+            mentioned_exam_names=exam_result.mentioned_tests,
+            mentioned_exam_results=exam_result.mentioned_results,
+            turn_index=turn_index,
+            metadata={
+                "last_reasoning": exam_result.reasoning,
+                "last_followup_reason": exam_result.followup_reason,
+            },
+        )
+
+        if len(exam_updates) > 0:
+            tracker.apply_slot_updates(session_id, exam_updates)
+            self._apply_exam_context_evidence_feedback(session_id, pending_action, exam_result, exam_updates, turn_index)
+
+        if exam_result.needs_followup and exam_result.availability == "done":
+            tracker.get_session(session_id).metadata["exam_context_followup_action"] = self._build_exam_context_followup_action(
+                pending_action,
+                exam_result,
+            )
+
+        a4_result = self._build_a4_result_from_exam_context(pending_action, exam_result)
+        tracker.get_session(session_id).metadata["last_exam_context_result"] = asdict(exam_result)
+        tracker.get_session(session_id).metadata["last_answered_action"] = pending_action
+        tracker.clear_pending_action(session_id)
+        route_after_a4 = RouteDecision(
+            stage="A3",
+            reason="已解析检查上下文回答，继续根据现有证据执行搜索或澄清。",
+            next_topic_id=pending_action.topic_id,
+            next_hypothesis_id=pending_action.hypothesis_id,
+            metadata={
+                "source": "exam_context",
+                "exam_kind": exam_result.exam_kind,
+                "availability": exam_result.availability,
+                "needs_followup": exam_result.needs_followup,
+                "followup_reason": exam_result.followup_reason,
+            },
+        )
+        return a4_result, None, route_after_a4, exam_updates
+
+    # 将检查上下文中映射到具体证据节点的结果写入 evidence_states 并反馈 hypothesis。
+    def _apply_exam_context_evidence_feedback(
+        self,
+        session_id: str,
+        pending_action: MctsAction,
+        exam_result: ExamContextResult,
+        updates: list[SlotUpdate],
+        turn_index: int,
+    ) -> None:
+        state = self.deps.state_tracker.get_session(session_id)
+
+        for update in updates:
+            existence = "unknown"
+            certainty = "unknown"
+
+            if update.status == "true":
+                existence = "exist"
+            elif update.status == "false":
+                existence = "non_exist"
+
+            if update.certainty == "certain":
+                certainty = "confident"
+            elif update.certainty == "uncertain":
+                certainty = "doubt"
+
+            evidence_state = EvidenceState(
+                node_id=update.node_id,
+                existence=existence,  # type: ignore[arg-type]
+                certainty=certainty,  # type: ignore[arg-type]
+                reasoning=f"由检查上下文回答映射得到：{update.value or update.evidence or ''}",
+                source_turns=[turn_index],
+                metadata={
+                    "source_stage": "A4_EXAM_CONTEXT",
+                    "action_id": pending_action.action_id,
+                    "hypothesis_id": pending_action.hypothesis_id,
+                    "exam_kind": exam_result.exam_kind,
+                    "exam_availability": exam_result.availability,
+                    "target_node_name": update.metadata.get("normalized_name", update.node_id),
+                    "patient_answer": update.evidence,
+                },
+            )
+            self.deps.state_tracker.set_evidence_state(session_id, evidence_state)
+            related_ids = [pending_action.hypothesis_id] if pending_action.hypothesis_id is not None else None
+            state.candidate_hypotheses = self.deps.hypothesis_manager.apply_evidence_feedback(
+                state.candidate_hypotheses,
+                evidence_state,
+                related_ids,
+            )
+
+    # 将检查上下文解析结果转换成兼容前端和报告的 A4DeductiveResult。
+    def _build_a4_result_from_exam_context(
+        self,
+        action: MctsAction,
+        exam_result: ExamContextResult,
+    ) -> A4DeductiveResult:
+        existence = "unknown"
+        certainty = "doubt" if exam_result.availability == "unknown" else "confident"
+
+        if exam_result.availability == "done":
+            existence = "exist"
+        elif exam_result.availability == "not_done":
+            existence = "non_exist"
+
+        return A4DeductiveResult(
+            existence=existence,  # type: ignore[arg-type]
+            certainty=certainty,  # type: ignore[arg-type]
+            reasoning=exam_result.reasoning,
+            supporting_span="；".join(item.raw_text for item in exam_result.mentioned_results),
+            negation_span="未做相关检查" if exam_result.availability == "not_done" else "",
+            uncertain_span="需要继续澄清检查名称或结果" if exam_result.needs_followup else "",
+            metadata={
+                "action_id": action.action_id,
+                "action_type": action.action_type,
+                "target_node_id": action.target_node_id,
+                "target_node_name": action.target_node_name,
+                "exam_context_result": asdict(exam_result),
+            },
+        )
+
+    # 检查上下文已做但缺结果时，构造一次澄清追问。
+    def _build_exam_context_followup_action(
+        self,
+        action: MctsAction,
+        exam_result: ExamContextResult,
+    ) -> MctsAction:
+        mentioned_tests = [item for item in exam_result.mentioned_tests if len(item.strip()) > 0]
+
+        if len(mentioned_tests) > 0:
+            test_text = "、".join(mentioned_tests[:4])
+            question_text = (
+                f"你刚才提到做过 {test_text}。能回忆一下大概结果吗？"
+                "比如偏低、升高、阳性、阴性，或者报告里写了什么异常都可以。"
+            )
+        else:
+            question_text = (
+                "能回忆一下具体做过哪些检查，或者报告里提到过哪些异常吗？"
+                "哪怕只记得“偏低、升高、阳性、阴性、磨玻璃影”也可以。"
+            )
+
+        return MctsAction(
+            action_id=f"{action.action_id}::followup",
+            action_type="collect_exam_context",
+            target_node_id=action.target_node_id,
+            target_node_label=action.target_node_label,
+            target_node_name=action.target_node_name,
+            hypothesis_id=action.hypothesis_id,
+            topic_id=action.topic_id,
+            prior_score=action.prior_score,
+            metadata={
+                **dict(action.metadata),
+                "question_text": question_text,
+                "exam_context_followup": True,
+                "previous_followup_reason": exam_result.followup_reason,
+                "mentioned_tests": mentioned_tests,
+            },
+        )
+
+    # 取出检查上下文澄清动作，避免重复使用。
+    def _pop_exam_context_followup_action(self, session_id: str) -> MctsAction | None:
+        state = self.deps.state_tracker.get_session(session_id)
+        action = state.metadata.pop("exam_context_followup_action", None)
+
+        if isinstance(action, MctsAction):
+            return action
+
+        if isinstance(action, dict):
+            return MctsAction(**action)
+
+        return None
 
     # 运行 R1 + A2，生成主假设和备选假设并写回当前会话状态。
     def _run_a2(
@@ -475,6 +672,7 @@ class ConsultationBrain:
         a2_result = A2HypothesisResult()
         search_result = SearchResult()
         selected_action: MctsAction | None = None
+        exam_followup_action = self._pop_exam_context_followup_action(session_id)
         default_search_action: MctsAction | None = None
         route_after_slot_update = self.deps.router.route_after_slot_update(state)
 
@@ -498,7 +696,12 @@ class ConsultationBrain:
         route_after_slot_update = self.deps.router.route_after_slot_update(tracker.get_session(session_id))
         effective_stage = route_after_slot_update.stage if stage_after_a4 in {None, "A1"} else stage_after_a4
 
-        if self._should_collect_chief_complaint(patient_context, a1_result, a4_result):
+        if exam_followup_action is not None:
+            selected_action = exam_followup_action
+            search_result.selected_action = selected_action
+            search_result.root_best_action = selected_action
+            search_result.metadata["fallback_reason"] = "exam_context_needs_followup"
+        elif self._should_collect_chief_complaint(patient_context, a1_result, a4_result):
             selected_action = self._build_chief_complaint_intake_action(patient_text)
             search_result.selected_action = selected_action
             search_result.root_best_action = selected_action
@@ -975,6 +1178,7 @@ class ConsultationBrain:
             topic_id=current_hypothesis.label,
             competing_hypotheses=alternatives,
             current_hypothesis=current_hypothesis,
+            session_state=rollout_state,
         )
         return actions[: self.deps.mcts_engine.config.max_child_nodes]
 
@@ -1175,6 +1379,7 @@ class ConsultationBrain:
                 topic_id=action_hypothesis.label,
                 competing_hypotheses=alternatives,
                 current_hypothesis=action_hypothesis,
+                session_state=state,
             ):
                 action_key = (action.hypothesis_id or "", action.target_node_id)
 
@@ -1339,6 +1544,7 @@ class ConsultationBrain:
         joint_recommended_match_score = float(action.metadata.get("joint_recommended_match_score", 0.0))
         alternative_overlap = float(action.metadata.get("alternative_overlap", 0.0))
         patient_burden = float(action.metadata.get("patient_burden", 0.0))
+        repair_cost_bias = self._repair_cost_bias(action)
         question_type_hint = str(action.metadata.get("question_type_hint", "symptom"))
         evidence_tags = self._normalize_string_list(action.metadata.get("evidence_tags", []))
         semantic_evidence_tags = {item for item in evidence_tags if not item.startswith("type:")}
@@ -1414,6 +1620,7 @@ class ConsultationBrain:
                 + pcp_combo_priority_bonus
                 + missing_family_priority_bonus
                 + combo_anchor_bonus
+                + repair_cost_bias
                 + discriminative_gain * 0.65
                 + type_diversity_bonus * 0.55
                 + family_diversity_bonus * 0.85
@@ -1448,6 +1655,7 @@ class ConsultationBrain:
                 + joint_recommended_match_score * 0.65
                 + alternative_hypothesis_bonus
                 + competition_family_bonus
+                + repair_cost_bias
                 + family_diversity_bonus * 0.75
                 - same_type_penalty * 0.35
                 - family_repeat_penalty * 1.75
@@ -1460,10 +1668,30 @@ class ConsultationBrain:
             + novelty_score * 2.15
             + type_diversity_bonus * 2.1
             + family_diversity_bonus * 1.75
+            + repair_cost_bias
             - same_type_penalty * 1.25
             - family_repeat_penalty * 1.9
             - patient_burden * 0.08
         )
+
+    # repair 阶段的成本偏置保持很轻：低成本略优先，高成本关键证据仍可胜出。
+    def _repair_cost_bias(self, action: MctsAction) -> float:
+        acquisition_mode = str(action.metadata.get("acquisition_mode") or "")
+        evidence_cost = str(action.metadata.get("evidence_cost") or "")
+
+        if action.action_type == "collect_exam_context":
+            return 0.08
+
+        if acquisition_mode in {"direct_ask", "history_known"} or evidence_cost == "low":
+            return 0.18
+
+        if acquisition_mode == "needs_clinician_assessment" or evidence_cost == "medium":
+            return 0.04
+
+        if acquisition_mode in {"needs_lab_test", "needs_imaging", "needs_pathogen_test"} or evidence_cost == "high":
+            return -0.10
+
+        return 0.0
 
     # PCP combo repair anchors 是能直接补齐 immune/pathogen/PCP-specific 缺口的高价值证据。
     def _combo_anchor_bonus(

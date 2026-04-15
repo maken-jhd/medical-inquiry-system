@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import re
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from .llm_client import LlmClient
 from .types import (
@@ -12,6 +12,8 @@ from .types import (
     A4DeductiveResult,
     ClinicalFeatureItem,
     DeductiveDecision,
+    ExamContextResult,
+    ExamMentionedResult,
     HypothesisScore,
     KeyFeature,
     MctsAction,
@@ -122,6 +124,121 @@ class EvidenceParser:
                 "has_contradiction": contradiction_detected,
             },
         )
+
+    # collect_exam_context 动作专用解析：一次回答里同时识别是否做过、检查名称和结果。
+    def interpret_exam_context_answer(
+        self,
+        patient_text: str,
+        action: MctsAction,
+    ) -> ExamContextResult:
+        exam_kind = str(action.metadata.get("exam_kind") or "lab")
+
+        if exam_kind not in {"lab", "imaging", "pathogen"}:
+            exam_kind = "lab"
+
+        availability = self._infer_exam_availability(patient_text, exam_kind)
+        mentioned_tests = self._extract_mentioned_tests(patient_text, exam_kind)
+        mentioned_results = self._extract_mentioned_exam_results(patient_text, mentioned_tests, exam_kind)
+
+        if availability == "unknown" and (len(mentioned_tests) > 0 or len(mentioned_results) > 0):
+            availability = "done"
+
+        needs_followup = False
+        followup_reason = ""
+
+        if availability == "done" and len(mentioned_results) == 0:
+            needs_followup = True
+            followup_reason = (
+                "mentioned_tests_without_results"
+                if len(mentioned_tests) > 0
+                else "done_without_test_name_or_result"
+            )
+        elif availability == "unknown":
+            needs_followup = True
+            followup_reason = "availability_unclear"
+
+        if availability == "not_done":
+            reasoning = "患者表示近期没有做过该类检查，暂时不继续追问该类具体结果。"
+        elif availability == "done" and len(mentioned_results) > 0:
+            reasoning = "患者表示做过相关检查，并提供了可解析的检查结果线索。"
+        elif availability == "done":
+            reasoning = "患者表示做过相关检查，但尚未说清具体结果。"
+        else:
+            reasoning = "患者回答尚不足以判断是否做过该类检查，需要一次澄清。"
+
+        return ExamContextResult(
+            exam_kind=exam_kind,  # type: ignore[arg-type]
+            availability=availability,  # type: ignore[arg-type]
+            mentioned_tests=mentioned_tests,
+            mentioned_results=mentioned_results,
+            needs_followup=needs_followup,
+            followup_reason=followup_reason,
+            reasoning=reasoning,
+            metadata={
+                "action_id": action.action_id,
+                "raw_text": patient_text,
+                "candidate_evidence_count": len(action.metadata.get("exam_candidate_evidence", [])),
+            },
+        )
+
+    # 将检查上下文中提到的结果尽量映射回当前 R2 候选证据节点。
+    def build_slot_updates_from_exam_context(
+        self,
+        action: MctsAction,
+        exam_result: ExamContextResult,
+        raw_evidence_text: str,
+        turn_index: Optional[int] = None,
+    ) -> List[SlotUpdate]:
+        updates: List[SlotUpdate] = []
+
+        if exam_result.availability != "done" or len(exam_result.mentioned_results) == 0:
+            return updates
+
+        candidates = action.metadata.get("exam_candidate_evidence", [])
+
+        if not isinstance(candidates, list):
+            return updates
+
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+
+            match = self._match_exam_result_to_candidate(exam_result, candidate)
+
+            if match is None:
+                continue
+
+            status, certainty, evidence_text = match
+            node_id = str(candidate.get("node_id") or "").strip()
+            name = str(candidate.get("name") or node_id).strip()
+
+            if len(node_id) == 0:
+                continue
+
+            updates.append(
+                SlotUpdate(
+                    node_id=node_id,
+                    status=status,
+                    certainty=certainty,
+                    value=evidence_text,
+                    evidence=raw_evidence_text,
+                    turn_index=turn_index,
+                    metadata={
+                        "source_stage": "A4_EXAM_CONTEXT",
+                        "action_id": action.action_id,
+                        "action_type": action.action_type,
+                        "normalized_name": name,
+                        "exam_kind": exam_result.exam_kind,
+                        "exam_availability": exam_result.availability,
+                        "matched_from_exam_context": True,
+                    },
+                )
+            )
+
+            if len(updates) >= 3:
+                break
+
+        return updates
 
     # 基于回答解释结果与主备选假设，输出更贴近论文 A4 的演绎决策。
     def judge_deductive_result(
@@ -403,6 +520,264 @@ class EvidenceParser:
             return "unknown", "doubt"
 
         return "unknown", "unknown"
+
+    # 识别患者是否做过某类检查。
+    def _infer_exam_availability(self, patient_text: str, exam_kind: str) -> str:
+        normalized = self._normalize_exam_text(patient_text)
+        not_done_patterns = (
+            "没做",
+            "没有做",
+            "没查",
+            "没有查",
+            "没拍",
+            "没有拍",
+            "没验",
+            "没有验",
+            "还没做",
+            "没做过",
+            "没有做过",
+        )
+        done_patterns = (
+            "做过",
+            "查过",
+            "拍过",
+            "验过",
+            "检查过",
+            "报告",
+            "结果",
+            "阳性",
+            "阴性",
+            "升高",
+            "降低",
+            "偏高",
+            "偏低",
+            "异常",
+            "正常",
+        )
+
+        if any(pattern in normalized for pattern in not_done_patterns):
+            return "not_done"
+
+        if any(pattern in normalized for pattern in done_patterns):
+            return "done"
+
+        if len(self._extract_mentioned_tests(patient_text, exam_kind)) > 0:
+            return "done"
+
+        return "unknown"
+
+    # 从患者回答中提取检查名称，第一版只做高价值关键词。
+    def _extract_mentioned_tests(self, patient_text: str, exam_kind: str) -> List[str]:
+        normalized = self._normalize_exam_text(patient_text)
+        test_patterns = {
+            "lab": [
+                ("CD4", ("cd4", "t淋巴")),
+                ("HIV RNA", ("hivrna", "病毒载量")),
+                ("β-D 葡聚糖", ("βd葡聚糖", "bdg", "g试验", "葡聚糖")),
+                ("血氧 / 动脉血气", ("pao2", "spo2", "氧分压", "动脉血气", "血氧")),
+                ("LDH", ("ldh", "乳酸脱氢酶")),
+            ],
+            "imaging": [
+                ("胸部CT", ("胸部ct", "ct", "胸部影像")),
+                ("胸片", ("胸片", "x线", "x光")),
+            ],
+            "pathogen": [
+                ("PCR", ("pcr", "核酸")),
+                ("痰检", ("痰检", "痰培养", "痰涂片")),
+                ("支气管肺泡灌洗", ("支气管肺泡", "肺泡灌洗", "bal", "balf")),
+                ("抗酸染色", ("抗酸", "抗酸染色")),
+                ("T-SPOT / Xpert", ("tspot", "t-spot", "xpert")),
+            ],
+        }
+        values: List[str] = []
+
+        for name, keywords in test_patterns.get(exam_kind, []):
+            if any(keyword in normalized for keyword in keywords) and name not in values:
+                values.append(name)
+
+        return values
+
+    # 抽取检查结果分句，并给出粗粒度 positive/negative/abnormal/low/high 判断。
+    def _extract_mentioned_exam_results(
+        self,
+        patient_text: str,
+        mentioned_tests: Sequence[str],
+        exam_kind: str,
+    ) -> List[ExamMentionedResult]:
+        clauses = [
+            clause.strip()
+            for clause in re.split(r"[，。！？；;,.!\n]", patient_text)
+            if len(clause.strip()) > 0
+        ]
+        results: List[ExamMentionedResult] = []
+        result_keywords = (
+            "阳性",
+            "阴性",
+            "升高",
+            "降低",
+            "偏高",
+            "偏低",
+            "很低",
+            "异常",
+            "正常",
+            "磨玻璃",
+            "低氧",
+            "小于",
+            "大于",
+            "不到",
+            "<",
+            ">",
+            "检出",
+            "未检出",
+            "没有异常",
+        )
+
+        for clause in clauses:
+            normalized_clause = self._normalize_exam_text(clause)
+
+            if not any(keyword in normalized_clause for keyword in result_keywords):
+                continue
+
+            test_name = self._choose_result_test_name(clause, mentioned_tests, exam_kind)
+            normalized_result = self._classify_exam_result_text(clause)
+            result = ExamMentionedResult(
+                test_name=test_name,
+                raw_text=clause,
+                normalized_result=normalized_result,
+                metadata={"exam_kind": exam_kind},
+            )
+            results.append(result)
+
+        return results
+
+    # 给结果分句选择最可能对应的检查名。
+    def _choose_result_test_name(self, clause: str, mentioned_tests: Sequence[str], exam_kind: str) -> str:
+        normalized = self._normalize_exam_text(clause)
+
+        for test_name in mentioned_tests:
+            if self._normalize_exam_text(test_name) in normalized:
+                return test_name
+
+        if exam_kind == "imaging" and any(keyword in normalized for keyword in ("ct", "胸片", "影像", "磨玻璃")):
+            return "胸部影像"
+
+        if exam_kind == "pathogen" and any(keyword in normalized for keyword in ("pcr", "核酸", "痰", "灌洗", "阳性")):
+            return "病原学检查"
+
+        if exam_kind == "lab" and any(keyword in normalized for keyword in ("cd4", "葡聚糖", "血氧", "病毒载量")):
+            return "化验"
+
+        if len(mentioned_tests) > 0:
+            return mentioned_tests[0]
+
+        return "未指明检查"
+
+    # 粗略分类检查结果方向。
+    def _classify_exam_result_text(self, text: str) -> str:
+        normalized = self._normalize_exam_text(text)
+
+        if any(keyword in normalized for keyword in ("阴性", "未检出", "正常", "没有异常", "未见")):
+            return "negative"
+
+        if any(keyword in normalized for keyword in ("阳性", "检出", "异常", "磨玻璃")):
+            return "positive"
+
+        if any(keyword in normalized for keyword in ("降低", "偏低", "很低", "低氧", "小于", "不到", "<")):
+            return "low"
+
+        if any(keyword in normalized for keyword in ("升高", "偏高", "大于", ">")):
+            return "high"
+
+        return "unknown"
+
+    # 将结果分句映射到当前 collect_exam_context 动作携带的候选证据节点。
+    def _match_exam_result_to_candidate(
+        self,
+        exam_result: ExamContextResult,
+        candidate: dict[str, Any],
+    ) -> tuple[str, str, str] | None:
+        candidate_name = str(candidate.get("name") or "").strip()
+        candidate_label = str(candidate.get("label") or "").strip()
+        normalized_candidate = self._normalize_exam_text(candidate_name)
+
+        for result in exam_result.mentioned_results:
+            normalized_text = self._normalize_exam_text(f"{result.test_name} {result.raw_text}")
+            result_direction = result.normalized_result
+            family_match = self._exam_result_family_matches(
+                normalized_candidate,
+                normalized_text,
+                candidate_label,
+                exam_result.exam_kind,
+            )
+
+            if not family_match:
+                continue
+
+            if result_direction == "negative":
+                return "false", "certain", result.raw_text
+
+            if result_direction in {"positive", "low", "high"}:
+                return "true", "certain", result.raw_text
+
+            return "true", "uncertain", result.raw_text
+
+        return None
+
+    # 用少量医学关键词判断“CD4 很低”是否能映射到 CD4 阈值节点等。
+    def _exam_result_family_matches(
+        self,
+        normalized_candidate: str,
+        normalized_text: str,
+        candidate_label: str,
+        exam_kind: str,
+    ) -> bool:
+        if len(normalized_candidate) > 0 and (
+            normalized_candidate in normalized_text or normalized_text in normalized_candidate
+        ):
+            return True
+
+        if exam_kind == "imaging" or candidate_label == "ImagingFinding":
+            return any(keyword in normalized_candidate for keyword in ("ct", "影像", "磨玻璃", "胸片")) and any(
+                keyword in normalized_text for keyword in ("ct", "影像", "磨玻璃", "胸片")
+            )
+
+        if exam_kind == "pathogen" or candidate_label == "Pathogen":
+            return any(keyword in normalized_candidate for keyword in ("pcr", "核酸", "病原", "肺孢子", "痰", "灌洗", "bal")) and any(
+                keyword in normalized_text for keyword in ("pcr", "核酸", "病原", "肺孢子", "痰", "灌洗", "bal", "阳性", "检出")
+            )
+
+        if exam_kind == "lab":
+            lab_family_rules = (
+                (("cd4", "t淋巴"), ("cd4", "t淋巴", "很低", "偏低", "小于", "不到")),
+                (("βd葡聚糖", "bdg", "葡聚糖", "g试验"), ("βd葡聚糖", "bdg", "葡聚糖", "g试验", "升高", "阳性")),
+                (("pao2", "spo2", "氧分压", "低氧", "血氧"), ("pao2", "spo2", "氧分压", "低氧", "血氧")),
+                (("hivrna", "病毒载量"), ("hivrna", "病毒载量")),
+            )
+
+            for candidate_keywords, text_keywords in lab_family_rules:
+                if any(keyword in normalized_candidate for keyword in candidate_keywords) and any(
+                    keyword in normalized_text for keyword in text_keywords
+                ):
+                    return True
+
+        return False
+
+    # 检查上下文解析使用的统一归一化。
+    def _normalize_exam_text(self, text: str) -> str:
+        return (
+            str(text)
+            .strip()
+            .lower()
+            .replace(" ", "")
+            .replace("（", "(")
+            .replace("）", ")")
+            .replace("，", ",")
+            .replace("。", "")
+            .replace("、", "")
+            .replace("-", "")
+            .replace("_", "")
+            .replace("/", "")
+        )
 
     # 将 LLM judge 的 JSON 负载转成 DeductiveDecision。
     def _coerce_judge_payload(

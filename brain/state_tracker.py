@@ -8,6 +8,9 @@ from typing import Dict, Iterable, Optional
 from .search_tree import SearchTree
 from .types import (
     ActionStats,
+    ExamAvailability,
+    ExamContextState,
+    ExamMentionedResult,
     EvidenceState,
     HypothesisScore,
     MctsAction,
@@ -97,6 +100,65 @@ class StateTracker:
             self.set_slot(session_id, update)
 
         return self.get_session(session_id)
+
+    # 确保指定检查类型的上下文状态存在。
+    def ensure_exam_context(self, session_id: str, exam_kind: str) -> ExamContextState:
+        state = self.get_session(session_id)
+
+        if exam_kind not in {"lab", "imaging", "pathogen"}:
+            exam_kind = "lab"
+
+        if exam_kind not in state.exam_context:
+            state.exam_context[exam_kind] = ExamContextState(exam_kind=exam_kind)  # type: ignore[arg-type]
+
+        return state.exam_context[exam_kind]
+
+    # 写入患者对某类检查是否做过、记得哪些检查和结果的回答。
+    def update_exam_context(
+        self,
+        session_id: str,
+        exam_kind: str,
+        *,
+        availability: ExamAvailability | None = None,
+        mentioned_exam_names: Iterable[str] | None = None,
+        mentioned_exam_results: Iterable[ExamMentionedResult] | None = None,
+        turn_index: Optional[int] = None,
+        metadata: Optional[Dict[str, object]] = None,
+    ) -> ExamContextState:
+        context = self.ensure_exam_context(session_id, exam_kind)
+
+        if availability is not None:
+            context.availability = availability
+
+        for name in mentioned_exam_names or []:
+            cleaned_name = str(name).strip()
+
+            if len(cleaned_name) == 0 or cleaned_name in context.mentioned_exam_names:
+                continue
+
+            context.mentioned_exam_names.append(cleaned_name)
+
+        existing_result_keys = {
+            (item.test_name, item.raw_text)
+            for item in context.mentioned_exam_results
+        }
+
+        for result in mentioned_exam_results or []:
+            key = (result.test_name, result.raw_text)
+
+            if key in existing_result_keys:
+                continue
+
+            context.mentioned_exam_results.append(result)
+            existing_result_keys.add(key)
+
+        if turn_index is not None and turn_index not in context.source_turns:
+            context.source_turns.append(turn_index)
+
+        if metadata is not None:
+            context.metadata.update(metadata)
+
+        return context
 
     # 更新当前会话的候选假设列表。
     def set_candidate_hypotheses(

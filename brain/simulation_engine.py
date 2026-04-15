@@ -44,6 +44,8 @@ class SimulationConfig:
             self.relation_bonus_map = {
                 "MANIFESTS_AS": 1.0,
                 "HAS_LAB_FINDING": 1.15,
+                "HAS_IMAGING_FINDING": 1.15,
+                "HAS_PATHOGEN": 1.12,
                 "DIAGNOSED_BY": 1.2,
                 "REQUIRES_DETAIL": 0.8,
                 "ASSOCIATED_WITH": 0.7,
@@ -483,6 +485,7 @@ class SimulationEngine:
             topic_id=current_hypothesis.label,
             competing_hypotheses=alternatives,
             current_hypothesis=current_hypothesis,
+            session_state=state,
         )
 
         for action in actions:

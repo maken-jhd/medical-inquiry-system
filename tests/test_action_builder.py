@@ -1,7 +1,7 @@
 """测试 repair-aware A3 动作构造 metadata。"""
 
 from brain.action_builder import ActionBuilder
-from brain.types import HypothesisScore
+from brain.types import ExamContextState, HypothesisScore, SessionState
 
 
 # 验证 A3 动作会显式区分 verifier 推荐证据、原 hypothesis 推荐证据和共同命中信号。
@@ -74,3 +74,67 @@ def test_action_builder_renders_imaging_question() -> None:
 
     assert "胸部影像或 CT" in question
     assert "双肺弥漫磨玻璃影" in question
+
+
+# 验证高成本检查证据在检查上下文未知时，会先生成自然的检查上下文采集动作。
+def test_action_builder_collects_exam_context_before_high_cost_evidence() -> None:
+    builder = ActionBuilder()
+    state = SessionState(session_id="s1")
+    actions = builder.build_verification_actions(
+        [
+            {
+                "node_id": "lab_cd4_low",
+                "label": "LabFinding",
+                "name": "CD4+ T淋巴细胞计数 < 200/μL",
+                "relation_type": "HAS_LAB_FINDING",
+                "relation_weight": 0.9,
+                "node_weight": 1.0,
+                "similarity_confidence": 1.0,
+                "contradiction_priority": 1.0,
+                "question_type_hint": "lab",
+                "acquisition_mode": "needs_lab_test",
+                "evidence_cost": "high",
+                "priority": 2.0,
+                "is_red_flag": True,
+                "topic_id": "Disease",
+            }
+        ],
+        hypothesis_id="pcp",
+        session_state=state,
+    )
+
+    assert len(actions) == 1
+    assert actions[0].action_type == "collect_exam_context"
+    assert actions[0].metadata["exam_kind"] == "lab"
+    assert "CD4+ T淋巴细胞计数 < 200/μL" in actions[0].metadata["exam_examples"]
+    assert "最近有没有做过" in builder.render_question_text(actions[0])
+
+
+# 验证患者明确没做过某类检查后，具体高成本结果问题会被暂时屏蔽。
+def test_action_builder_skips_high_cost_evidence_when_exam_not_done() -> None:
+    builder = ActionBuilder()
+    state = SessionState(
+        session_id="s1",
+        exam_context={
+            "lab": ExamContextState(exam_kind="lab", availability="not_done"),
+            "imaging": ExamContextState(exam_kind="imaging"),
+            "pathogen": ExamContextState(exam_kind="pathogen"),
+        },
+    )
+    actions = builder.build_verification_actions(
+        [
+            {
+                "node_id": "lab_cd4_low",
+                "label": "LabFinding",
+                "name": "CD4+ T淋巴细胞计数 < 200/μL",
+                "question_type_hint": "lab",
+                "acquisition_mode": "needs_lab_test",
+                "evidence_cost": "high",
+                "priority": 2.0,
+            }
+        ],
+        hypothesis_id="pcp",
+        session_state=state,
+    )
+
+    assert actions == []

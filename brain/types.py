@@ -11,6 +11,18 @@ SlotCertainty = Literal["certain", "uncertain", "unknown"]
 EvidenceExistence = Literal["exist", "non_exist", "unknown"]
 EvidenceCertainty = Literal["confident", "doubt", "unknown"]
 ReasoningStage = Literal["A1", "A2", "A3", "A4", "STOP", "FALLBACK"]
+ExamKind = Literal["lab", "imaging", "pathogen"]
+ExamAvailability = Literal["unknown", "done", "not_done"]
+
+
+def default_exam_context() -> Dict[str, "ExamContextState"]:
+    """为每个新会话初始化三类检查上下文状态。"""
+
+    return {
+        "lab": ExamContextState(exam_kind="lab"),
+        "imaging": ExamContextState(exam_kind="imaging"),
+        "pathogen": ExamContextState(exam_kind="pathogen"),
+    }
 
 
 @dataclass
@@ -82,6 +94,42 @@ class EvidenceState:
     certainty: EvidenceCertainty = "unknown"
     reasoning: str = ""
     source_turns: List[int] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ExamMentionedResult:
+    """表示患者在检查上下文回答中提到的一条检查结果。"""
+
+    test_name: str = ""
+    raw_text: str = ""
+    normalized_result: str = "unknown"
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ExamContextState:
+    """表示某一类检查信息在当前会话中是否已知。"""
+
+    exam_kind: ExamKind
+    availability: ExamAvailability = "unknown"
+    mentioned_exam_names: List[str] = field(default_factory=list)
+    mentioned_exam_results: List[ExamMentionedResult] = field(default_factory=list)
+    source_turns: List[int] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ExamContextResult:
+    """表示 collect_exam_context 动作对应回答的解析结果。"""
+
+    exam_kind: ExamKind
+    availability: ExamAvailability = "unknown"
+    mentioned_tests: List[str] = field(default_factory=list)
+    mentioned_results: List[ExamMentionedResult] = field(default_factory=list)
+    needs_followup: bool = False
+    followup_reason: str = ""
+    reasoning: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -265,6 +313,7 @@ class SessionState:
     active_topics: List[str] = field(default_factory=list)
     slots: Dict[str, SlotState] = field(default_factory=dict)
     evidence_states: Dict[str, EvidenceState] = field(default_factory=dict)
+    exam_context: Dict[str, ExamContextState] = field(default_factory=default_exam_context)
     candidate_hypotheses: List[HypothesisScore] = field(default_factory=list)
     asked_node_ids: List[str] = field(default_factory=list)
     action_stats: Dict[str, ActionStats] = field(default_factory=dict)

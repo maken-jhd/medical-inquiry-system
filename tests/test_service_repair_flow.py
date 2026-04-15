@@ -105,7 +105,9 @@ def test_service_prefers_recommended_repair_action_for_missing_support() -> None
     )
 
     assert action is not None
-    assert action.target_node_name == "低氧血症"
+    assert action.action_type == "collect_exam_context"
+    assert action.metadata["exam_kind"] == "lab"
+    assert any(item["name"] == "低氧血症" for item in action.metadata["exam_candidate_evidence"])
 
 
 # 验证 trajectory_insufficient 会倾向切换到不同 question type，避免围绕同类问题打转。
@@ -313,7 +315,8 @@ def test_service_pcp_combo_repair_prefers_missing_family_anchor_over_respiratory
 
     assert action is not None
     assert action.hypothesis_id == "pcp"
-    assert action.target_node_name == "CD4+ T淋巴细胞计数 < 200/μL"
+    assert action.action_type == "collect_exam_context"
+    assert any(item["name"] == "CD4+ T淋巴细胞计数 < 200/μL" for item in action.metadata["exam_candidate_evidence"])
 
 
 def test_service_missing_confirmed_evidence_prefers_missing_family_before_root_symptoms() -> None:
@@ -367,7 +370,8 @@ def test_service_missing_confirmed_evidence_prefers_missing_family_before_root_s
     )
 
     assert action is not None
-    assert action.target_node_name == "血清 β-D 葡聚糖升高"
+    assert action.action_type == "collect_exam_context"
+    assert any(item["name"] == "血清 β-D 葡聚糖升高" for item in action.metadata["exam_candidate_evidence"])
 
 
 # 验证 strong_alternative_not_ruled_out 会把强备选 hypothesis 的动作纳入 repair 候选池。
@@ -439,7 +443,8 @@ def test_service_can_switch_to_alternative_hypothesis_action_when_verifier_reque
 
     assert action is not None
     assert action.hypothesis_id == "covid"
-    assert action.target_node_name == "新冠核酸阳性"
+    assert action.action_type == "collect_exam_context"
+    assert any(item["name"] == "新冠核酸阳性" for item in action.metadata["exam_candidate_evidence"])
 
 
 # 验证 strong_alternative_not_ruled_out 会更敢于切到非当前 top1 的鉴别证据。

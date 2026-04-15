@@ -71,3 +71,72 @@ def test_a4_target_aware_parser_extracts_uncertain_span() -> None:
     assert result.existence == "exist"
     assert result.certainty == "doubt"
     assert "好像有点发热" in result.uncertain_span
+
+
+# 验证检查上下文回答能一次性识别做过检查、检查名称和结果。
+def test_exam_context_parser_extracts_tests_and_results() -> None:
+    parser = EvidenceParser()
+    action = MctsAction(
+        action_id="collect_exam::pcp::lab",
+        action_type="collect_exam_context",
+        target_node_id="__exam_context__::lab",
+        target_node_label="ExamContext",
+        target_node_name="化验检查情况",
+        metadata={"exam_kind": "lab"},
+    )
+
+    result = parser.interpret_exam_context_answer("做过 CD4 和 β-D 葡聚糖，CD4 很低，G 试验阳性。", action)
+
+    assert result.availability == "done"
+    assert "CD4" in result.mentioned_tests
+    assert "β-D 葡聚糖" in result.mentioned_tests
+    assert len(result.mentioned_results) >= 2
+    assert result.needs_followup is False
+
+
+# 验证检查上下文结果可以映射回当前 R2 候选证据节点。
+def test_exam_context_result_maps_to_candidate_evidence() -> None:
+    parser = EvidenceParser()
+    action = MctsAction(
+        action_id="collect_exam::pcp::lab",
+        action_type="collect_exam_context",
+        target_node_id="__exam_context__::lab",
+        target_node_label="ExamContext",
+        target_node_name="化验检查情况",
+        metadata={
+            "exam_kind": "lab",
+            "exam_candidate_evidence": [
+                {
+                    "node_id": "lab_cd4_low",
+                    "label": "LabFinding",
+                    "name": "CD4+ T淋巴细胞计数 < 200/μL",
+                }
+            ],
+        },
+    )
+    result = parser.interpret_exam_context_answer("做过 CD4，医生说 CD4 很低。", action)
+
+    updates = parser.build_slot_updates_from_exam_context(action, result, "做过 CD4，医生说 CD4 很低。", turn_index=2)
+
+    assert len(updates) == 1
+    assert updates[0].node_id == "lab_cd4_low"
+    assert updates[0].status == "true"
+    assert updates[0].certainty == "certain"
+
+
+# 验证患者没做过检查时，不会要求追问具体结果。
+def test_exam_context_parser_marks_not_done_without_followup() -> None:
+    parser = EvidenceParser()
+    action = MctsAction(
+        action_id="collect_exam::pcp::imaging",
+        action_type="collect_exam_context",
+        target_node_id="__exam_context__::imaging",
+        target_node_label="ExamContext",
+        target_node_name="胸部影像检查情况",
+        metadata={"exam_kind": "imaging"},
+    )
+
+    result = parser.interpret_exam_context_answer("最近没有做过胸部 CT。", action)
+
+    assert result.availability == "not_done"
+    assert result.needs_followup is False

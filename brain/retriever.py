@@ -110,12 +110,30 @@ class GraphRetriever:
                    labels(n)[0] AS label,
                    coalesce(n.canonical_name, n.name) AS name,
                    coalesce(n.weight, 0.0) AS graph_weight,
+                   coalesce(n.acquisition_mode,
+                     CASE
+                       WHEN labels(n)[0] IN ['Symptom', 'Sign', 'RiskBehavior', 'RiskFactor', 'ClinicalAttribute'] THEN 'direct_ask'
+                       WHEN labels(n)[0] = 'PopulationGroup' THEN 'history_known'
+                       ELSE ''
+                     END
+                   ) AS acquisition_mode,
+                   coalesce(n.evidence_cost,
+                     CASE
+                       WHEN labels(n)[0] IN ['Symptom', 'Sign', 'RiskBehavior', 'RiskFactor', 'ClinicalAttribute', 'PopulationGroup'] THEN 'low'
+                       ELSE ''
+                     END
+                   ) AS evidence_cost,
                    CASE
                      WHEN labels(n)[0] IN ['RiskFactor', 'RiskBehavior'] THEN 3
                      WHEN labels(n)[0] IN ['Symptom', 'Sign'] THEN 2
                      ELSE 1
-                   END AS label_priority
-            ORDER BY label_priority DESC, graph_weight DESC, name
+                   END AS label_priority,
+                   CASE
+                     WHEN coalesce(n.evidence_cost, '') = 'low' THEN 0.25
+                     WHEN coalesce(n.acquisition_mode, '') IN ['direct_ask', 'history_known'] THEN 0.2
+                     ELSE 0.0
+                   END AS accessibility_priority
+            ORDER BY label_priority DESC, accessibility_priority DESC, graph_weight DESC, name
             LIMIT $limit
             """,
             {
@@ -131,6 +149,10 @@ class GraphRetriever:
                 topic_id=row["label"],
                 graph_weight=float(row.get("graph_weight", 0.0)),
                 priority=float(row.get("label_priority", 0.0)),
+                metadata={
+                    "acquisition_mode": row.get("acquisition_mode", ""),
+                    "evidence_cost": row.get("evidence_cost", ""),
+                },
             )
             for row in rows
         ]
@@ -291,6 +313,24 @@ class GraphRetriever:
                    type(r) AS relation_type,
                    coalesce(r.weight, 0.0) AS relation_weight,
                    coalesce(target.weight, 0.0) AS node_weight,
+                   coalesce(target.acquisition_mode,
+                     CASE
+                       WHEN labels(target)[0] IN ['Symptom', 'Sign', 'RiskBehavior', 'RiskFactor'] THEN 'direct_ask'
+                       WHEN labels(target)[0] IN ['PopulationGroup'] THEN 'history_known'
+                       WHEN labels(target)[0] IN ['LabFinding', 'LabTest'] THEN 'needs_lab_test'
+                       WHEN labels(target)[0] = 'ImagingFinding' THEN 'needs_imaging'
+                       WHEN labels(target)[0] = 'Pathogen' THEN 'needs_pathogen_test'
+                       WHEN labels(target)[0] = 'ClinicalAttribute' THEN 'direct_ask'
+                       ELSE ''
+                     END
+                   ) AS acquisition_mode,
+                   coalesce(target.evidence_cost,
+                     CASE
+                       WHEN labels(target)[0] IN ['Symptom', 'Sign', 'RiskBehavior', 'RiskFactor', 'PopulationGroup', 'ClinicalAttribute'] THEN 'low'
+                       WHEN labels(target)[0] IN ['LabFinding', 'LabTest', 'ImagingFinding', 'Pathogen'] THEN 'high'
+                       ELSE ''
+                     END
+                   ) AS evidence_cost,
                    direction_confidence AS similarity_confidence,
                    CASE
                      WHEN type(r) IN ['HAS_LAB_FINDING', 'HAS_IMAGING_FINDING', 'HAS_PATHOGEN', 'DIAGNOSED_BY'] THEN 1.0
@@ -383,7 +423,11 @@ class GraphRetriever:
                 topic_id=row.get("topic_id"),
                 priority=float(row.get("priority", 0.0)),
                 red_flag_score=1.0 if bool(row.get("is_red_flag", False)) else 0.0,
-                metadata={"relation_type": row.get("relation_type")},
+                metadata={
+                    "relation_type": row.get("relation_type"),
+                    "acquisition_mode": row.get("acquisition_mode", ""),
+                    "evidence_cost": row.get("evidence_cost", ""),
+                },
             )
             for row in rows
         ]
