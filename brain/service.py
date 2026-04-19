@@ -822,10 +822,10 @@ class ConsultationBrain:
         label = str(item.get("label") or "")
         relation_type = str(item.get("relation_type") or "")
 
-        if label in {"Symptom", "Sign"}:
+        if label == "ClinicalFinding":
             return "symptom"
 
-        if label in {"RiskFactor", "RiskBehavior", "PopulationGroup"} or relation_type == "RISK_FACTOR_FOR":
+        if label in {"RiskFactor", "PopulationGroup"} or relation_type == "RISK_FACTOR_FOR":
             return "risk"
 
         if label in {"LabFinding", "LabTest"} or relation_type == "HAS_LAB_FINDING":
@@ -2537,10 +2537,8 @@ class ConsultationBrain:
             return False
 
         return label in {
-            "Symptom",
-            "Sign",
+            "ClinicalFinding",
             "RiskFactor",
-            "RiskBehavior",
             "ClinicalAttribute",
             "PopulationGroup",
         }

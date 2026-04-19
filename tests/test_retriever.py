@@ -105,7 +105,7 @@ class SemanticFakeNeo4jClient(FakeNeo4jClient):
                 },
                 {
                     "node_id": "phase_generic",
-                    "label": "DiseasePhase",
+                    "label": "Disease",
                     "name": "原发性肺部感染",
                     "relation_count": 1.0,
                     "matched_feature_count": 1,
@@ -147,7 +147,7 @@ class ProfileFakeNeo4jClient(FakeNeo4jClient):
             return [
                 {
                     "node_id": "symptom_fever",
-                    "label": "Symptom",
+                    "label": "ClinicalFinding",
                     "name": "发热",
                     "relation_type": "MANIFESTS_AS",
                     "relation_weight": 0.8,

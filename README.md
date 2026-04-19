@@ -130,13 +130,13 @@ SKIP_EXTRACTION=true \
 ./knowledge_graph/run_search_kg_pipeline.sh
 ```
 
-当前搜索专用本体重点保留：
+当前线上问诊搜索专用本体重点保留：
 
-- 诊断候选：`Disease`、`OpportunisticInfection`、`Comorbidity`、`SyndromeOrComplication`、`Tumor`
-- 待验证证据：`Symptom`、`Sign`、`ClinicalAttribute`、`LabTest`、`LabFinding`、`ImagingFinding`、`Pathogen`
-- 风险与人群：`RiskFactor`、`RiskBehavior`、`PopulationGroup`
+- 诊断候选：`Disease`，统一承载普通疾病、机会性感染、肿瘤、共病、综合征、并发症和可独立作为候选诊断的临床型
+- 待验证证据：`ClinicalFinding`、`ClinicalAttribute`、`LabTest`、`LabFinding`、`ImagingFinding`、`Pathogen`
+- 风险与人群：`RiskFactor`、`PopulationGroup`
 - 搜索关系：`MANIFESTS_AS`、`HAS_LAB_FINDING`、`HAS_IMAGING_FINDING`、`HAS_PATHOGEN`、`DIAGNOSED_BY`、`REQUIRES_DETAIL`、`RISK_FACTOR_FOR`、`COMPLICATED_BY`、`APPLIES_TO`
-- 证据获取元数据：证据节点可预留 `acquisition_mode` 和 `evidence_cost`，用于后续区分直接问诊证据与依赖化验、影像、病原检测的高成本证据；当前只在抽取端保留，不改变搜索排序
+- 证据获取元数据：证据节点可预留 `acquisition_mode` 和 `evidence_cost`，用于区分直接问诊证据与依赖化验、影像、病原检测的高成本证据
 
 以下旧版全量指南图谱内容已经从当前抽取端移除：
 
@@ -218,7 +218,7 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 程序化规则审计当前覆盖：
 
 - 标签 / 分组异常：证据 label 不在搜索主流程集合内、group 为空或非法
-- `acquisition_mode / evidence_cost` 异常：例如 `LabFinding=direct_ask`、`Symptom=high`、`ImagingFinding` 未标记为 `needs_imaging/high`
+- `acquisition_mode / evidence_cost` 异常：例如 `LabFinding=direct_ask`、`ClinicalFinding=high`、`ImagingFinding` 未标记为 `needs_imaging/high`
 - 关系异常：关系类型不在核心关系集合内、泛化关系占比过高
 - 重复或疑似重复节点：同名节点、高相似名称节点
 - 证据结构失衡：缺少 symptom、risk、exam，或 detail 占比过高

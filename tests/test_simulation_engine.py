@@ -49,7 +49,7 @@ class StubRetriever:
         return [
             {
                 "node_id": "n2",
-                "label": "Symptom",
+                "label": "ClinicalFinding",
                 "name": "干咳",
                 "relation_type": "MANIFESTS_AS",
                 "relation_weight": 0.7,

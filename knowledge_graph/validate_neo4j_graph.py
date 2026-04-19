@@ -13,33 +13,24 @@ PROJECT_ROOT = KG_ROOT.parent
 
 SEARCH_LABELS = [
     "Disease",
-    "DiseasePhase",
-    "OpportunisticInfection",
-    "Comorbidity",
-    "SyndromeOrComplication",
-    "Tumor",
-    "Pathogen",
-    "Symptom",
-    "Sign",
+    "ClinicalFinding",
     "ClinicalAttribute",
     "LabTest",
     "LabFinding",
     "ImagingFinding",
+    "Pathogen",
     "RiskFactor",
-    "RiskBehavior",
     "PopulationGroup",
 ]
 
 EVIDENCE_LABELS = [
     "Pathogen",
-    "Symptom",
-    "Sign",
+    "ClinicalFinding",
     "ClinicalAttribute",
     "LabTest",
     "LabFinding",
     "ImagingFinding",
     "RiskFactor",
-    "RiskBehavior",
     "PopulationGroup",
 ]
 
@@ -68,6 +59,14 @@ DEPRECATED_LABELS = [
     "TransmissionRoute",
     "ManagementAction",
     "ExposureScenario",
+    "DiseasePhase",
+    "OpportunisticInfection",
+    "Comorbidity",
+    "SyndromeOrComplication",
+    "Tumor",
+    "Symptom",
+    "Sign",
+    "RiskBehavior",
 ]
 
 

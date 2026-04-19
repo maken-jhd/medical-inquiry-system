@@ -28,31 +28,22 @@ class RetrievalConfig:
     evidence_profile_limit: int = 12
     cold_start_labels: tuple[str, ...] = (
         "RiskFactor",
-        "RiskBehavior",
-        "Symptom",
-        "Sign",
+        "ClinicalFinding",
         "ClinicalAttribute",
         "PopulationGroup",
     )
     r1_feature_labels: tuple[str, ...] = (
-        "Symptom",
-        "Sign",
+        "ClinicalFinding",
         "LabFinding",
         "LabTest",
         "ImagingFinding",
         "Pathogen",
         "ClinicalAttribute",
         "RiskFactor",
-        "RiskBehavior",
         "PopulationGroup",
     )
     r1_candidate_labels: tuple[str, ...] = (
         "Disease",
-        "DiseasePhase",
-        "OpportunisticInfection",
-        "Comorbidity",
-        "SyndromeOrComplication",
-        "Tumor",
     )
     r1_relation_types: tuple[str, ...] = (
         "MANIFESTS_AS",
@@ -76,15 +67,13 @@ class RetrievalConfig:
         "RISK_FACTOR_FOR",
     )
     r2_target_labels: tuple[str, ...] = (
-        "Symptom",
-        "Sign",
+        "ClinicalFinding",
         "LabFinding",
         "LabTest",
         "ImagingFinding",
         "Pathogen",
         "ClinicalAttribute",
         "RiskFactor",
-        "RiskBehavior",
         "PopulationGroup",
     )
     evidence_profile_group_limit: int = 4
@@ -114,20 +103,20 @@ class GraphRetriever:
                    coalesce(n.weight, 0.0) AS graph_weight,
                    coalesce(n.acquisition_mode,
                      CASE
-                       WHEN labels(n)[0] IN ['Symptom', 'Sign', 'RiskBehavior', 'RiskFactor', 'ClinicalAttribute'] THEN 'direct_ask'
+                       WHEN labels(n)[0] IN ['ClinicalFinding', 'RiskFactor', 'ClinicalAttribute'] THEN 'direct_ask'
                        WHEN labels(n)[0] = 'PopulationGroup' THEN 'history_known'
                        ELSE ''
                      END
                    ) AS acquisition_mode,
                    coalesce(n.evidence_cost,
                      CASE
-                       WHEN labels(n)[0] IN ['Symptom', 'Sign', 'RiskBehavior', 'RiskFactor', 'ClinicalAttribute', 'PopulationGroup'] THEN 'low'
+                       WHEN labels(n)[0] IN ['ClinicalFinding', 'RiskFactor', 'ClinicalAttribute', 'PopulationGroup'] THEN 'low'
                        ELSE ''
                      END
                    ) AS evidence_cost,
                    CASE
-                     WHEN labels(n)[0] IN ['RiskFactor', 'RiskBehavior'] THEN 3
-                     WHEN labels(n)[0] IN ['Symptom', 'Sign'] THEN 2
+                     WHEN labels(n)[0] IN ['RiskFactor', 'PopulationGroup'] THEN 3
+                     WHEN labels(n)[0] = 'ClinicalFinding' THEN 2
                      ELSE 1
                    END AS label_priority,
                    CASE
@@ -317,7 +306,7 @@ class GraphRetriever:
                    coalesce(target.weight, 0.0) AS node_weight,
                    coalesce(target.acquisition_mode,
                      CASE
-                       WHEN labels(target)[0] IN ['Symptom', 'Sign', 'RiskBehavior', 'RiskFactor'] THEN 'direct_ask'
+                       WHEN labels(target)[0] IN ['ClinicalFinding', 'RiskFactor', 'ClinicalAttribute'] THEN 'direct_ask'
                        WHEN labels(target)[0] IN ['PopulationGroup'] THEN 'history_known'
                        WHEN labels(target)[0] IN ['LabFinding', 'LabTest'] THEN 'needs_lab_test'
                        WHEN labels(target)[0] = 'ImagingFinding' THEN 'needs_imaging'
@@ -328,7 +317,7 @@ class GraphRetriever:
                    ) AS acquisition_mode,
                    coalesce(target.evidence_cost,
                      CASE
-                       WHEN labels(target)[0] IN ['Symptom', 'Sign', 'RiskBehavior', 'RiskFactor', 'PopulationGroup', 'ClinicalAttribute'] THEN 'low'
+                       WHEN labels(target)[0] IN ['ClinicalFinding', 'RiskFactor', 'PopulationGroup', 'ClinicalAttribute'] THEN 'low'
                        WHEN labels(target)[0] IN ['LabFinding', 'LabTest', 'ImagingFinding', 'Pathogen'] THEN 'high'
                        ELSE ''
                      END
@@ -344,13 +333,13 @@ class GraphRetriever:
                      WHEN labels(target)[0] IN ['LabFinding', 'LabTest'] THEN 'lab'
                      WHEN labels(target)[0] = 'ImagingFinding' THEN 'imaging'
                      WHEN labels(target)[0] = 'Pathogen' THEN 'pathogen'
-                     WHEN labels(target)[0] IN ['RiskFactor', 'RiskBehavior'] THEN 'risk'
+                     WHEN labels(target)[0] IN ['RiskFactor', 'PopulationGroup'] THEN 'risk'
                      WHEN labels(target)[0] = 'ClinicalAttribute' THEN 'detail'
                      ELSE 'symptom'
                    END AS question_type_hint,
                    (coalesce(target.weight, 0.0) + coalesce(r.weight, 0.0)) * direction_confidence AS priority,
                    CASE
-                     WHEN labels(target)[0] IN ['Sign', 'LabFinding', 'ImagingFinding'] THEN true
+                     WHEN labels(target)[0] IN ['ClinicalFinding', 'LabFinding', 'ImagingFinding'] THEN true
                      ELSE false
                    END AS is_red_flag,
                    labels(target)[0] AS topic_id
@@ -399,7 +388,7 @@ class GraphRetriever:
                    coalesce(target.weight, 0.0) AS node_weight,
                    coalesce(target.acquisition_mode,
                      CASE
-                       WHEN labels(target)[0] IN ['Symptom', 'Sign', 'RiskBehavior', 'RiskFactor'] THEN 'direct_ask'
+                       WHEN labels(target)[0] IN ['ClinicalFinding', 'RiskFactor', 'ClinicalAttribute'] THEN 'direct_ask'
                        WHEN labels(target)[0] IN ['PopulationGroup'] THEN 'history_known'
                        WHEN labels(target)[0] IN ['LabFinding', 'LabTest'] THEN 'needs_lab_test'
                        WHEN labels(target)[0] = 'ImagingFinding' THEN 'needs_imaging'
@@ -410,7 +399,7 @@ class GraphRetriever:
                    ) AS acquisition_mode,
                    coalesce(target.evidence_cost,
                      CASE
-                       WHEN labels(target)[0] IN ['Symptom', 'Sign', 'RiskBehavior', 'RiskFactor', 'PopulationGroup', 'ClinicalAttribute'] THEN 'low'
+                       WHEN labels(target)[0] IN ['ClinicalFinding', 'RiskFactor', 'PopulationGroup', 'ClinicalAttribute'] THEN 'low'
                        WHEN labels(target)[0] IN ['LabFinding', 'LabTest', 'ImagingFinding', 'Pathogen'] THEN 'high'
                        ELSE ''
                      END
@@ -420,7 +409,7 @@ class GraphRetriever:
                      WHEN labels(target)[0] IN ['LabFinding', 'LabTest'] THEN 'lab'
                      WHEN labels(target)[0] = 'ImagingFinding' THEN 'imaging'
                      WHEN labels(target)[0] = 'Pathogen' THEN 'pathogen'
-                     WHEN labels(target)[0] IN ['RiskFactor', 'RiskBehavior', 'PopulationGroup'] THEN 'risk'
+                     WHEN labels(target)[0] IN ['RiskFactor', 'PopulationGroup'] THEN 'risk'
                      WHEN labels(target)[0] = 'ClinicalAttribute' THEN 'detail'
                      ELSE 'symptom'
                    END AS question_type_hint,
@@ -670,10 +659,10 @@ class GraphRetriever:
         if question_type in {"symptom", "risk", "lab", "imaging", "pathogen", "detail"}:
             return question_type
 
-        if label in {"Symptom", "Sign"}:
+        if label == "ClinicalFinding":
             return "symptom"
 
-        if label in {"RiskFactor", "RiskBehavior", "PopulationGroup"} or relation_type == "RISK_FACTOR_FOR":
+        if label in {"RiskFactor", "PopulationGroup"} or relation_type == "RISK_FACTOR_FOR":
             return "risk"
 
         if label in {"LabFinding", "LabTest"} or relation_type == "HAS_LAB_FINDING":
@@ -825,17 +814,9 @@ class GraphRetriever:
         scores = [weights.get(item, 0.25) for item in relation_types]
         return sum(scores) / len(scores)
 
-    # 给不同候选标签设置一个轻量语义先验，降低泛化标签过早排到前面。
+    # 候选诊断已统一为 Disease；仅保留非 Disease 兜底降权，避免旧标签继续影响排序。
     def _label_prior(self, label: str) -> float:
-        priors = {
-            "Disease": 1.0,
-            "OpportunisticInfection": 0.95,
-            "Tumor": 0.85,
-            "Comorbidity": 0.78,
-            "DiseasePhase": 0.72,
-            "SyndromeOrComplication": 0.68,
-        }
-        return priors.get(label, 0.7)
+        return 1.0 if label == "Disease" else 0.7
 
     # 对“总特征较多但只吃到一个泛化证据”的候选做额外降权。
     def _generic_single_feature_penalty(
@@ -848,7 +829,7 @@ class GraphRetriever:
         if total_feature_count <= 1 or matched_feature_count > 1:
             return 0.0
 
-        if label not in {"DiseasePhase", "SyndromeOrComplication", "Comorbidity"}:
+        if label != "Disease":
             return 0.0
 
         weak_relation_types = {"APPLIES_TO", "COMPLICATED_BY", "RISK_FACTOR_FOR"}

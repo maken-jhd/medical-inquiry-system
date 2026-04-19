@@ -15,7 +15,7 @@ class FakeNeo4jClient:
             return [
                 {
                     "node_id": "symptom_fever",
-                    "label": "Symptom",
+                    "label": "ClinicalFinding",
                     "canonical_name": "发热",
                     "aliases": ["发烧"],
                 }

@@ -8,8 +8,8 @@ from brain.types import QuestionCandidate, SessionState
 def test_question_selector_prefers_unasked_candidate() -> None:
     selector = QuestionSelector()
     state = SessionState(session_id="s1", asked_node_ids=["q1"])
-    q1 = QuestionCandidate(node_id="q1", label="Symptom", name="发热", priority=5.0)
-    q2 = QuestionCandidate(node_id="q2", label="Symptom", name="咳嗽", priority=4.0)
+    q1 = QuestionCandidate(node_id="q1", label="ClinicalFinding", name="发热", priority=5.0)
+    q2 = QuestionCandidate(node_id="q2", label="ClinicalFinding", name="咳嗽", priority=4.0)
 
     selected = selector.select_next_question([q1, q2], state)
 

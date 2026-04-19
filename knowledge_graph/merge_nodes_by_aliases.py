@@ -13,26 +13,26 @@ KG_ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = KG_ROOT.parent
 
 DETAIL_LEVEL_ORDER = {"minimal": 0, "standard": 1, "full": 2}
-NON_MERGE_LABELS = {"GuidelineSection", "Recommendation", "EvidenceSpan", "Assertion"}
 ALIAS_FILE_TO_LABEL = {
     "clinical_attribute_aliases.json": "ClinicalAttribute",
-    "comorbidity_aliases.json": "Comorbidity",
+    "clinical_finding_aliases.json": "ClinicalFinding",
+    "comorbidity_aliases.json": "Disease",
     "disease_aliases.json": "Disease",
-    "disease_phase_aliases.json": "DiseasePhase",
+    "disease_phase_aliases.json": "Disease",
     "imaging_finding_aliases.json": "ImagingFinding",
     "lab_finding_aliases.json": "LabFinding",
     "lab_test_aliases.json": "LabTest",
-    "opportunistic_infection_aliases.json": "OpportunisticInfection",
+    "opportunistic_infection_aliases.json": "Disease",
     "pathogen_aliases.json": "Pathogen",
     "population_group_aliases.json": "PopulationGroup",
     "poplilation_group_aliases.json": "PopulationGroup",
-    "risk_behavior_aliases.json": "RiskBehavior",
+    "risk_behavior_aliases.json": "RiskFactor",
     "risk_factor_aliases.json": "RiskFactor",
-    "sign_aliases.json": "Sign",
-    "symptom_aliases.json": "Symptom",
-    "syndrome_or_complication_aliases.json": "SyndromeOrComplication",
-    "syndrome_or_coplication_aliases.json": "SyndromeOrComplication",
-    "tumor_aliases.json": "Tumor",
+    "sign_aliases.json": "ClinicalFinding",
+    "symptom_aliases.json": "ClinicalFinding",
+    "syndrome_or_complication_aliases.json": "Disease",
+    "syndrome_or_coplication_aliases.json": "Disease",
+    "tumor_aliases.json": "Disease",
 }
 NODE_SYSTEM_KEYS = {
     "record_type",
@@ -220,11 +220,7 @@ def build_merge_key(
     node: Dict[str, Any],
     record_context: Dict[str, Any],
 ) -> str:
-    if label in NON_MERGE_LABELS:
-        relative_path = clean_text(record_context.get("relative_path")) or "__unknown_document__"
-        node_id = clean_text(node.get("id")) or "__unknown_node__"
-        return f"{label}::{relative_path}::{node_id}"
-
+    _ = node, record_context
     return f"{label}::{canonical_name}"
 
 
@@ -497,7 +493,6 @@ def main() -> None:
         "source_edge_count": 0,
         "alias_merged_node_count": 0,
         "self_merged_node_count": 0,
-        "non_merge_label_node_count": 0,
     }
 
     with config.input_file.open("r", encoding="utf-8") as handle:
@@ -576,9 +571,7 @@ def main() -> None:
 
                 stats["source_node_count"] += 1
 
-                if label in NON_MERGE_LABELS:
-                    stats["non_merge_label_node_count"] += 1
-                elif merge_method == "alias":
+                if merge_method == "alias":
                     stats["alias_merged_node_count"] += 1
                 else:
                     stats["self_merged_node_count"] += 1
@@ -632,7 +625,6 @@ def main() -> None:
             "alias_label_count": len(alias_indexes),
             "merged_node_count": len(canonical_nodes),
             "merged_edge_count": len(canonical_edges),
-            "non_merge_labels": sorted(NON_MERGE_LABELS),
         },
         "nodes": sort_nodes(list(canonical_nodes.values())),
         "edges": sort_edges(list(canonical_edges.values())),

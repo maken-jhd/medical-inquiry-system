@@ -19,20 +19,13 @@ PROJECT_ROOT = KG_ROOT.parent
 
 ALLOWED_LABELS = [
     "Disease",
-    "DiseasePhase",
-    "OpportunisticInfection",
-    "Comorbidity",
-    "SyndromeOrComplication",
-    "Tumor",
-    "Pathogen",
-    "Symptom",
-    "Sign",
+    "ClinicalFinding",
     "ClinicalAttribute",
     "LabTest",
     "LabFinding",
     "ImagingFinding",
+    "Pathogen",
     "RiskFactor",
-    "RiskBehavior",
     "PopulationGroup",
 ]
 
@@ -142,95 +135,73 @@ GRAPH_OUTPUT_SCHEMA: Dict[str, Any] = {
 }
 
 SCHEMA_CONSTITUTION = f"""
-你正在为一个 HIV/AIDS 场景的“问诊搜索树”抽取可直接写入 Neo4j 的搜索专用知识图谱。
+你正在为 HIV/AIDS 场景的线上问诊系统抽取“问诊搜索专用知识图谱”。
 
-这不是通用医学指南归档图谱。图谱只服务以下问诊链路：
-- R1：症状 / 风险 / 检查线索 -> 候选疾病或疾病阶段
-- R2：候选疾病 -> 关键待验证证据
-- A3：根据待验证证据构造下一问
-- A4：根据患者回答更新证据和诊断假设
+这不是全量医学本体归档。图谱只服务以下链路：
+- R1：患者可描述的临床线索 / 风险背景 / 既往检查线索 -> 候选诊断
+- R2：候选诊断 -> 关键待验证证据
+- A3：根据待验证证据生成下一问
+- A4：根据患者回答更新证据和假设
 
-你必须严格遵守以下本体与输出规则：
-1. 只能返回严格 JSON，且顶层必须且只能包含两个键：`nodes` 和 `edges`。
-2. 只能使用下面明确列出的搜索专用节点标签和关系类型。
-3. 每个节点必须包含以下字段：
-   - id
-   - label
-   - name
-   - weight
-   - detail_required
-   对症状、体征、风险、检查、影像、病原、可追问细节等“证据节点”，请尽量额外输出：
-   - acquisition_mode
-   - evidence_cost
-4. 每条边必须包含以下字段：
-   - id
-   - type
-   - source_id
-   - target_id
-   - weight
-   - detail_required
-5. 请重点抽取“诊断问诊子图”，包括：
-   - 疾病、疾病阶段、机会性感染、并发症、肿瘤、共病
-   - 症状、体征、可追问的临床细节
-   - 实验室检查、实验室发现
-   - 影像学发现
-   - 病原体或病原学线索
-   - 风险因素、风险行为、人群特征
-6. 请忽略用药、治疗方案、预防策略、推荐意见编号、证据分级、指南章节、证据片段、文档证据链。
-   不要输出 Recommendation、Medication、TreatmentRegimen、GuidelineDocument、EvidenceSpan、Assertion 等全指南型实体。
-7. `RiskBehavior` 必须用于具体行为风险，例如高危性行为、无保护性行为、多性伴、静脉吸毒、共用针具。
-   不要把这些内容抽成 ExposureScenario。
-8. `ImagingFinding` 必须用于影像学发现，例如双肺弥漫磨玻璃影、胸部 CT 异常、粟粒样结节、空洞、间质性浸润。
-   疾病到影像学发现优先使用 `HAS_IMAGING_FINDING`。
-9. `Pathogen` 用于病原体或明确病原学线索，例如肺孢子菌、结核分枝杆菌、隐球菌、巨细胞病毒。
-   疾病到病原体或病原线索使用 `HAS_PATHOGEN`。
-10. `LabFinding` 必须结构化表达。如果文本中出现阈值或比较条件，请放入 `LabFinding.attributes` 中，至少包含：
-   - test_id
-   - operator
-   - value
-   - unit
-   如果原文是“阳性”“阴性”“升高”“降低”“高于检测下限”等无法稳定转换为数值的检验结论，也可以使用：
-   - value_text
-   - reference_value_text
-   如果你无法可靠判断某条信息对应的 `test_id` 或 `operator`，不要把它输出为 `LabFinding`，可输出为 `LabTest` 或其他更合适的搜索证据节点。
-11. 用于问诊追问的细节槽位，必须建模为 `ClinicalAttribute` 节点，并通过 `REQUIRES_DETAIL` 关系连接。
-   例如咳嗽持续时间、发热程度、呼吸困难是否进行性加重、是否夜间盗汗、体重下降幅度。
-12. 每一条边的 `source_id` 和 `target_id` 都必须引用本次返回的 `nodes` 数组中真实存在的节点 id，禁止输出指向未定义节点的边。
-13. 不要臆造文本中不存在的事实。所有抽取结果都必须能够从当前文本块中直接或高度确定地归纳出来。
-14. `acquisition_mode` 用于描述这条证据通常如何获得，只能使用：
-   - `direct_ask`：患者通常可以直接回答，例如发热、干咳、气促、盗汗、体重下降、高危性行为。
-   - `history_known`：通常来自既往史或已知背景，例如 HIV 感染者、免疫抑制人群、孕产妇。
-   - `needs_lab_test`：需要实验室检查结果，例如 CD4+ T 淋巴细胞计数、HIV RNA、LDH、β-D 葡聚糖。
-   - `needs_imaging`：需要影像检查结果，例如胸部 CT 磨玻璃影、空洞、粟粒样结节。
-   - `needs_pathogen_test`：需要病原学检测结果，例如 BAL 肺孢子菌 PCR 阳性、培养、抗原、核酸检测。
-   - `needs_clinician_assessment`：需要医生查体或临床判断，例如听诊异常、体格检查发现。
-15. `evidence_cost` 用于描述获取这条证据的相对成本，只能使用：
-   - `low`：直接询问或既往已知即可获得。
-   - `medium`：需要医生查体、临床评估或常规已做检查。
-   - `high`：需要化验、影像、病原学检查或医疗设备支持。
-16. 如果无法可靠判断 `acquisition_mode` 或 `evidence_cost`，可以省略，不要强行臆造。
+输出必须是严格 JSON object，顶层只能包含 `nodes` 和 `edges`。每个节点必须包含 `id`、`label`、`name`、`weight`、`detail_required`；每条边必须包含 `id`、`type`、`source_id`、`target_id`、`weight`、`detail_required`。边只能指向本次返回 nodes 中存在的 id。
 
-证据获取方式示例：
-- 发热：`Symptom`，`acquisition_mode=direct_ask`，`evidence_cost=low`
-- 干咳：`Symptom`，`acquisition_mode=direct_ask`，`evidence_cost=low`
-- 高危性行为：`RiskBehavior`，`acquisition_mode=direct_ask`，`evidence_cost=low`
-- CD4+ T 淋巴细胞计数 < 200/μL：`LabFinding`，`acquisition_mode=needs_lab_test`，`evidence_cost=high`
-- 胸部 CT 磨玻璃影：`ImagingFinding`，`acquisition_mode=needs_imaging`，`evidence_cost=high`
-- BAL 肺孢子菌 PCR 阳性：`LabFinding` 或病原学证据，`acquisition_mode=needs_pathogen_test`，`evidence_cost=high`
+节点主标签只能使用：
+{", ".join(ALLOWED_LABELS)}
+
+禁止输出旧标签：DiseasePhase、OpportunisticInfection、Comorbidity、SyndromeOrComplication、Tumor、Symptom、Sign、RiskBehavior。
+
+核心建模规则：
+1. `Disease` 统一表示所有可作为候选诊断输出的问题，包括普通疾病、机会性感染、肿瘤、共病、综合征、并发症、可独立作为候选诊断的临床型 / 部位型 / 活动性疾病。不要再拆成 DiseasePhase、OpportunisticInfection、Comorbidity、SyndromeOrComplication、Tumor。原文明确时，可在 `attributes` 中填写 `disease_group`、`phase`、`severity`、`subtype`。
+2. `ClinicalFinding` 统一表示线上问诊可获得的临床表现，承载原来的 symptom 和 sign，例如发热、干咳、气促、盗汗、体重下降、咯血、皮疹、肺部阳性体征较少。原文明确时，可在 `attributes` 中填写 `finding_source=patient_reported|observer_reported|either` 和 `red_flag=true|false`。
+3. `ClinicalAttribute` 只能表示需要进一步追问的细节槽位，例如持续时间、严重程度、部位、性质、进展方式、时间关系。禁止把化验阈值、CD4 数值、病毒载量、影像结果、疾病名、病原体、人群标签输出为 ClinicalAttribute。
+4. `RiskFactor` 统一承载风险因素和风险行为，例如高危性行为、无保护性行为、多性伴、静脉吸毒、共用针具、免疫抑制、ART 依从性差。不要输出 RiskBehavior。原文明确时，可在 `attributes.risk_kind` 中填写 behavior、exposure、host、treatment、history。
+5. `PopulationGroup` 只表示患者背景人群，例如 HIV 感染者、孕妇、MSM、免疫抑制人群。不要把“化验阈值 + 人群”拼成一个节点。错误：`CD4<100/μL的HIV感染者`；正确：`PopulationGroup: HIV感染者` + `LabFinding: CD4<100/μL`。
+6. `LabTest` 是检查项目，`LabFinding` 是检查结果，二者必须严格区分。例：`CD4+ T淋巴细胞计数` -> LabTest；`CD4+ T淋巴细胞计数 < 200/μL` -> LabFinding。
+7. `LabFinding` 如果包含阈值或比较条件，请在 `attributes` 中尽量填写 `test_id`、`operator`、`value`、`unit`；阳性、阴性、升高、降低等可使用 `value_text`、`reference_value_text`。
+8. `ImagingFinding` 只能表示具体影像学表现，例如双肺弥漫磨玻璃影、粟粒样结节、空洞、间质性浸润。不要输出“影像异常”“CT异常”“检查异常”这类泛化节点，除非原文只有这个抽象层级。
+9. `Pathogen` 只能表示病原体或病原对象，例如肺孢子菌、结核分枝杆菌、隐球菌、巨细胞病毒。不要把疾病名输出为 Pathogen。
+10. 同一医学概念只能属于一个主标签，不得跨主标签重复输出。
+11. 忽略用药、治疗方案、预防策略、推荐意见编号、证据分级、指南章节、证据片段、文档证据链；不要输出 Recommendation、Medication、TreatmentRegimen、GuidelineDocument、EvidenceSpan、Assertion。
+12. 不要臆造文本中不存在的事实。只抽取当前文本块中直接出现或高度确定可归纳的诊断问诊子图。
+
+证据获取元数据：
+- 对 ClinicalFinding、RiskFactor、PopulationGroup、ClinicalAttribute、LabTest、LabFinding、ImagingFinding、Pathogen 等证据节点，尽量输出 `acquisition_mode` 和 `evidence_cost`。
+- `direct_ask`：患者通常可直接回答，例如发热、干咳、气促、盗汗、体重下降、无保护性行为。
+- `history_known`：来自既往史或已知背景，例如 HIV 感染者、免疫抑制人群、孕产妇、既往结核病史。
+- `needs_lab_test`：需要实验室检查结果，例如 CD4、HIV RNA、LDH、β-D 葡聚糖。
+- `needs_imaging`：需要影像结果，例如胸部 CT 磨玻璃影、空洞、粟粒样结节。
+- `needs_pathogen_test`：需要病原学检测，例如 BAL 肺孢子菌 PCR 阳性、培养、抗原、核酸。
+- `needs_clinician_assessment`：需要医生查体或临床判断，例如听诊异常、体格检查发现。
+- `evidence_cost` 只能是 `low`、`medium`、`high`。如果无法可靠判断，可省略，不要强行臆造。
+
+正例：
+- 发热：ClinicalFinding，direct_ask / low。
+- 肺部阳性体征较少：ClinicalFinding，needs_clinician_assessment / medium。
+- 高危性行为：RiskFactor，direct_ask / low，attributes.risk_kind=behavior。
+- HIV感染者：PopulationGroup，history_known / low。
+- CD4+ T淋巴细胞计数：LabTest，needs_lab_test / high。
+- CD4+ T淋巴细胞计数 < 200/μL：LabFinding，needs_lab_test / high。
+- 胸部 CT 磨玻璃影：ImagingFinding，needs_imaging / high。
+- 肺孢子菌：Pathogen，needs_pathogen_test / high。
+
+反例：
+- 不要输出 Symptom: 发热；应输出 ClinicalFinding: 发热。
+- 不要输出 Sign: 低氧血症；若来自检查结果可输出 LabFinding，若是患者描述可输出 ClinicalFinding。
+- 不要输出 RiskBehavior: 无保护性行为；应输出 RiskFactor。
+- 不要输出 OpportunisticInfection: 肺孢子菌肺炎；应输出 Disease，并可 attributes.disease_group=opportunistic。
+- 不要输出 PopulationGroup: CD4<100/μL的HIV感染者；应拆成 PopulationGroup + LabFinding。
+- 不要输出 ClinicalAttribute: CD4<200；应输出 LabFinding。
 
 关系使用指南：
-- `MANIFESTS_AS`：疾病 / 阶段 / 并发症 -> 症状或体征
-- `HAS_LAB_FINDING`：疾病 / 阶段 -> 实验室发现
-- `HAS_IMAGING_FINDING`：疾病 / 阶段 -> 影像学发现
-- `HAS_PATHOGEN`：疾病 / 机会性感染 -> 病原体或病原学线索
-- `DIAGNOSED_BY`：疾病 / 阶段 -> 关键检查、诊断依据或高度诊断性发现
-- `REQUIRES_DETAIL`：疾病或症状 -> 需要进一步追问的临床细节
-- `RISK_FACTOR_FOR`：风险因素 / 风险行为 / 人群特征 -> 疾病或阶段
-- `COMPLICATED_BY`：疾病 / 阶段 -> 并发症、综合征、肿瘤或共病
-- `APPLIES_TO`：疾病或证据 -> 适用人群，例如 HIV 感染者、免疫抑制人群、孕产妇
-
-允许使用的节点标签：
-{", ".join(ALLOWED_LABELS)}
+- `MANIFESTS_AS`：Disease -> ClinicalFinding
+- `HAS_LAB_FINDING`：Disease -> LabFinding
+- `HAS_IMAGING_FINDING`：Disease -> ImagingFinding
+- `HAS_PATHOGEN`：Disease -> Pathogen
+- `DIAGNOSED_BY`：Disease -> LabTest | LabFinding | ImagingFinding
+- `REQUIRES_DETAIL`：Disease | ClinicalFinding | LabTest -> ClinicalAttribute
+- `RISK_FACTOR_FOR`：RiskFactor | PopulationGroup -> Disease
+- `COMPLICATED_BY`：Disease -> Disease
+- `APPLIES_TO`：Disease | evidence -> PopulationGroup
 
 允许使用的关系类型：
 {", ".join(ALLOWED_EDGE_TYPES)}
@@ -861,9 +832,11 @@ def build_extraction_messages(chunk: Chunk) -> List[Dict[str, str]]:
     user_prompt = "\n".join(
         [
             "请从下面的 Markdown 文本块中抽取可直接写入 Neo4j 的问诊搜索专用知识图谱。",
-            "请只关注：候选诊断、症状/体征、风险因素/风险行为、实验室检查与发现、影像学发现、病原学线索、可进一步追问的临床细节。",
-            "对症状、风险、检查、影像、病原等证据节点，请尽量补充 acquisition_mode 和 evidence_cost，便于后续区分可直接询问证据与高成本检查证据。",
+            "请只关注：候选诊断、线上问诊可获得的临床表现、风险背景、背景人群、实验室检查项目、实验室结果、影像学表现、病原体、可进一步追问的细节槽位。",
+            "候选诊断一律使用 Disease；临床表现一律使用 ClinicalFinding；风险因素和风险行为一律使用 RiskFactor。",
+            "对所有证据节点，请尽量补充 acquisition_mode 和 evidence_cost，便于后续区分可直接询问证据与高成本检查证据。",
             "请忽略：用药、治疗方案、预防策略、推荐意见、指南章节、证据分级和文档证据链。",
+            "不要输出旧标签：Symptom、Sign、RiskBehavior、DiseasePhase、OpportunisticInfection、Comorbidity、SyndromeOrComplication、Tumor。",
             "只允许返回严格 JSON，不要输出任何解释性文字。",
             "",
             "[元数据]",
@@ -1169,7 +1142,7 @@ def infer_acquisition_mode_for_node(node: Dict[str, Any]) -> Optional[str]:
     text = node_text_for_acquisition_inference(node)
     normalized_text = normalize_lookup_text(text)
 
-    if label in {"Symptom", "Sign", "RiskBehavior", "RiskFactor"}:
+    if label in {"ClinicalFinding", "RiskFactor"}:
         return "direct_ask"
 
     if label == "PopulationGroup":
@@ -1201,34 +1174,7 @@ def infer_acquisition_mode_for_node(node: Dict[str, Any]) -> Optional[str]:
         return "needs_lab_test"
 
     if label == "ClinicalAttribute":
-        pathogen_markers = ["pcr", "bal", "肺泡灌洗", "培养", "病原", "抗原", "核酸"]
-        imaging_markers = ["ct", "影像", "胸片", "x线", "磨玻璃", "空洞", "结节", "浸润"]
-        lab_markers = [
-            "cd4",
-            "hivrna",
-            "rna",
-            "病毒载量",
-            "pao2",
-            "血氧",
-            "氧分压",
-            "葡聚糖",
-            "g试验",
-            "ldh",
-            "计数",
-            "检测",
-            "检验",
-            "化验",
-        ]
         clinician_markers = ["听诊", "叩诊", "查体", "体格检查", "医生评估", "临床评估"]
-
-        if any(marker in normalized_text for marker in pathogen_markers):
-            return "needs_pathogen_test"
-
-        if any(marker in normalized_text for marker in imaging_markers):
-            return "needs_imaging"
-
-        if any(marker in normalized_text for marker in lab_markers):
-            return "needs_lab_test"
 
         if any(marker in normalized_text for marker in clinician_markers):
             return "needs_clinician_assessment"

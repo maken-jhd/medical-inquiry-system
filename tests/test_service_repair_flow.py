@@ -69,7 +69,7 @@ def test_service_prefers_recommended_repair_action_for_missing_support() -> None
     rows = [
         {
             "node_id": "symptom_lymph",
-            "label": "Sign",
+            "label": "ClinicalFinding",
             "name": "淋巴结肿大",
             "relation_type": "MANIFESTS_AS",
             "relation_weight": 1.0,
@@ -118,7 +118,7 @@ def test_service_prefers_diversified_question_type_for_trajectory_insufficient()
     state.candidate_hypotheses = [
         HypothesisScore(
             node_id="phase_acute",
-            label="DiseasePhase",
+            label="Disease",
             name="急性期",
             score=1.0,
             metadata={},
@@ -145,11 +145,11 @@ def test_service_prefers_diversified_question_type_for_trajectory_insufficient()
             "question_type_hint": "lab",
             "priority": 2.2,
             "is_red_flag": False,
-            "topic_id": "DiseasePhase",
+            "topic_id": "Disease",
         },
         {
             "node_id": "symptom_rash",
-            "label": "Symptom",
+            "label": "ClinicalFinding",
             "name": "皮疹",
             "relation_type": "MANIFESTS_AS",
             "relation_weight": 0.9,
@@ -159,7 +159,7 @@ def test_service_prefers_diversified_question_type_for_trajectory_insufficient()
             "question_type_hint": "symptom",
             "priority": 2.15,
             "is_red_flag": False,
-            "topic_id": "DiseasePhase",
+            "topic_id": "Disease",
         },
     ]
     brain = _build_brain(rows, tracker)
@@ -215,7 +215,7 @@ def test_service_missing_support_prefers_recommended_evidence_family() -> None:
         },
         {
             "node_id": "sign_ct",
-            "label": "Sign",
+            "label": "ClinicalFinding",
             "name": "胸部CT磨玻璃影",
             "relation_type": "DIAGNOSED_BY",
             "relation_weight": 0.9,
@@ -247,14 +247,14 @@ def test_service_pcp_combo_repair_prefers_missing_family_anchor_over_respiratory
     tracker = StateTracker()
     state = tracker.create_session("s_combo")
     state.candidate_hypotheses = [
-        HypothesisScore(node_id="pneumonia", label="DiseasePhase", name="原发性肺部感染", score=1.1),
+        HypothesisScore(node_id="pneumonia", label="Disease", name="原发性肺部感染", score=1.1),
         HypothesisScore(node_id="pcp", label="Disease", name="肺孢子菌肺炎 (PCP)", score=0.95),
     ]
     rows = {
         "pneumonia": [
             {
                 "node_id": "low_oxygen",
-                "label": "Sign",
+                "label": "ClinicalFinding",
                 "name": "低氧血症",
                 "relation_type": "MANIFESTS_AS",
                 "relation_weight": 0.95,
@@ -264,7 +264,7 @@ def test_service_pcp_combo_repair_prefers_missing_family_anchor_over_respiratory
                 "question_type_hint": "symptom",
                 "priority": 4.4,
                 "is_red_flag": True,
-                "topic_id": "DiseasePhase",
+                "topic_id": "Disease",
             }
         ],
         "pcp": [
@@ -284,7 +284,7 @@ def test_service_pcp_combo_repair_prefers_missing_family_anchor_over_respiratory
             },
             {
                 "node_id": "dry_cough",
-                "label": "Symptom",
+                "label": "ClinicalFinding",
                 "name": "干咳",
                 "relation_type": "MANIFESTS_AS",
                 "relation_weight": 0.9,
@@ -329,7 +329,7 @@ def test_service_missing_confirmed_evidence_prefers_missing_family_before_root_s
     rows = [
         {
             "node_id": "fever",
-            "label": "Symptom",
+            "label": "ClinicalFinding",
             "name": "发热",
             "relation_type": "MANIFESTS_AS",
             "relation_weight": 0.95,
@@ -476,7 +476,7 @@ def test_service_strong_alternative_prioritizes_non_current_discriminative_actio
         "tb": [
             {
                 "node_id": "symptom_night_sweat",
-                "label": "Symptom",
+                "label": "ClinicalFinding",
                 "name": "盗汗",
                 "relation_type": "MANIFESTS_AS",
                 "relation_weight": 0.75,
@@ -526,7 +526,7 @@ def test_service_trajectory_insufficient_penalizes_same_evidence_family() -> Non
     rows = [
         {
             "node_id": "symptom_low_oxygen",
-            "label": "Symptom",
+            "label": "ClinicalFinding",
             "name": "血氧饱和度下降",
             "relation_type": "MANIFESTS_AS",
             "relation_weight": 0.75,
@@ -540,7 +540,7 @@ def test_service_trajectory_insufficient_penalizes_same_evidence_family() -> Non
         },
         {
             "node_id": "sign_ct",
-            "label": "Sign",
+            "label": "ClinicalFinding",
             "name": "胸部CT磨玻璃影",
             "relation_type": "DIAGNOSED_BY",
             "relation_weight": 0.8,

@@ -18,20 +18,13 @@ PROJECT_ROOT = KG_ROOT.parent
 
 ALLOWED_LABELS = [
     "Disease",
-    "DiseasePhase",
-    "OpportunisticInfection",
-    "Comorbidity",
-    "SyndromeOrComplication",
-    "Tumor",
-    "Pathogen",
-    "Symptom",
-    "Sign",
+    "ClinicalFinding",
     "ClinicalAttribute",
     "LabTest",
     "LabFinding",
     "ImagingFinding",
+    "Pathogen",
     "RiskFactor",
-    "RiskBehavior",
     "PopulationGroup",
 ]
 
@@ -50,22 +43,15 @@ ALLOWED_EDGE_TYPES = [
 DETAIL_LEVELS = {"minimal", "standard", "full"}
 DISEASE_LIKE_LABELS = {
     "Disease",
-    "DiseasePhase",
-    "OpportunisticInfection",
-    "Comorbidity",
-    "SyndromeOrComplication",
-    "Tumor",
 }
 EVIDENCE_LABELS = {
     "Pathogen",
-    "Symptom",
-    "Sign",
+    "ClinicalFinding",
     "ClinicalAttribute",
     "LabTest",
     "LabFinding",
     "ImagingFinding",
     "RiskFactor",
-    "RiskBehavior",
     "PopulationGroup",
 }
 REPAIR_FOCUS_LABELS = set(ALLOWED_LABELS)
@@ -73,14 +59,14 @@ REPAIR_FOCUS_LABELS = set(ALLOWED_LABELS)
 
 def edge_label_rules() -> Dict[str, Tuple[set[str], set[str]]]:
     return {
-        "MANIFESTS_AS": (DISEASE_LIKE_LABELS, {"Symptom", "Sign"}),
+        "MANIFESTS_AS": (DISEASE_LIKE_LABELS, {"ClinicalFinding"}),
         "HAS_LAB_FINDING": (DISEASE_LIKE_LABELS, {"LabFinding"}),
         "HAS_IMAGING_FINDING": (DISEASE_LIKE_LABELS, {"ImagingFinding"}),
-        "HAS_PATHOGEN": ({"Disease", "OpportunisticInfection"}, {"Pathogen"}),
+        "HAS_PATHOGEN": (DISEASE_LIKE_LABELS, {"Pathogen"}),
         "DIAGNOSED_BY": (DISEASE_LIKE_LABELS, {"LabTest", "LabFinding", "ImagingFinding"}),
-        "REQUIRES_DETAIL": (DISEASE_LIKE_LABELS | {"Symptom", "Sign", "LabTest"}, {"ClinicalAttribute"}),
-        "RISK_FACTOR_FOR": ({"RiskFactor", "RiskBehavior", "PopulationGroup"}, DISEASE_LIKE_LABELS),
-        "COMPLICATED_BY": ({"Disease", "DiseasePhase"}, {"OpportunisticInfection", "Comorbidity", "SyndromeOrComplication", "Tumor"}),
+        "REQUIRES_DETAIL": (DISEASE_LIKE_LABELS | {"ClinicalFinding", "LabTest"}, {"ClinicalAttribute"}),
+        "RISK_FACTOR_FOR": ({"RiskFactor", "PopulationGroup"}, DISEASE_LIKE_LABELS),
+        "COMPLICATED_BY": (DISEASE_LIKE_LABELS, DISEASE_LIKE_LABELS),
         "APPLIES_TO": (DISEASE_LIKE_LABELS | EVIDENCE_LABELS, {"PopulationGroup"}),
     }
 
@@ -640,7 +626,7 @@ def score_candidate_node(node: Dict[str, Any], suspicious_node_ids: set[str]) ->
     if label in EVIDENCE_LABELS:
         score += 90
 
-    if label in {"Symptom", "Sign", "LabFinding", "ImagingFinding", "RiskFactor", "RiskBehavior"}:
+    if label in {"ClinicalFinding", "LabFinding", "ImagingFinding", "RiskFactor"}:
         score += 40
 
     name = clean_text(node.get("name")) or ""

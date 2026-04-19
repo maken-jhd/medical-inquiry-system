@@ -71,20 +71,13 @@
 当前抽取器只保留问诊搜索树会消费的标签：
 
 - `Disease`
-- `DiseasePhase`
-- `OpportunisticInfection`
-- `Comorbidity`
-- `SyndromeOrComplication`
-- `Tumor`
-- `Pathogen`
-- `Symptom`
-- `Sign`
+- `ClinicalFinding`
 - `ClinicalAttribute`
 - `LabTest`
 - `LabFinding`
 - `ImagingFinding`
+- `Pathogen`
 - `RiskFactor`
-- `RiskBehavior`
 - `PopulationGroup`
 
 ### 节点级证据获取元数据
@@ -111,43 +104,49 @@
 
 默认倾向：
 
-- `Symptom`、`Sign`、`RiskBehavior`、`RiskFactor`：通常为 `direct_ask / low`
+- `ClinicalFinding`、`RiskFactor`：通常为 `direct_ask / low`
 - `PopulationGroup`：通常为 `history_known / low`
 - `LabFinding`、大部分 `LabTest`：通常为 `needs_lab_test / high`
 - `ImagingFinding`：通常为 `needs_imaging / high`
 - `Pathogen` 或病原学阳性证据：通常为 `needs_pathogen_test / high`
-- `ClinicalAttribute`：根据名称启发式判断，普通问诊细节偏 `direct_ask / low`，检查量化属性偏高成本检查型
+- `ClinicalAttribute`：只表示持续时间、严重程度、部位、性质、进展方式等可追问细节槽位，默认偏 `direct_ask / low`
 
-这两个字段目前只作为抽取端和数据结构层面的预留，当前搜索算法不会直接消费它们。
+这两个字段已经进入运行时动作 metadata，用于让问诊动作更自然地感知证据获取方式和成本。
 
 ### 关系类型
 
 当前抽取器只保留或新增以下关系：
 
-- `MANIFESTS_AS`：疾病 -> 症状 / 体征 / 临床表现
+- `MANIFESTS_AS`：疾病 -> 线上问诊可获得的临床表现
 - `HAS_LAB_FINDING`：疾病 -> 实验室发现
 - `HAS_IMAGING_FINDING`：疾病 -> 影像学发现
 - `HAS_PATHOGEN`：疾病 -> 病原体或病原线索
 - `DIAGNOSED_BY`：疾病 -> 关键检查 / 诊断依据
-- `REQUIRES_DETAIL`：疾病或症状 -> 需要继续追问的临床细节
-- `RISK_FACTOR_FOR`：风险因素 / 风险行为 -> 疾病
-- `COMPLICATED_BY`：疾病 -> 并发症 / 综合征 / 肿瘤
+- `REQUIRES_DETAIL`：疾病、临床表现或检查项目 -> 需要继续追问的临床细节
+- `RISK_FACTOR_FOR`：风险因素、风险行为或人群背景 -> 疾病
+- `COMPLICATED_BY`：疾病 -> 另一可作为候选诊断输出的问题
 - `APPLIES_TO`：疾病或证据 -> 适用人群
 
 ## 与问诊搜索树的对齐
 
 当前图谱抽取端和第二阶段检索语义的对应关系如下：
 
-- `Symptom`、`Sign`、`ClinicalAttribute` 支持患者主诉、症状细节和 A3 追问
-- `RiskFactor`、`RiskBehavior`、`PopulationGroup` 支持 HIV 风险史、免疫抑制背景和人群特征
+- `ClinicalFinding`、`ClinicalAttribute` 支持患者主诉、临床表现细节和 A3 追问
+- `RiskFactor`、`PopulationGroup` 支持 HIV 风险史、风险行为、免疫抑制背景和人群特征
 - `LabTest`、`LabFinding` 支持 CD4、PaO2、β-D 葡聚糖、PCR 等实验室证据
 - `ImagingFinding` 支持胸部 CT、磨玻璃影、空洞、粟粒样结节等影像证据
 - `Pathogen` 支持 PCP、结核、真菌等病原学线索
-- `Disease`、`OpportunisticInfection`、`Comorbidity`、`SyndromeOrComplication`、`Tumor` 支持候选诊断和鉴别诊断
+- `Disease` 统一支持普通疾病、机会性感染、肿瘤、共病、综合征、并发症和鉴别诊断
 - `REQUIRES_DETAIL` 用于生成“还需要问什么”的细节槽位
 - `HAS_IMAGING_FINDING`、`HAS_PATHOGEN` 用于减少前端和 action builder 对关键词猜测的依赖
 
 ## 已移除的旧版本体
+
+以下旧版搜索标签已经合并进线上问诊标签体系，当前抽取端不再生成：
+
+- `DiseasePhase`、`OpportunisticInfection`、`Comorbidity`、`SyndromeOrComplication`、`Tumor` 统一并入 `Disease`
+- `Symptom`、`Sign` 统一并入 `ClinicalFinding`
+- `RiskBehavior` 统一并入 `RiskFactor`
 
 以下标签属于旧版全量指南图谱，当前搜索专用抽取端不再生成：
 
@@ -189,7 +188,7 @@
 ## 主要文件
 
 - [clean_markdown.py](/Users/loki/Workspace/GraduationDesign/knowledge_graph/clean_markdown.py)：清理原始 Markdown，统一标题、空白、单位、符号和复杂表格表达
-- [pipeline.py](/Users/loki/Workspace/GraduationDesign/knowledge_graph/pipeline.py)：当前搜索专用知识图谱抽取器，包含 schema constitution、抽取、校验、LabFinding repair、ImagingFinding / RiskBehavior 支持和 dangling edge 修复
+- [pipeline.py](/Users/loki/Workspace/GraduationDesign/knowledge_graph/pipeline.py)：当前线上问诊搜索专用知识图谱抽取器，包含 schema constitution、抽取、校验、LabFinding repair、ClinicalFinding / RiskFactor / ImagingFinding 支持和 dangling edge 修复
 - [collect_normalization_candidates.py](/Users/loki/Workspace/GraduationDesign/knowledge_graph/collect_normalization_candidates.py)：提取 `label -> name[]` 候选，供人工维护别名
 - [merge_nodes_by_aliases.py](/Users/loki/Workspace/GraduationDesign/knowledge_graph/merge_nodes_by_aliases.py)：按 `aliases/` 规则合并节点并重写边
 - [import_merged_graph.py](/Users/loki/Workspace/GraduationDesign/knowledge_graph/import_merged_graph.py)：将合并后的图谱导入 Neo4j
@@ -342,6 +341,6 @@ export NEO4J_PASSWORD="你的 Neo4j 密码"
 - 优先让图谱服务问诊搜索，而不是追求医学百科式完备。
 - 新增标签和关系前，先确认 `brain/retriever.py`、`brain/action_builder.py` 或安全 gate 是否真的消费它们。
 - 不要把治疗方案、用药推荐、指南证据链重新加回当前 schema。
-- `RiskBehavior`、`ImagingFinding`、`Pathogen`、`ClinicalAttribute` 是当前搜索质量的关键标签，后续应优先保证抽取稳定性。
+- `ClinicalFinding`、`RiskFactor`、`ImagingFinding`、`Pathogen`、`ClinicalAttribute` 是当前搜索质量的关键标签，后续应优先保证抽取稳定性。
 - `LabFinding` 仍然要求尽量结构化记录 `test_id`、`operator`、`value`、`value_text`、`unit` 和必要的 `reference_value_text`。
 - 同义实体合并继续以人工维护 `aliases/` 为准，避免医学高风险实体被过度自动合并。

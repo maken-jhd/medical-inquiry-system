@@ -226,7 +226,7 @@ def test_service_stage_stop_keeps_asking_when_low_cost_question_exists() -> None
         rows=[
             {
                 "node_id": "symptom_dry_cough",
-                "label": "Symptom",
+                "label": "ClinicalFinding",
                 "name": "干咳",
                 "acquisition_mode": "direct_ask",
                 "evidence_cost": "low",

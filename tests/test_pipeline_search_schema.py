@@ -29,8 +29,13 @@ def _chunk() -> Chunk:
 
 # 验证 pipeline 本体已经收缩为问诊搜索树消费的标签，而不是全指南图谱标签。
 def test_pipeline_schema_uses_search_only_labels() -> None:
-    assert "RiskBehavior" in ALLOWED_LABELS
+    assert "ClinicalFinding" in ALLOWED_LABELS
+    assert "RiskFactor" in ALLOWED_LABELS
     assert "ImagingFinding" in ALLOWED_LABELS
+    assert "Symptom" not in ALLOWED_LABELS
+    assert "Sign" not in ALLOWED_LABELS
+    assert "RiskBehavior" not in ALLOWED_LABELS
+    assert "OpportunisticInfection" not in ALLOWED_LABELS
     assert "Recommendation" not in ALLOWED_LABELS
     assert "Medication" not in ALLOWED_LABELS
     assert "GuidelineDocument" not in ALLOWED_LABELS
@@ -60,7 +65,7 @@ def test_pipeline_schema_allows_acquisition_metadata() -> None:
         "nodes": [
             {
                 "id": "symptom_fever",
-                "label": "Symptom",
+                "label": "ClinicalFinding",
                 "name": "发热",
                 "weight": 0.8,
                 "detail_required": "minimal",
@@ -80,7 +85,7 @@ def test_acquisition_metadata_repair_adds_label_defaults() -> None:
         "nodes": [
             {
                 "id": "symptom_cough",
-                "label": "Symptom",
+                "label": "ClinicalFinding",
                 "name": "干咳",
                 "weight": 0.7,
                 "detail_required": "minimal",

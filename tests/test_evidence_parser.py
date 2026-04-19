@@ -28,7 +28,7 @@ def test_a4_negative_reply_is_classified_as_non_exist() -> None:
         action_id="a2",
         action_type="verify_evidence",
         target_node_id="node_y",
-        target_node_label="Symptom",
+        target_node_label="ClinicalFinding",
         target_node_name="发热",
     )
 
@@ -45,7 +45,7 @@ def test_a4_target_aware_parser_extracts_negation_span() -> None:
         action_id="a3",
         action_type="verify_evidence",
         target_node_id="node_fever",
-        target_node_label="Symptom",
+        target_node_label="ClinicalFinding",
         target_node_name="发热",
     )
 
@@ -62,7 +62,7 @@ def test_a4_target_aware_parser_extracts_uncertain_span() -> None:
         action_id="a4",
         action_type="verify_evidence",
         target_node_id="node_fever",
-        target_node_label="Symptom",
+        target_node_label="ClinicalFinding",
         target_node_name="发热",
     )
 

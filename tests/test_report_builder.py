@@ -93,7 +93,7 @@ def test_report_builder_exposes_action_selection_layers_in_search_report() -> No
             action_id="verify::phase::rash",
             action_type="verify_evidence",
             target_node_id="symptom_rash",
-            target_node_label="Symptom",
+            target_node_label="ClinicalFinding",
             target_node_name="皮疹",
         ),
         root_best_action=MctsAction(
@@ -107,7 +107,7 @@ def test_report_builder_exposes_action_selection_layers_in_search_report() -> No
             action_id="verify::phase::rash",
             action_type="verify_evidence",
             target_node_id="symptom_rash",
-            target_node_label="Symptom",
+            target_node_label="ClinicalFinding",
             target_node_name="皮疹",
         ),
         verifier_repair_context={

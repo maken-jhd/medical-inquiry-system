@@ -11,7 +11,7 @@ def test_router_stops_when_positive_evidence_and_margin_is_sufficient() -> None:
         action_id="a1",
         action_type="verify_evidence",
         target_node_id="symptom_fever",
-        target_node_label="Symptom",
+        target_node_label="ClinicalFinding",
         target_node_name="发热",
         hypothesis_id="d1",
     )

@@ -51,7 +51,7 @@ class EvidenceProfileRetriever(DummyRetriever):
             {
                 "node_id": "symptom_fever",
                 "name": "发热",
-                "label": "Symptom",
+                "label": "ClinicalFinding",
                 "relation_type": "MANIFESTS_AS",
                 "question_type_hint": "symptom",
                 "group": "symptom",

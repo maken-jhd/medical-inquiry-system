@@ -20,7 +20,7 @@
 - 不要把真实 API Key、Neo4j 私密密码或本机配置提交进仓库。私密前端配置写入 `configs/frontend.local.yaml`，该文件已被忽略。
 - 不要随意提交或依赖大型本地产物：`HIV/`、`HIV_cleaned/`、`test_outputs/`、`output_graph_test*.jsonl` 都被忽略。
 - `.gitignore` 默认忽略 `*.sh`，只有少数演示/评测脚本被显式放行；新增 shell 脚本如需入库，要同步检查 `.gitignore`。
-- 触碰 `knowledge_graph/` 时，默认遵循搜索专用本体：`Disease`、`Symptom`、`Sign`、`ClinicalAttribute`、`LabTest`、`LabFinding`、`ImagingFinding`、`Pathogen`、`RiskFactor`、`RiskBehavior`、`PopulationGroup` 等，关系重点是 `R1/R2/A3/A4` 会消费的诊断与证据边。
+- 触碰 `knowledge_graph/` 时，默认遵循线上问诊搜索专用本体：候选诊断统一用 `Disease`；证据标签为 `ClinicalFinding`、`ClinicalAttribute`、`LabTest`、`LabFinding`、`ImagingFinding`、`Pathogen`、`RiskFactor`、`PopulationGroup`，关系重点是 `R1/R2/A3/A4` 会消费的诊断与证据边。
 - 当前抽取端为证据节点预留 `acquisition_mode` 和 `evidence_cost`，用于后续区分可直接询问证据和高成本检查证据；除非用户明确要求，本字段预留不应顺手改动 `brain/` 的搜索排序。
 - 不要把旧版全量指南图谱的 `Recommendation`、`Medication`、`TreatmentRegimen`、`GuidelineDocument`、`EvidenceSpan`、`Assertion` 等标签重新加回当前活跃抽取端，除非用户明确要求切回旧方向。
 

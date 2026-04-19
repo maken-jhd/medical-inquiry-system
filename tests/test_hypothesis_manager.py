@@ -67,7 +67,7 @@ def test_hypothesis_manager_attaches_llm_competition_metadata() -> None:
 def test_hypothesis_manager_applies_verifier_reshuffle() -> None:
     manager = HypothesisManager()
     hypotheses = [
-        HypothesisScore(node_id="phase_acute", label="DiseasePhase", name="急性期", score=1.0, metadata={}),
+        HypothesisScore(node_id="phase_acute", label="Disease", name="急性期", score=1.0, metadata={}),
         HypothesisScore(node_id="disease_pcp", label="Disease", name="肺孢子菌肺炎 (PCP)", score=0.82, metadata={}),
     ]
 

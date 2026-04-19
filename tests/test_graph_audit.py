@@ -71,7 +71,7 @@ def test_graph_audit_flags_acquisition_and_cost_mismatch() -> None:
 # 验证同名不同 ID 能进入 shared evidence，避免差异报告把 alias 漏判成独有证据。
 def test_graph_audit_splits_shared_by_normalized_name() -> None:
     target = [
-        _item("t1", "发热", "Symptom", "symptom", "MANIFESTS_AS"),
+        _item("t1", "发热", "ClinicalFinding", "symptom", "MANIFESTS_AS"),
         _item(
             "t2",
             "胸部CT磨玻璃影",
@@ -83,7 +83,7 @@ def test_graph_audit_splits_shared_by_normalized_name() -> None:
         ),
     ]
     competitor = [
-        _item("c1", "发热", "Symptom", "symptom", "MANIFESTS_AS"),
+        _item("c1", "发热", "ClinicalFinding", "symptom", "MANIFESTS_AS"),
         _item(
             "c2",
             "抗酸染色阳性",
@@ -105,9 +105,9 @@ def test_graph_audit_splits_shared_by_normalized_name() -> None:
 # 验证疾病对审计会提示缺少检查池和缺少主诊断独有证据。
 def test_graph_audit_pair_rules_flag_empty_exam_pool_and_target_only() -> None:
     issues = audit_differential_rules(
-        shared=[_item("s1", "发热", "Symptom", "symptom", "MANIFESTS_AS")],
+        shared=[_item("s1", "发热", "ClinicalFinding", "symptom", "MANIFESTS_AS")],
         target_only=[],
-        competitor_only=[_item("c1", "盗汗", "Symptom", "symptom", "MANIFESTS_AS")],
+        competitor_only=[_item("c1", "盗汗", "ClinicalFinding", "symptom", "MANIFESTS_AS")],
         exam_pool=[],
     )
     codes = {item.code for item in issues}
@@ -123,4 +123,3 @@ def test_graph_audit_llm_prompt_contains_report_and_schema() -> None:
     assert "# 测试报告" in prompt
     assert "overall_judgement" in prompt
     assert "suspicious_evidence" in prompt
-

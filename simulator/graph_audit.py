@@ -14,25 +14,16 @@ from brain.retriever import GraphRetriever
 from brain.types import HypothesisScore, SessionState
 
 
-DISEASE_LABELS = (
-    "Disease",
-    "DiseasePhase",
-    "OpportunisticInfection",
-    "Comorbidity",
-    "SyndromeOrComplication",
-    "Tumor",
-)
+DISEASE_LABELS = ("Disease",)
 
 EVIDENCE_LABELS = (
     "Pathogen",
-    "Symptom",
-    "Sign",
+    "ClinicalFinding",
     "ClinicalAttribute",
     "LabTest",
     "LabFinding",
     "ImagingFinding",
     "RiskFactor",
-    "RiskBehavior",
     "PopulationGroup",
 )
 
@@ -459,11 +450,11 @@ def _audit_single_evidence_item(item: dict[str, Any]) -> list[AuditIssue]:
     if label == "Pathogen" and acquisition_mode != "needs_pathogen_test":
         append_issue("warning", "pathogen_acquisition_mismatch", "Pathogen 通常应为 needs_pathogen_test。")
 
-    if label == "Symptom" and evidence_cost == "high":
-        append_issue("warning", "symptom_high_cost_mismatch", "Symptom 不应是 high cost 证据。")
+    if label == "ClinicalFinding" and evidence_cost == "high":
+        append_issue("warning", "clinical_finding_high_cost_mismatch", "ClinicalFinding 不应是 high cost 证据。")
 
-    if label in {"RiskFactor", "RiskBehavior"} and evidence_cost == "high":
-        append_issue("warning", "risk_high_cost_mismatch", "RiskFactor / RiskBehavior 通常应是低成本可问证据。")
+    if label == "RiskFactor" and evidence_cost == "high":
+        append_issue("warning", "risk_high_cost_mismatch", "RiskFactor 通常应是低成本可问证据。")
 
     if label == "ImagingFinding" and evidence_cost != "high":
         append_issue("warning", "imaging_cost_mismatch", "ImagingFinding 通常应是 high cost 证据。")

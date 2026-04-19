@@ -417,7 +417,7 @@ class ActionBuilder:
         label = str(row.get("label") or "")
 
         if len(acquisition_mode) == 0:
-            if label in {"Symptom", "Sign", "RiskFactor", "RiskBehavior", "ClinicalAttribute"}:
+            if label in {"ClinicalFinding", "RiskFactor", "ClinicalAttribute"}:
                 acquisition_mode = "direct_ask"
             elif label == "PopulationGroup":
                 acquisition_mode = "history_known"

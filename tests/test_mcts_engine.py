@@ -22,7 +22,7 @@ def test_mcts_engine_prefers_higher_simulation_reward() -> None:
         action_id="a1",
         action_type="verify_evidence",
         target_node_id="n1",
-        target_node_label="Symptom",
+        target_node_label="ClinicalFinding",
         target_node_name="发热",
         prior_score=1.0,
     )
@@ -141,7 +141,7 @@ def test_mcts_engine_select_root_action_skips_already_asked_targets() -> None:
                 action_id="fresh",
                 action_type="verify_evidence",
                 target_node_id="symptom_lymph",
-                target_node_label="Sign",
+                target_node_label="ClinicalFinding",
                 target_node_name="淋巴结肿大",
                 prior_score=0.6,
             ),

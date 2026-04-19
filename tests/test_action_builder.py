@@ -22,7 +22,7 @@ def test_action_builder_tracks_joint_recommended_evidence_match() -> None:
         [
             {
                 "node_id": "sign_ct",
-                "label": "Sign",
+                "label": "ImagingFinding",
                 "name": "胸部CT磨玻璃影",
                 "relation_type": "DIAGNOSED_BY",
                 "relation_weight": 0.85,
