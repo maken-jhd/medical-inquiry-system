@@ -6,6 +6,12 @@ import json
 from pathlib import Path
 from typing import Any
 
+from brain.action_builder import ActionBuilder
+from brain.types import MctsAction
+
+
+_PATIENT_FRIENDLY_ACTION_BUILDER = ActionBuilder()
+
 
 EXISTENCE_LABELS = {
     "exist": "存在",
@@ -634,7 +640,15 @@ def _build_action_reason(metadata: dict[str, Any], repair_context: dict[str, Any
 def _question_from_action_name(name: str) -> str:
     if not name:
         return ""
-    return f"我想进一步确认：是否存在“{name}”相关情况？"
+    action = MctsAction(
+        action_id=f"frontend::fallback::{name}",
+        action_type="verify_evidence",
+        target_node_id=name,
+        target_node_label="Unknown",
+        target_node_name=name,
+        metadata={"question_type_hint": "unknown"},
+    )
+    return _PATIENT_FRIENDLY_ACTION_BUILDER.render_question_text(action)
 
 
 def _verifier_result_from_metadata(metadata: dict[str, Any]) -> str:

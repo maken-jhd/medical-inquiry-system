@@ -661,14 +661,15 @@ class ConsultationBrain:
         target_name: str,
     ) -> str:
         test_text = "、".join(mentioned_tests[:3]) if len(mentioned_tests) > 0 else "这个检查"
+        target_text = self.deps.action_builder.patient_friendly_target_name(target_name)
 
         if exam_kind == "imaging":
-            return f"你刚才提到做过 {test_text}。报告里有没有提到“{target_name}”，或者类似的明显异常？"
+            return f"你刚才提到做过 {test_text}。报告里有没有提到{target_text}，或者类似的明显异常？"
 
         if exam_kind == "pathogen":
-            return f"你刚才提到做过 {test_text}。结果有没有提示“{target_name}”，比如阳性、检出或阴性？"
+            return f"你刚才提到做过 {test_text}。结果有没有提示{target_text}，比如阳性、检出或阴性？"
 
-        return f"你刚才提到做过 {test_text}。这个结果大概是否提示“{target_name}”，比如偏低、升高、阳性或阴性？"
+        return f"你刚才提到做过 {test_text}。这个结果大概是否提示{target_text}，比如偏低、升高、阳性或阴性？"
 
     # 从候选证据 metadata / 标签中恢复内部检查类别。
     def _candidate_exam_kind(self, candidate: dict) -> str:

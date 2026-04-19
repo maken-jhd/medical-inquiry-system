@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from brain.action_builder import ActionBuilder
+from brain.types import MctsAction
 from frontend.ui_adapter import (
     normalize_backend_turn,
     translate_certainty,
@@ -23,6 +25,7 @@ from frontend.ui_adapter import (
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "test_outputs" / "simulator_replay"
+_PATIENT_FRIENDLY_ACTION_BUILDER = ActionBuilder()
 
 RUN_FILE_KIND_MAP = {
     "focused_metrics.json": "focused metrics",
@@ -567,9 +570,15 @@ def _question_from_action(action: dict[str, Any]) -> str:
     if not name:
         return ""
     question_type = _question_type(action)
-    if question_type == "lab":
-        return f"我想确认一下，之前有没有做过和“{name}”相关的检查，结果是否提示异常？"
-    return f"我想进一步确认：是否存在“{name}”相关情况？"
+    mcts_action = MctsAction(
+        action_id=f"frontend::output::{name}",
+        action_type="verify_evidence",
+        target_node_id=name,
+        target_node_label="Unknown",
+        target_node_name=name,
+        metadata={"question_type_hint": question_type},
+    )
+    return _PATIENT_FRIENDLY_ACTION_BUILDER.render_question_text(mcts_action)
 
 
 def _repair_reason(turn: dict[str, Any]) -> str:

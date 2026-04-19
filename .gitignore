@@ -1,6 +1,7 @@
 # 忽略特定的大型数据文件夹
 /HIV/
 /HIV_cleaned/
+/HIV_cleaned_no_healing/
 
 # 忽略所有 .sh 脚本文件
 *.sh

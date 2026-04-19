@@ -189,22 +189,118 @@ class ActionBuilder:
         if action.action_type == self.config.general_exam_context_action_type:
             return self._render_exam_context_question(action)
 
+        specific_question = self._render_patient_friendly_specific_question(target_name, question_type_hint)
+
+        if specific_question is not None:
+            return specific_question
+
+        target_text = self.patient_friendly_target_name(target_name)
+
         if question_type_hint == "lab":
-            return f"如果你手头记得检查结果，我想确认一下和“{target_name}”相关的结果是否提示异常？"
+            return f"如果你记得化验单或医生说过结果，想确认一下：{target_text}。大概是这样吗？"
 
         if question_type_hint == "imaging":
-            return f"如果最近做过胸部影像或 CT，报告里有没有提到“{target_name}”？"
+            return f"如果最近做过胸片或 CT，报告里有没有提到{target_text}？"
 
         if question_type_hint == "pathogen":
-            return f"如果做过痰检、PCR 或支气管肺泡灌洗等病原学检查，结果里有没有提示“{target_name}”？"
+            return f"如果做过痰检、核酸/PCR 或支气管镜取样，结果有没有提示{target_text}？"
 
         if question_type_hint == "risk":
-            return f"我需要再核实一下，近期是否存在“{target_name}”相关情况？"
+            return f"想了解一下，最近或既往有没有{target_text}？如果不方便细说，可以只回答有、没有或不确定。"
 
         if question_type_hint == "detail":
-            return f"关于“{target_name}”，能再具体描述一下吗？"
+            return f"关于{target_text}，能用自己的话再说说吗？"
 
-        return f"我想再确认一下：近期是否存在“{target_name}”相关表现？"
+        return f"我想再确认一下：有没有{target_text}？"
+
+    # 将图谱里的专业证据名改写成患者更容易听懂的说法；内部节点名不变。
+    def patient_friendly_target_name(self, target_name: str) -> str:
+        raw_name = str(target_name or "").strip()
+        normalized = self._normalize_evidence_text(raw_name)
+
+        if self._is_art_related(normalized):
+            if any(keyword in normalized for keyword in ("依从", "漏服", "停药", "不规律")):
+                return "治疗 HIV/艾滋病的抗病毒药最近有漏服、停药或吃得不规律"
+            return "正在服用治疗 HIV/艾滋病的抗病毒药"
+
+        if "cd4" in normalized or "t淋巴" in normalized:
+            return "CD4 这个反映免疫力的化验指标偏低，医生可能会说低于 200"
+
+        if any(keyword in normalized for keyword in ("hivrna", "病毒载量", "病毒量")):
+            return "HIV 病毒量这个化验结果偏高，或者医生说病毒还能检测到"
+
+        if any(keyword in normalized for keyword in ("βd葡聚糖", "bdg", "葡聚糖", "g试验")):
+            return "G 试验或 β-D 葡聚糖这个真菌相关化验升高或阳性"
+
+        if any(keyword in normalized for keyword in ("磨玻璃", "胸部ct", "ct", "胸片", "影像")):
+            if "磨玻璃" in normalized:
+                return "磨玻璃影，也就是医生可能说肺里有雾状或片状阴影"
+            return raw_name
+
+        if any(keyword in normalized for keyword in ("pcr", "核酸", "肺孢子", "pcp", "支气管肺泡", "肺泡灌洗", "bal", "balf")):
+            if any(keyword in normalized for keyword in ("肺孢子", "pcp")):
+                return "肺孢子菌相关检查阳性，医生可能会说检出了肺孢子菌"
+            return "痰液、核酸/PCR 或支气管镜取样检查提示有病原体"
+
+        if any(keyword in normalized for keyword in ("低氧", "血氧", "氧分压", "pao2", "spo2", "氧合")):
+            return "血氧偏低、氧分压偏低，或者医生说需要吸氧"
+
+        if any(keyword in normalized for keyword in ("高危性行为", "无保护性行为", "多性伴")):
+            return "无保护性行为、多性伴等可能增加感染风险的情况"
+
+        if any(keyword in normalized for keyword in ("hiv感染", "hiv阳性", "艾滋")):
+            return "既往被诊断过 HIV 感染，或医生提到过艾滋病相关情况"
+
+        return raw_name
+
+    # 对常见专业节点直接生成完整问句，避免模板拼接后仍然生硬。
+    def _render_patient_friendly_specific_question(self, target_name: str, question_type_hint: str) -> str | None:
+        normalized = self._normalize_evidence_text(target_name)
+
+        if self._is_art_related(normalized):
+            if any(keyword in normalized for keyword in ("依从", "漏服", "停药", "不规律")):
+                return (
+                    "想了解一下，你治疗 HIV/艾滋病的抗病毒药最近有没有漏服、停药，"
+                    "或者因为不舒服、买不到药等原因吃得不规律？"
+                )
+            return "想了解一下，你现在有没有在规律服用治疗 HIV/艾滋病的抗病毒药？如果有，也可以说说大概吃了多久。"
+
+        if "cd4" in normalized or "t淋巴" in normalized:
+            return (
+                "如果你记得化验单，CD4（反映免疫力的指标）大概是不是偏低？"
+                "比如医生有没有说低于 200，或者提醒你免疫力比较差？"
+            )
+
+        if any(keyword in normalized for keyword in ("hivrna", "病毒载量", "病毒量")):
+            return "如果你记得化验结果，HIV 病毒量有没有偏高，或者医生有没有说病毒还能检测到？"
+
+        if any(keyword in normalized for keyword in ("βd葡聚糖", "bdg", "葡聚糖", "g试验")):
+            return "如果你做过 G 试验或 β-D 葡聚糖这个真菌相关化验，医生有没有说结果升高或阳性？"
+
+        if any(keyword in normalized for keyword in ("磨玻璃", "胸部ct", "ct", "胸片")) and question_type_hint == "imaging":
+            return "如果做过胸片或胸部 CT，报告里有没有写“磨玻璃影”，或者医生有没有说肺里有雾状、片状阴影？"
+
+        if any(keyword in normalized for keyword in ("低氧", "血氧", "氧分压", "pao2", "spo2", "氧合")):
+            return "有没有出现血氧偏低、活动后明显喘，或者医生说需要吸氧的情况？"
+
+        if any(keyword in normalized for keyword in ("pcr", "核酸", "肺孢子", "pcp", "支气管肺泡", "肺泡灌洗", "bal", "balf")) and question_type_hint in {"pathogen", "lab"}:
+            return "如果做过痰液、核酸/PCR 或支气管镜取样检查，医生有没有说检出了肺孢子菌或其他病原体？"
+
+        return None
+
+    # 识别 ART / 抗逆转录病毒治疗相关节点，统一转成人话。
+    def _is_art_related(self, normalized_text: str) -> bool:
+        return any(
+            keyword in normalized_text
+            for keyword in (
+                "art",
+                "抗逆转录病毒",
+                "抗反转录病毒",
+                "抗hiv药",
+                "抗病毒治疗",
+                "抗病毒药物",
+            )
+        )
 
     # 在没有主假设时，将冷启动问题包装成可追踪动作。
     def build_probe_action_from_question_candidate(self, candidate: QuestionCandidate) -> MctsAction:

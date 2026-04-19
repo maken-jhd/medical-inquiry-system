@@ -1,7 +1,7 @@
 """测试 repair-aware A3 动作构造 metadata。"""
 
 from brain.action_builder import ActionBuilder
-from brain.types import ExamContextState, HypothesisScore, SessionState
+from brain.types import ExamContextState, HypothesisScore, MctsAction, SessionState
 
 
 # 验证 A3 动作会显式区分 verifier 推荐证据、原 hypothesis 推荐证据和共同命中信号。
@@ -72,8 +72,51 @@ def test_action_builder_renders_imaging_question() -> None:
 
     question = builder.render_question_text(action)
 
-    assert "胸部影像或 CT" in question
-    assert "双肺弥漫磨玻璃影" in question
+    assert "胸片或胸部 CT" in question
+    assert "磨玻璃影" in question
+    assert "雾状" in question
+
+
+# 验证 ART 这类专业缩写不会原样暴露给患者，而是改成普通人能懂的问法。
+def test_action_builder_renders_art_question_patient_friendly() -> None:
+    builder = ActionBuilder()
+    action = MctsAction(
+        action_id="verify::hiv::art",
+        action_type="verify_evidence",
+        target_node_id="art_use",
+        target_node_label="ClinicalAttribute",
+        target_node_name="ART药物使用",
+        hypothesis_id="hiv",
+        metadata={"question_type_hint": "detail"},
+    )
+
+    question = builder.render_question_text(action)
+
+    assert "ART" not in question
+    assert "抗病毒药" in question
+    assert "治疗 HIV/艾滋病" in question
+    assert "相关表现" not in question
+
+
+# 验证检查类专业指标会带解释，例如 CD4 会说明它反映免疫力。
+def test_action_builder_renders_cd4_question_patient_friendly() -> None:
+    builder = ActionBuilder()
+    action = MctsAction(
+        action_id="verify::pcp::cd4",
+        action_type="verify_evidence",
+        target_node_id="cd4_low",
+        target_node_label="LabFinding",
+        target_node_name="CD4+ T淋巴细胞计数 < 200/μL",
+        hypothesis_id="pcp",
+        metadata={"question_type_hint": "lab"},
+    )
+
+    question = builder.render_question_text(action)
+
+    assert "CD4" in question
+    assert "免疫力" in question
+    assert "低于 200" in question
+    assert "T淋巴细胞计数" not in question
 
 
 # 验证高成本检查证据在检查上下文未知时，会先生成自然的检查上下文采集动作。
