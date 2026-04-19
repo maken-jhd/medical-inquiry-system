@@ -50,7 +50,9 @@ GraduationDesign/
 │   └── README.md
 ├── knowledge_graph_bak/          # 已废弃的旧版全量指南图谱备份
 ├── brain/                        # 第二阶段问诊大脑脚手架
-├── simulator/                    # 虚拟病人与离线评测脚手架
+├── simulator/                    # 虚拟病人、离线评测与图谱审计脚手架
+│   ├── graph_audit.py            # 疾病级局部子图与疾病对差异证据审计
+│   └── ...
 ├── frontend/                     # Streamlit 中期检查演示界面
 │   ├── app.py                    # 前端入口
 │   ├── ui_adapter.py             # 后端结果到 UI 展示字段的轻量适配层
@@ -62,7 +64,10 @@ GraduationDesign/
 ├── configs/                      # 第二阶段配置
 ├── .streamlit/                   # Streamlit 本地运行配置
 ├── docs/                         # 设计与执行清单
-├── scripts/                      # 第二阶段演示与工具脚本
+├── scripts/                      # 第二阶段演示、图谱审计与工具脚本
+│   ├── audit_disease_ego_graphs.py
+│   ├── audit_differential_pairs.py
+│   └── ...
 ├── tests/                        # 第二阶段单元测试脚手架
 ├── test/                         # 小范围试跑输入
 ├── test_outputs/                 # 中间产物与实验输出
@@ -154,6 +159,70 @@ SKIP_EXTRACTION=true \
 Neo4j 初始化脚本位于：
 
 - [neo4j_init.cypher](/Users/loki/Workspace/GraduationDesign/knowledge_graph/scripts/neo4j_init.cypher)
+
+## 疾病级知识图谱审计
+
+在基于图谱自动生成结构化病例骨架之前，建议先做疾病级图谱审计。审计工具会按疾病导出 1-hop 邻接证据，并对疾病对生成 `shared / target_only / competitor_only / exam_pool` 差异证据报告。它的目标是先发现图谱里的缺边、错边、证据失衡和难以区分的疾病对，避免后续虚拟病例生成把图谱问题放大。
+
+核心实现：
+
+- [simulator/graph_audit.py](/Users/loki/Workspace/GraduationDesign/simulator/graph_audit.py)：复用 `GraphRetriever.retrieve_candidate_evidence_profile()`，执行局部证据导出、程序化规则审计、差异证据拆分、Markdown/JSON/LLM prompt 渲染
+- [scripts/audit_disease_ego_graphs.py](/Users/loki/Workspace/GraduationDesign/scripts/audit_disease_ego_graphs.py)：单疾病或批量疾病局部子图审计入口
+- [scripts/audit_differential_pairs.py](/Users/loki/Workspace/GraduationDesign/scripts/audit_differential_pairs.py)：主诊断 vs 竞争病差异证据审计入口
+
+单疾病审计示例：
+
+```bash
+NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_disease_ego_graphs.py \
+  --disease-name 肺孢子菌肺炎 \
+  --top-k 80
+```
+
+如果同名疾病节点不止一个，优先使用 node id 精确审计：
+
+```bash
+NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_disease_ego_graphs.py \
+  --disease-id merged_node_3597acb1ddfc \
+  --top-k 80
+```
+
+批量审计所有候选疾病标签：
+
+```bash
+NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_disease_ego_graphs.py \
+  --all \
+  --limit 200 \
+  --top-k 80
+```
+
+疾病对差异审计示例：
+
+```bash
+NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_differential_pairs.py \
+  --target-name 肺孢子菌肺炎 \
+  --competitor-name 结核病 \
+  --top-k 80
+```
+
+默认输出目录：
+
+- 单疾病审计：`test_outputs/graph_audit/disease_ego/`
+- 疾病对审计：`test_outputs/graph_audit/differential_pairs/`
+
+每次审计会同时输出：
+
+- JSON：供后续自动病例骨架生成继续消费
+- Markdown：供人工审阅或论文分析
+- `.llm_prompt.md`：已嵌入审计报告的 LLM 语义复核 prompt
+
+程序化规则审计当前覆盖：
+
+- 标签 / 分组异常：证据 label 不在搜索主流程集合内、group 为空或非法
+- `acquisition_mode / evidence_cost` 异常：例如 `LabFinding=direct_ask`、`Symptom=high`、`ImagingFinding` 未标记为 `needs_imaging/high`
+- 关系异常：关系类型不在核心关系集合内、泛化关系占比过高
+- 重复或疑似重复节点：同名节点、高相似名称节点
+- 证据结构失衡：缺少 symptom、risk、exam，或 detail 占比过高
+- 疾病对质量：缺少 target_only / competitor_only、shared 占比过高、exam_pool 为空、主诊断独有证据弱
 
 更详细的说明见：
 
@@ -359,6 +428,21 @@ conda run -n GraduationDesign python -m pytest -q
 
 ```bash
 NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/run_retriever_smoke.py --features 发热,干咳
+```
+
+真实 Neo4j 疾病级图谱审计 smoke：
+
+```bash
+NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_disease_ego_graphs.py \
+  --disease-name 肺孢子菌肺炎 \
+  --top-k 40 \
+  --output-root test_outputs/graph_audit/smoke_disease
+
+NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_differential_pairs.py \
+  --target-name 肺孢子菌肺炎 \
+  --competitor-name 结核病 \
+  --top-k 40 \
+  --output-root test_outputs/graph_audit/smoke_pair
 ```
 
 真实端到端 smoke：

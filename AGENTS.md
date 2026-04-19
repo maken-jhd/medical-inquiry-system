@@ -74,6 +74,20 @@ SEARCH_KG_OUTPUT_ROOT=对应输出目录 SKIP_EXTRACTION=true ./knowledge_graph/
 
 这会跳过 LLM 抽取，复用该目录的 `output_graph.jsonl` 并优先读取该目录的 `aliases/`。
 
+在自动生成病例骨架前，优先做疾病级图谱审计。单疾病局部子图审计：
+
+```bash
+NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_disease_ego_graphs.py --disease-name 肺孢子菌肺炎 --top-k 80
+```
+
+疾病对差异证据审计：
+
+```bash
+NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_differential_pairs.py --target-name 肺孢子菌肺炎 --competitor-name 结核病 --top-k 80
+```
+
+说明：审计逻辑位于 `simulator/graph_audit.py`，默认输出 JSON、Markdown 和 `.llm_prompt.md` 到 `test_outputs/graph_audit/`。如果同名疾病匹配到多个节点，优先改用 `--disease-id` / `--target-id` / `--competitor-id` 精确定位；不要把全图直接发给 LLM，先看程序化规则审计和局部 Markdown。
+
 清空 Neo4j 旧图谱、导入当前搜索图谱并生成校验报告：
 
 ```bash
