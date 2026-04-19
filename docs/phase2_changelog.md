@@ -410,7 +410,7 @@
 - `retriever.py`
   - 增加 `r1_min_semantic_score`
   - 将 `matched_feature_count / feature_coverage / relation_types / label_prior / relation_specificity` 纳入评分
-  - 对 `DiseasePhase / SyndromeOrComplication / Comorbidity` 的单弱证据候选增加额外惩罚
+  - 对旧版多候选标签下的单弱证据泛化候选增加额外惩罚；当前新图谱 schema 已统一收敛为 `Disease`
   - 将 `entity_link_similarity` 和方向置信度真正并入最终语义分数
 
 解决的问题：

@@ -128,7 +128,7 @@ REPAIR_SYSTEM_PROMPT = f"""
 你正在为 HIV/AIDS 智能问诊系统修补“搜索专用知识图谱”的缺失关系。
 
 这不是全量指南图谱，也不是治疗推荐图谱。你只能服务下面的问诊搜索链路：
-- R1：症状 / 风险 / 检查 / 影像 / 病原线索 -> 候选诊断
+- R1：临床表现 / 风险背景 / 检查 / 影像 / 病原线索 -> 候选诊断
 - R2：候选诊断 -> 关键待验证证据
 - A3：根据待验证证据构造下一问
 - A4：根据患者回答更新证据和假设
@@ -149,15 +149,17 @@ REPAIR_SYSTEM_PROMPT = f"""
 {", ".join(ALLOWED_EDGE_TYPES)}
 
 关系方向必须符合：
-- `MANIFESTS_AS`：疾病/阶段/机会性感染/共病/并发症/肿瘤 -> 症状或体征
-- `HAS_LAB_FINDING`：疾病/阶段/机会性感染/共病/并发症/肿瘤 -> 实验室发现
-- `HAS_IMAGING_FINDING`：疾病/阶段/机会性感染/共病/并发症/肿瘤 -> 影像学发现
-- `HAS_PATHOGEN`：疾病或机会性感染 -> 病原体或病原学线索
-- `DIAGNOSED_BY`：疾病/阶段/机会性感染/共病/并发症/肿瘤 -> 关键检查、实验室发现或影像学发现
-- `REQUIRES_DETAIL`：疾病/症状/体征/检查 -> 可进一步追问的临床细节
-- `RISK_FACTOR_FOR`：风险因素/风险行为/人群特征 -> 疾病/阶段/机会性感染/共病/并发症/肿瘤
-- `COMPLICATED_BY`：疾病/阶段 -> 机会性感染/共病/综合征/肿瘤
-- `APPLIES_TO`：疾病或证据 -> 人群特征
+- `MANIFESTS_AS`：Disease -> ClinicalFinding
+- `HAS_LAB_FINDING`：Disease -> LabFinding
+- `HAS_IMAGING_FINDING`：Disease -> ImagingFinding
+- `HAS_PATHOGEN`：Disease -> Pathogen
+- `DIAGNOSED_BY`：Disease -> LabTest、LabFinding 或 ImagingFinding
+- `REQUIRES_DETAIL`：Disease、ClinicalFinding 或 LabTest -> ClinicalAttribute
+- `RISK_FACTOR_FOR`：RiskFactor 或 PopulationGroup -> Disease
+- `COMPLICATED_BY`：Disease -> Disease
+- `APPLIES_TO`：Disease 或证据节点 -> PopulationGroup
+
+候选诊断只使用 Disease。临床表现只使用 ClinicalFinding。风险因素和风险行为都使用 RiskFactor。
 
 不要使用旧版全量图谱关系，例如 RECOMMENDS、TREATED_WITH、SUPPORTED_BY、HAS_EVIDENCE、SUBJECT、OBJECT。
 """.strip()
@@ -709,7 +711,7 @@ def build_messages(
             "请只修补当前 chunk 内 suspicious_nodes 的缺失关系，不要重新抽取整张图。",
             "你只能使用 existing_nodes 中已经存在的节点 id。",
             f"最多补 {config.max_add_edges} 条最关键的新边；如果拿不准，宁可少补。",
-            "优先把孤立的症状、风险、检查、影像、病原线索连接到合适的候选诊断，或把孤立诊断连接到关键证据。",
+            "优先把孤立的临床表现、风险背景、检查、影像、病原线索连接到合适的候选诊断，或把孤立诊断连接到关键证据。",
             "notes 最多写 3 条极短说明；如果没有补充说明，返回空数组。",
             "drop_node_ids 默认返回空数组。",
             *build_retry_feedback_block(retry_feedback),

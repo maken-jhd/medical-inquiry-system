@@ -142,11 +142,11 @@
 
 ## 已移除的旧版本体
 
-以下旧版搜索标签已经合并进线上问诊标签体系，当前抽取端不再生成：
+旧版搜索标签已经合并进线上问诊标签体系，当前抽取端不再生成独立的疾病子类、症状/体征拆分标签或风险行为标签：
 
-- `DiseasePhase`、`OpportunisticInfection`、`Comorbidity`、`SyndromeOrComplication`、`Tumor` 统一并入 `Disease`
-- `Symptom`、`Sign` 统一并入 `ClinicalFinding`
-- `RiskBehavior` 统一并入 `RiskFactor`
+- 候选诊断统一并入 `Disease`
+- 患者可描述或线上可获得的临床表现统一并入 `ClinicalFinding`
+- 风险因素与风险行为统一并入 `RiskFactor`
 
 以下标签属于旧版全量指南图谱，当前搜索专用抽取端不再生成：
 
