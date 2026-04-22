@@ -36,8 +36,8 @@ def _item(
     }
 
 
-# 验证 LabFinding / ImagingFinding 的 acquisition/cost 异常会被程序规则抓出。
-def test_graph_audit_flags_acquisition_and_cost_mismatch() -> None:
+# 验证单疾病审计规则只标记证据数量过少，不再输出复杂结构疑点。
+def test_graph_audit_only_flags_low_evidence_count() -> None:
     disease = DiseaseNode("d1", "肺孢子菌肺炎", "Disease")
     evidence = [
         _item(
@@ -63,9 +63,41 @@ def test_graph_audit_flags_acquisition_and_cost_mismatch() -> None:
     issues = audit_evidence_rules(disease, evidence, build_group_summary(evidence))
     codes = {item.code for item in issues}
 
-    assert "lab_direct_ask_mismatch" in codes
-    assert "imaging_acquisition_mismatch" in codes
-    assert "imaging_cost_mismatch" in codes
+    assert codes == {"too_few_evidence"}
+
+
+# 验证证据数量超过阈值后，即使元数据不完美，也不会被单疾病规则拉出来。
+def test_graph_audit_ignores_metadata_mismatch_when_evidence_count_is_enough() -> None:
+    disease = DiseaseNode("d1", "肺孢子菌肺炎", "Disease")
+    evidence = [
+        _item(
+            "lab1",
+            "CD4 低",
+            "LabFinding",
+            "lab",
+            "HAS_LAB_FINDING",
+            acquisition_mode="direct_ask",
+            evidence_cost="low",
+        ),
+        _item(
+            "img1",
+            "磨玻璃影",
+            "ImagingFinding",
+            "imaging",
+            "HAS_IMAGING_FINDING",
+            acquisition_mode="needs_lab_test",
+            evidence_cost="low",
+        ),
+        _item("symptom1", "发热", "ClinicalFinding", "symptom", "MANIFESTS_AS"),
+        _item("risk1", "HIV感染者", "PopulationGroup", "risk", "APPLIES_TO"),
+        _item("risk2", "CD4低", "LabFinding", "lab", "HAS_LAB_FINDING"),
+        _item("risk3", "气促", "ClinicalFinding", "symptom", "MANIFESTS_AS"),
+        _item("risk4", "耶氏肺孢子菌", "Pathogen", "pathogen", "HAS_PATHOGEN"),
+    ]
+
+    issues = audit_evidence_rules(disease, evidence, build_group_summary(evidence))
+
+    assert issues == []
 
 
 # 验证同名不同 ID 能进入 shared evidence，避免差异报告把 alias 漏判成独有证据。

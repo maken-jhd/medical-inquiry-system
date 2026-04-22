@@ -175,6 +175,18 @@ class ProfileFakeNeo4jClient(FakeNeo4jClient):
                     "priority": 1.7,
                     "question_type_hint": "imaging",
                 },
+                {
+                    "node_id": "ct_exam",
+                    "label": "LabTest",
+                    "name": "胸部CT",
+                    "relation_type": "DIAGNOSED_BY",
+                    "relation_weight": 0.9,
+                    "node_weight": 0.8,
+                    "priority": 1.6,
+                    "question_type_hint": "lab",
+                    "acquisition_mode": "needs_imaging",
+                    "evidence_cost": "high",
+                },
             ]
 
         return super().run_query(query, params)
@@ -205,3 +217,5 @@ def test_retriever_builds_candidate_evidence_profile_with_statuses() -> None:
     assert by_id["lab_cd4_low"]["status"] == "negative"
     assert by_id["ct_ground_glass"]["status"] == "unknown"
     assert by_id["ct_ground_glass"]["group"] == "imaging"
+    assert by_id["ct_exam"]["group"] == "imaging"
+    assert by_id["ct_exam"]["question_type_hint"] == "imaging"

@@ -152,9 +152,36 @@ SKIP_EXTRACTION=true \
 
 该脚本默认读取最近一次 `test_outputs/search_kg/search_kg_<timestamp>/output_graph.jsonl`，只允许补充当前搜索本体中的诊断-证据关系，并会继续生成修补后的候选名称和 alias 合并图谱。修补结果默认写入当前搜索图谱目录下的 `relation_repair/`。
 
-最常用的最终入库源通常是：
+当前最新的已清理图谱版本是 `search_kg_20260419_125328` 的 `evidence_count <= 3` 剪枝、节点重分类、`aliases_le3/` 二次合并和 `disease_aliases.json` 单文件疾病节点修订版。该版本已删除旧审计中邻接证据数量小于等于 3 的疾病节点，按人工重分类清单修正节点标签，在全量 `aliases_le3/` 合并基础上仅按 `disease_aliases.json` 对 `Disease` 节点做删除、重命名和同名合并，并同步清理由此产生的非疾病孤立节点。
 
-- [merged_graph_by_aliases.json](/Users/loki/Workspace/GraduationDesign/test_outputs/alias_merge/merged_graph_by_aliases.json)
+当前推荐的最终入库源是：
+
+- [merged_graph_by_aliases_pruned_le3_reclassified_aliases_le3_disease_aliases_only_no_isolates.json](/Users/loki/Workspace/GraduationDesign/test_outputs/search_kg/search_kg_20260419_125328/relation_repair/alias_merge/merged_graph_by_aliases_pruned_le3_reclassified_aliases_le3_disease_aliases_only_no_isolates.json)
+
+对应处理报告：
+
+- [pruned_le3_no_isolates_report.json](/Users/loki/Workspace/GraduationDesign/test_outputs/search_kg/search_kg_20260419_125328/relation_repair/alias_merge/pruned_le3_no_isolates_report.json)
+- [merged_graph_by_aliases_pruned_le3_no_isolates_reclassified_report.json](/Users/loki/Workspace/GraduationDesign/test_outputs/search_kg/search_kg_20260419_125328/relation_repair/alias_merge/merged_graph_by_aliases_pruned_le3_no_isolates_reclassified_report.json)
+- [merged_graph_by_aliases_pruned_le3_reclassified_aliases_le3_no_isolates_report.json](/Users/loki/Workspace/GraduationDesign/test_outputs/search_kg/search_kg_20260419_125328/relation_repair/alias_merge/merged_graph_by_aliases_pruned_le3_reclassified_aliases_le3_no_isolates_report.json)
+- [merged_graph_by_aliases_pruned_le3_reclassified_aliases_le3_disease_aliases_only_no_isolates_report.json](/Users/loki/Workspace/GraduationDesign/test_outputs/search_kg/search_kg_20260419_125328/relation_repair/alias_merge/merged_graph_by_aliases_pruned_le3_reclassified_aliases_le3_disease_aliases_only_no_isolates_report.json)
+
+对应 Neo4j 校验报告：
+
+- [neo4j_validation_report_pruned_le3_reclassified_aliases_le3_disease_aliases_only_no_isolates.json](/Users/loki/Workspace/GraduationDesign/test_outputs/search_kg/search_kg_20260419_125328/relation_repair/neo4j_validation_report_pruned_le3_reclassified_aliases_le3_disease_aliases_only_no_isolates.json)
+
+该版本导入 Neo4j 后的预期计数为：
+
+- `Disease = 80`
+- `nodes = 1012`
+- `relationships = 1725`
+- `isolated_nodes = 0`
+
+对应 Neo4j Desktop dump 尚未重新导出；下面这些是上一版 `pruned_le3_verified` 的历史 dump，不对应当前 `disease_aliases.json` 最新入库版：
+
+- 推荐导入文件：[neo4j.dump](/Users/loki/Workspace/GraduationDesign/test_outputs/neo4j_dumps/search_kg_20260419_125328_pruned_le3_verified/neo4j.dump)
+- 命名副本：[search_kg_20260419_125328_pruned_le3_verified.dump](/Users/loki/Workspace/GraduationDesign/test_outputs/neo4j_dumps/search_kg_20260419_125328_pruned_le3_verified/search_kg_20260419_125328_pruned_le3_verified.dump)
+- dump manifest：[manifest.json](/Users/loki/Workspace/GraduationDesign/test_outputs/neo4j_dumps/search_kg_20260419_125328_pruned_le3_verified/manifest.json)
+- 导入说明：[README_IMPORT.md](/Users/loki/Workspace/GraduationDesign/test_outputs/neo4j_dumps/search_kg_20260419_125328_pruned_le3_verified/README_IMPORT.md)
 
 Neo4j 初始化脚本位于：
 

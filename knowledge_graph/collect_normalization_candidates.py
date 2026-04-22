@@ -52,12 +52,46 @@ def clean_text(value: Any) -> Optional[str]:
     return cleaned
 
 
-def main() -> None:
-    config = read_env_config()
+def add_node_name(names_by_label: Dict[str, Counter[str]], node: Dict[str, Any], *, prefer_canonical: bool) -> bool:
+    label = clean_text(node.get("label"))
+    name = clean_text(node.get("canonical_name") if prefer_canonical else node.get("name"))
 
-    if not config.input_file.exists():
-        raise RuntimeError(f"Input file does not exist: {config.input_file}")
+    if name is None:
+        name = clean_text(node.get("name"))
 
+    if label is None or name is None:
+        return False
+
+    names_by_label[label][name] += 1
+    return True
+
+
+def collect_from_merged_graph(config: CandidateConfig) -> tuple[Dict[str, Counter[str]], int, int, int, str] | None:
+    if config.input_file.suffix.lower() != ".json":
+        return None
+
+    try:
+        payload = json.loads(config.input_file.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+
+    if not isinstance(payload, dict) or not isinstance(payload.get("nodes"), list):
+        return None
+
+    names_by_label: Dict[str, Counter[str]] = defaultdict(Counter)
+    node_count = 0
+
+    for node in payload["nodes"]:
+        if not isinstance(node, dict):
+            continue
+
+        if add_node_name(names_by_label, node, prefer_canonical=True):
+            node_count += 1
+
+    return names_by_label, 1, 0, node_count, "merged_graph_json"
+
+
+def collect_from_jsonl(config: CandidateConfig) -> tuple[Dict[str, Counter[str]], int, int, int, str]:
     names_by_label: Dict[str, Counter[str]] = defaultdict(Counter)
     record_count = 0
     chunk_count = 0
@@ -96,14 +130,24 @@ def main() -> None:
                 if not isinstance(node, dict):
                     continue
 
-                label = clean_text(node.get("label"))
-                name = clean_text(node.get("name"))
+                if add_node_name(names_by_label, node, prefer_canonical=False):
+                    node_count += 1
 
-                if label is None or name is None:
-                    continue
+    return names_by_label, record_count, chunk_count, node_count, "chunk_result_jsonl"
 
-                names_by_label[label][name] += 1
-                node_count += 1
+
+def main() -> None:
+    config = read_env_config()
+
+    if not config.input_file.exists():
+        raise RuntimeError(f"Input file does not exist: {config.input_file}")
+
+    collected = collect_from_merged_graph(config)
+
+    if collected is None:
+        collected = collect_from_jsonl(config)
+
+    names_by_label, record_count, chunk_count, node_count, input_format = collected
 
     output_payload = {
         label: [
@@ -124,6 +168,7 @@ def main() -> None:
 
     unique_name_count = sum(len(counter) for counter in names_by_label.values())
     print(f"[candidates] input={config.input_file}")
+    print(f"[candidates] input_format={input_format}")
     print(f"[candidates] output={config.output_file}")
     print(
         "[candidates] "

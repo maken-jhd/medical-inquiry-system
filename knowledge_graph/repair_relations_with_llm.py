@@ -140,7 +140,8 @@ REPAIR_SYSTEM_PROMPT = f"""
 4. 不要重复 existing_edges 中已有关系。
 5. drop_node_ids 默认返回空数组；除非可疑节点明显是抽取误差且当前文本没有依据，否则不要建议删除。
 6. 宁可少补，也不要为了降低孤立率而臆造关系。
-7. 不要输出任何解释性文字，只返回严格 JSON。
+7. 只修补“诊断候选生成”和“下一问证据验证”会消费的关系；不要为了让图更密而补治疗、预防、随访监测或用药安全相关关系。
+8. 不要输出任何解释性文字，只返回严格 JSON。
 
 只能使用这些节点标签：
 {", ".join(ALLOWED_LABELS)}
@@ -160,6 +161,13 @@ REPAIR_SYSTEM_PROMPT = f"""
 - `APPLIES_TO`：Disease 或证据节点 -> PopulationGroup
 
 候选诊断只使用 Disease。临床表现只使用 ClinicalFinding。风险因素和风险行为都使用 RiskFactor。
+
+重要排除规则：
+- 如果孤立节点只是常规随访、治疗前/治疗中安全监测、药物不良反应监测、PrEP/PEP 用药前筛查或一般健康管理项目，不要强行连接到 Disease。
+- LabTest / LabFinding 只有在文本明确把它作为诊断依据、疾病特征、关键待验证证据或鉴别诊断证据时，才补 `DIAGNOSED_BY` 或 `HAS_LAB_FINDING`。
+- ImagingFinding 只有在文本明确把它作为疾病影像表现或诊断线索时，才补 `HAS_IMAGING_FINDING` 或 `DIAGNOSED_BY`。
+- RiskFactor / PopulationGroup 只有在文本明确说明其增加某个候选诊断风险或适用某个候选诊断场景时，才补 `RISK_FACTOR_FOR` 或 `APPLIES_TO`。
+- 如果可疑节点虽然孤立，但不服务线上问诊搜索树，优先返回空 `add_edges`，可在 notes 中简短说明。
 
 不要使用旧版全量图谱关系，例如 RECOMMENDS、TREATED_WITH、SUPPORTED_BY、HAS_EVIDENCE、SUBJECT、OBJECT。
 """.strip()
@@ -712,6 +720,7 @@ def build_messages(
             "你只能使用 existing_nodes 中已经存在的节点 id。",
             f"最多补 {config.max_add_edges} 条最关键的新边；如果拿不准，宁可少补。",
             "优先把孤立的临床表现、风险背景、检查、影像、病原线索连接到合适的候选诊断，或把孤立诊断连接到关键证据。",
+            "如果孤立检查只是治疗监测、用药安全、PrEP/PEP 筛查或一般随访项目，不要为了消除孤立而强行补边。",
             "notes 最多写 3 条极短说明；如果没有补充说明，返回空数组。",
             "drop_node_ids 默认返回空数组。",
             *build_retry_feedback_block(retry_feedback),

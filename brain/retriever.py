@@ -439,7 +439,7 @@ class GraphRetriever:
             enriched.append(
                 {
                     **row,
-                    "question_type_hint": row.get("question_type_hint") or group_key,
+                    "question_type_hint": group_key,
                     "group": group_key,
                     **status_payload,
                 }
@@ -655,6 +655,13 @@ class GraphRetriever:
         question_type = str(row.get("question_type_hint") or "").strip()
         label = str(row.get("label") or "").strip()
         relation_type = str(row.get("relation_type") or "").strip()
+        acquisition_mode = str(row.get("acquisition_mode") or "").strip()
+
+        if label in {"LabFinding", "LabTest"} and acquisition_mode == "needs_imaging":
+            return "imaging"
+
+        if label in {"LabFinding", "LabTest"} and acquisition_mode == "needs_pathogen_test":
+            return "pathogen"
 
         if question_type in {"symptom", "risk", "lab", "imaging", "pathogen", "detail"}:
             return question_type
