@@ -1140,16 +1140,18 @@ def main() -> int:
     config_overrides = _build_config_overrides(args)
     ablation_flags = _build_ablation_flags(args)
     brain = build_default_brain_from_env(config_overrides=config_overrides)
-    patient_agent = VirtualPatientAgent()
+    patient_agent = VirtualPatientAgent(use_llm=True)
     focused_rows: list[dict] = []
 
     for case in cases:
         session_id = f"focused::{case.case_id}"
         brain.start_session(session_id)
-        current_output = brain.process_turn(session_id, case.chief_complaint)
+        opening = patient_agent.open_case(case)
+        current_output = brain.process_turn(session_id, opening.opening_text)
         turn_summaries: list[dict] = []
         previous_question_node_id: str | None = None
         initial_summary = _extract_turn_summary(current_output)
+        initial_summary["opening_text"] = opening.opening_text
         turn_summaries.append(initial_summary)
         previous_question_node_id = (initial_summary.get("pending_action") or {}).get("target_node_id")
 

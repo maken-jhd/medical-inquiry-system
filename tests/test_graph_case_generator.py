@@ -351,3 +351,4 @@ def test_generator_uses_real_target_node_id_for_slot_truth_map() -> None:
         "merged_node_slot004",
     }
     assert {truth.node_id for truth in low_cost_case.slot_truth_map.values()} == set(low_cost_case.slot_truth_map.keys())
+    assert any(not truth.reveal_only_if_asked for truth in low_cost_case.slot_truth_map.values())

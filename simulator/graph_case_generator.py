@@ -418,6 +418,7 @@ class GraphCaseGenerator:
             profile=profile,
             case_type="ordinary",
             chief_complaint=chief_text,
+            opening_items=chief_items,
             positive_items=positive_items,
             negative_items=[],
             metadata_extra={},
@@ -446,6 +447,7 @@ class GraphCaseGenerator:
             profile=profile,
             case_type="low_cost",
             chief_complaint=chief_text,
+            opening_items=positive_items[:3],
             positive_items=positive_items,
             negative_items=[],
             metadata_extra={},
@@ -489,6 +491,7 @@ class GraphCaseGenerator:
             profile=profile,
             case_type="exam_driven",
             chief_complaint=chief_text,
+            opening_items=_limit_unique_items([*supplement, *exam_selected], limit=3),
             positive_items=positive_items,
             negative_items=[],
             metadata_extra={},
@@ -552,6 +555,7 @@ class GraphCaseGenerator:
                     profile=profile,
                     case_type="competitive",
                     chief_complaint=chief_text,
+                    opening_items=shared_items,
                     positive_items=_limit_unique_items([*shared_items, *target_only_items], limit=POSITIVE_SLOT_LIMIT),
                     negative_items=negative_items,
                     metadata_extra=metadata_extra,
@@ -686,6 +690,7 @@ class GraphCaseGenerator:
         profile: DiseaseProfile,
         case_type: str,
         chief_complaint: str,
+        opening_items: Sequence[dict[str, Any]],
         positive_items: Sequence[dict[str, Any]],
         negative_items: Sequence[dict[str, Any]],
         metadata_extra: dict[str, Any],
@@ -695,11 +700,20 @@ class GraphCaseGenerator:
         """将选中的证据列表渲染成 VirtualPatientCase。"""
 
         slot_truth_map: dict[str, SlotTruth] = {}
+        opening_node_ids = [
+            str(item.get("target_node_id") or "")
+            for item in opening_items
+            if str(item.get("target_node_id") or "")
+        ]
+        opening_node_id_set = set(opening_node_ids)
         for item in positive_items:
             node_id = str(item.get("target_node_id") or "")
             if len(node_id) == 0:
                 continue
-            slot_truth_map[node_id] = _build_slot_truth(item, True)
+            truth = _build_slot_truth(item, True)
+            if node_id in opening_node_id_set:
+                truth.reveal_only_if_asked = False
+            slot_truth_map[node_id] = truth
 
         for item in negative_items:
             node_id = str(item.get("target_node_id") or "")
@@ -718,6 +732,8 @@ class GraphCaseGenerator:
             "case_type": case_type,
             "disease_id": profile.record.disease_id,
             "disease_name": profile.record.disease_name,
+            "opening_slot_ids": opening_node_ids,
+            "opening_slot_names": [str(item.get("target_name") or "") for item in opening_items],
             "selected_positive_slots": [str(item.get("target_name") or "") for item in positive_items],
             "selected_negative_slots": [str(item.get("target_name") or "") for item in negative_items],
             "evidence_counts_by_group": profile.evidence_counts_by_group,
@@ -803,6 +819,8 @@ def _build_slot_truth(item: dict[str, Any], value: bool) -> SlotTruth:
     return SlotTruth(
         node_id=node_id,
         value=value,
+        group=str(item.get("group") or ""),
+        node_label=str(item.get("target_label") or ""),
         mention_style="direct",
         reveal_only_if_asked=True,
         aliases=[target_name],

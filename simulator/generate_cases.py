@@ -314,23 +314,38 @@ def write_cases_json(cases: Iterable[VirtualPatientCase], output_file: Path) -> 
     output_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-# 从 JSONL 文件中读取病例列表，便于后续批量回放。
+# 从 JSONL 或 JSON 数组文件中读取病例列表，便于后续批量回放。
 def load_cases_jsonl(input_file: Path) -> List[VirtualPatientCase]:
+    raw_text = input_file.read_text(encoding="utf-8")
+    stripped = raw_text.lstrip()
+
+    if stripped.startswith("["):
+        payload = json.loads(raw_text)
+        if not isinstance(payload, list):
+            raise ValueError(f"病例 JSON 文件不是数组：{input_file}")
+        return [_deserialize_case(data) for data in payload if isinstance(data, dict)]
+
     cases: List[VirtualPatientCase] = []
 
-    with input_file.open("r", encoding="utf-8") as handle:
-        for raw_line in handle:
-            line = raw_line.strip()
+    for raw_line in raw_text.splitlines():
+        line = raw_line.strip()
 
-            if len(line) == 0:
-                continue
+        if len(line) == 0:
+            continue
 
-            data = json.loads(line)
-            slot_truth_map = {
-                key: SlotTruth(**value)
-                for key, value in data.get("slot_truth_map", {}).items()
-            }
-            data["slot_truth_map"] = slot_truth_map
-            cases.append(VirtualPatientCase(**data))
+        data = json.loads(line)
+        if not isinstance(data, dict):
+            continue
+        cases.append(_deserialize_case(data))
 
     return cases
+
+
+def _deserialize_case(data: dict) -> VirtualPatientCase:
+    slot_truth_map = {
+        key: SlotTruth(**value)
+        for key, value in data.get("slot_truth_map", {}).items()
+    }
+    data = dict(data)
+    data["slot_truth_map"] = slot_truth_map
+    return VirtualPatientCase(**data)

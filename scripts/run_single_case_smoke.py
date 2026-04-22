@@ -110,17 +110,19 @@ def main() -> int:
     args = parse_args()
     case = _pick_case(Path(args.cases_file), args.case_id)
     brain = build_default_brain_from_env()
-    patient = VirtualPatientAgent()
+    patient = VirtualPatientAgent(use_llm=True)
     session_id = f"single-smoke::{case.case_id}"
     brain.start_session(session_id)
     output_path = Path(args.output_file) if len(args.output_file.strip()) > 0 else None
 
-    current_output = brain.process_turn(session_id, case.chief_complaint)
+    opening = patient.open_case(case)
+    current_output = brain.process_turn(session_id, opening.opening_text)
     previous_question_node_id: str | None = None
     turn_summary = _extract_turn_summary(current_output)
     previous_question_node_id = (turn_summary.get("pending_action") or {}).get("target_node_id")
     initial_event = {
         "step": "turn_0",
+        "opening_text": opening.opening_text,
         "has_final_report": current_output.get("final_report") is not None,
         "next_question": current_output.get("next_question"),
         "turn_summary": turn_summary,

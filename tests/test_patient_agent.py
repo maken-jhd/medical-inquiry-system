@@ -17,3 +17,34 @@ def test_patient_agent_answers_known_slot() -> None:
 
     assert reply.answer_text == "有。"
     assert reply.revealed_slot_id == "发热"
+
+
+# 验证病人代理可根据骨架中的主动暴露槽位生成首轮发言。
+def test_patient_agent_opens_case_from_proactive_slots() -> None:
+    agent = VirtualPatientAgent()
+    case = VirtualPatientCase(
+        case_id="case2",
+        title="test",
+        slot_truth_map={
+            "发热": SlotTruth(
+                node_id="发热",
+                value=True,
+                group="symptom",
+                aliases=["发热"],
+                reveal_only_if_asked=False,
+            ),
+            "干咳": SlotTruth(
+                node_id="干咳",
+                value=True,
+                group="symptom",
+                aliases=["干咳"],
+                reveal_only_if_asked=False,
+            ),
+        },
+    )
+
+    opening = agent.open_case(case)
+
+    assert "发热" in opening.opening_text
+    assert "干咳" in opening.opening_text
+    assert opening.revealed_slot_ids == ["发热", "干咳"]

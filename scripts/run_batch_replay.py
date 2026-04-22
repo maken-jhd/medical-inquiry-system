@@ -26,7 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--cases-file",
         default="",
-        help="可选的病例 JSONL 文件；不提供时将使用内置 seed cases。",
+        help="可选的病例 JSON/JSONL 文件；不提供时将使用内置 seed cases。",
     )
     parser.add_argument(
         "--output-root",
@@ -57,7 +57,7 @@ def main() -> int:
     brain = build_default_brain_from_env()
     engine = ReplayEngine(
         brain=brain,
-        patient_agent=VirtualPatientAgent(),
+        patient_agent=VirtualPatientAgent(use_llm=True),
         config=ReplayConfig(max_turns=args.max_turns),
     )
     results = engine.run_cases(cases)

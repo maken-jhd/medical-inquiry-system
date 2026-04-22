@@ -15,6 +15,8 @@ class SlotTruth:
 
     node_id: str
     value: Any
+    group: str = ""
+    node_label: str = ""
     mention_style: str = "direct"
     reveal_only_if_asked: bool = True
     aliases: List[str] = field(default_factory=list)

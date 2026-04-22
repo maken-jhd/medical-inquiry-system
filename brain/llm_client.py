@@ -94,6 +94,25 @@ class LlmClient:
                 "question 用中文，必须鼓励患者描述主要症状、持续时间和最担心的问题，长度不超过 80 字；"
                 "reasoning 用中文，说明为什么需要先采集主诉。"
             ),
+            "patient_opening_generation": (
+                "你现在扮演就诊患者。"
+                "请根据给定的病例骨架，生成一句自然、口语化、简短的中文首轮就诊发言。"
+                "只能基于 opening_slots 里的阳性信息表达，不得补充未提供的新症状、检查、诊断或病史。"
+                "不要直接说出疾病名称，不要像病历摘要，不要逐条罗列。"
+                "如果 opening_slots 以检查项为主，可以说“检查提示异常，想进一步看看”；"
+                "如果以症状为主，要优先用症状组织表达。"
+                "必须严格输出 JSON object，且只包含字段：opening_text、reasoning。"
+                "opening_text 用第一人称中文，长度不超过 50 字。"
+            ),
+            "patient_answer_generation": (
+                "你现在扮演就诊患者。"
+                "请根据给定 question_text、answer_mode 和 matched_slot，生成一句简短、自然、口语化的中文回答。"
+                "如果 answer_mode=known，只能围绕 matched_slot 作答，不能扩写成新的医学事实；"
+                "如果 answer_mode=hidden，要给出回避式表达；"
+                "如果 answer_mode=unknown，要表达不清楚、没注意或不确定。"
+                "必须严格输出 JSON object，且只包含字段：answer_text、reasoning。"
+                "answer_text 长度不超过 35 字。"
+            ),
             "a2_hypothesis_generation": (
                 "请根据患者一般信息、临床特征和图谱候选疾病生成主假设与备选假设。"
                 "输出字段必须包含 primary_hypothesis、alternatives、reasoning、"

@@ -11,6 +11,7 @@ class FakeBrain:
     # 初始化假的会话存储。
     def __init__(self) -> None:
         self.sessions: dict[str, int] = {}
+        self.first_inputs: dict[str, str] = {}
 
     # 创建假的会话。
     def start_session(self, session_id: str) -> None:
@@ -20,6 +21,9 @@ class FakeBrain:
     def process_turn(self, session_id: str, patient_text: str) -> dict:
         _ = patient_text
         step = self.sessions[session_id]
+
+        if step == 0:
+            self.first_inputs[session_id] = patient_text
 
         if step == 0:
             self.sessions[session_id] = 1
@@ -51,19 +55,21 @@ class FakeBrain:
 
 # 验证回放引擎能够驱动一轮自动问答并拿到最终报告。
 def test_replay_engine_runs_case_to_completion() -> None:
-    engine = ReplayEngine(FakeBrain(), VirtualPatientAgent())
+    brain = FakeBrain()
+    engine = ReplayEngine(brain, VirtualPatientAgent())
     case = VirtualPatientCase(
         case_id="case1",
         title="test",
-        chief_complaint="我最近不舒服。",
         slot_truth_map={
-            "发热": SlotTruth(node_id="发热", value=True),
+            "发热": SlotTruth(node_id="发热", value=True, group="symptom", aliases=["发热"], reveal_only_if_asked=False),
         },
     )
 
     result = engine.run_case(case)
 
     assert result.status == "completed"
+    assert "发热" in result.opening_text
+    assert "发热" in brain.first_inputs["replay::case1"]
     assert len(result.turns) == 1
     assert result.turns[0].question_node_id == "发热"
     assert result.turns[0].answer_text == "有。"
@@ -77,14 +83,12 @@ def test_replay_engine_runs_cases_in_batch() -> None:
         VirtualPatientCase(
             case_id="case1",
             title="test1",
-            chief_complaint="我最近不舒服。",
-            slot_truth_map={"发热": SlotTruth(node_id="发热", value=True)},
+            slot_truth_map={"发热": SlotTruth(node_id="发热", value=True, aliases=["发热"], reveal_only_if_asked=False)},
         ),
         VirtualPatientCase(
             case_id="case2",
             title="test2",
-            chief_complaint="我最近不舒服。",
-            slot_truth_map={"发热": SlotTruth(node_id="发热", value=False)},
+            slot_truth_map={"发热": SlotTruth(node_id="发热", value=False, aliases=["发热"])},
         ),
     ]
 

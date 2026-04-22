@@ -31,6 +31,7 @@ class ReplayResult:
 
     case_id: str
     case_title: str = ""
+    opening_text: str = ""
     true_conditions: List[str] = field(default_factory=list)
     true_disease_phase: Optional[str] = None
     red_flags: List[str] = field(default_factory=list)
@@ -72,7 +73,9 @@ class ReplayEngine:
             true_disease_phase=case.true_disease_phase,
             red_flags=list(case.red_flags),
         )
-        current_output = self.brain.process_turn(session_id, case.chief_complaint)
+        opening = self.patient_agent.open_case(case)
+        result.opening_text = opening.opening_text
+        current_output = self.brain.process_turn(session_id, opening.opening_text)
         result.initial_output = current_output
 
         if current_output.get("final_report") is not None:

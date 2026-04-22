@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-from simulator.generate_cases import build_seed_cases, write_cases_json
+from simulator.generate_cases import build_seed_cases, load_cases_jsonl, write_cases_json
 
 
 # 验证内置种子病例的数量和关键字段是否符合预期。
@@ -29,3 +29,14 @@ def test_write_cases_json_writes_array_payload(tmp_path: Path) -> None:
     assert len(payload) == 2
     assert payload[0]["case_id"] == cases[0].case_id
     assert "slot_truth_map" in payload[0]
+
+
+# 验证病例加载器可直接读取 JSON 数组文件。
+def test_load_cases_jsonl_supports_json_array(tmp_path: Path) -> None:
+    cases = build_seed_cases()[:2]
+    output_file = tmp_path / "cases.json"
+    write_cases_json(cases, output_file)
+
+    loaded = load_cases_jsonl(output_file)
+
+    assert [case.case_id for case in loaded] == [case.case_id for case in cases]

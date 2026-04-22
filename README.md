@@ -23,6 +23,7 @@
 - 旧版全量指南图谱备份：[knowledge_graph_bak/README.md](/Users/loki/Workspace/GraduationDesign/knowledge_graph_bak/README.md)
 - 第二阶段问诊大脑：[brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
 - 虚拟病人与离线回放：[simulator/README.md](/Users/loki/Workspace/GraduationDesign/simulator/README.md)
+- 图谱驱动虚拟病人详细方案：[virtual_patient_generation_scheme.md](/Users/loki/Workspace/GraduationDesign/docs/virtual_patient_generation_scheme.md)
 - 前端演示界面：[frontend/README.md](/Users/loki/Workspace/GraduationDesign/frontend/README.md)
 - 第二阶段测试：[tests/README.md](/Users/loki/Workspace/GraduationDesign/tests/README.md)
 
@@ -297,18 +298,53 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 - 更贴近论文的最终答案聚类与评审策略
 - 更严格的真实图谱联调与离线 benchmark
 
-## 虚拟病人脚手架
+## 图谱驱动虚拟病人
 
-虚拟病人与离线评测模块也已经预留：
+当前虚拟病人模块已经不只是 seed case 脚手架，而是形成了“图谱审计 -> 病例骨架 -> 病人代理 -> 自动对战”的闭环。详细设计说明见：
+
+- [virtual_patient_generation_scheme.md](/Users/loki/Workspace/GraduationDesign/docs/virtual_patient_generation_scheme.md)
+
+当前相关核心文件包括：
 
 - 更详细的目录说明见：[simulator/README.md](/Users/loki/Workspace/GraduationDesign/simulator/README.md)
 - [simulator/case_schema.py](/Users/loki/Workspace/GraduationDesign/simulator/case_schema.py)
 - [simulator/generate_cases.py](/Users/loki/Workspace/GraduationDesign/simulator/generate_cases.py)
+- [simulator/graph_case_generator.py](/Users/loki/Workspace/GraduationDesign/simulator/graph_case_generator.py)
 - [simulator/patient_agent.py](/Users/loki/Workspace/GraduationDesign/simulator/patient_agent.py)
 - [simulator/replay_engine.py](/Users/loki/Workspace/GraduationDesign/simulator/replay_engine.py)
 - [simulator/benchmark.py](/Users/loki/Workspace/GraduationDesign/simulator/benchmark.py)
 - [simulator/path_cache_builder.py](/Users/loki/Workspace/GraduationDesign/simulator/path_cache_builder.py)
+- [scripts/generate_graph_virtual_patients.py](/Users/loki/Workspace/GraduationDesign/scripts/generate_graph_virtual_patients.py)：基于疾病审计结果生成图谱驱动病例骨架
 - [scripts/run_batch_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_batch_replay.py)：批量虚拟病人回放与评测入口
+
+当前实现的要点包括：
+
+- 图谱病例生成器直接消费疾病级图谱审计 JSON，而不是直接从 Neo4j 读全图
+- 病例类型分为 `ordinary / low_cost / exam_driven / competitive`
+- `slot_truth_map` 使用真实图谱 `target_node_id` 作为 key，中文证据名称写入 `aliases`
+- 当前已同时支持输出 `cases.jsonl` 和便于人工查看的 `cases.json`
+- `run_batch_replay.py` 当前可直接读取 `JSONL` 或 `JSON` 数组病例文件
+- 病人代理当前已改为“骨架驱动开场”：首轮输入优先由 `patient_agent.open_case(case)` 基于 opening slots 生成，而不是直接把 `chief_complaint` 当作唯一入口
+- 在配置了可用 LLM 时，病人代理会使用受约束的 LLM 表达；否则自动退回规则模板
+
+当前已经基于：
+
+- [all_diseases_20260420_disease_aliases_only](/Users/loki/Workspace/GraduationDesign/test_outputs/graph_audit/all_diseases_20260420_disease_aliases_only)
+
+生成了一轮图谱驱动病例输出：
+
+- [cases.json](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260421/cases.json)
+- [cases.jsonl](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260421/cases.jsonl)
+- [manifest.json](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260421/manifest.json)
+- [summary.md](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260421/summary.md)
+
+当前这轮共生成：
+
+- `ordinary = 66`
+- `low_cost = 49`
+- `exam_driven = 61`
+- `competitive = 51`
+- 总数 `227`
 
 当前 `replay_engine` 已经不再是占位文件，而是能够驱动 `brain/service.py` 跑通最小的“系统问 -> 病人答 -> 系统再问”自动回放闭环，并支持批量回放。
 
@@ -391,9 +427,11 @@ streamlit run frontend/app.py --server.port 8514
 - [tests/test_mcts_engine.py](/Users/loki/Workspace/GraduationDesign/tests/test_mcts_engine.py)
 - [tests/test_simulation_engine.py](/Users/loki/Workspace/GraduationDesign/tests/test_simulation_engine.py)
 - [tests/test_generate_cases.py](/Users/loki/Workspace/GraduationDesign/tests/test_generate_cases.py)
+- [tests/test_graph_case_generator.py](/Users/loki/Workspace/GraduationDesign/tests/test_graph_case_generator.py)
 - [tests/test_benchmark.py](/Users/loki/Workspace/GraduationDesign/tests/test_benchmark.py)
 - [phase2_execution_checklist.md](/Users/loki/Workspace/GraduationDesign/docs/phase2_execution_checklist.md)：第二阶段与虚拟病人开发清单
 - [phase2_changelog.md](/Users/loki/Workspace/GraduationDesign/docs/phase2_changelog.md)：第二阶段实现历程、问题改进与论文写作素材整理
+- [virtual_patient_generation_scheme.md](/Users/loki/Workspace/GraduationDesign/docs/virtual_patient_generation_scheme.md)：图谱驱动虚拟病人详细方案、病例类型规则、骨架字段与论文写作素材整理
 - [scripts/run_brain_demo.py](/Users/loki/Workspace/GraduationDesign/scripts/run_brain_demo.py)：最小命令行问诊演示入口
 - [scripts/run_streamlit_realtime.sh](/Users/loki/Workspace/GraduationDesign/scripts/run_streamlit_realtime.sh)：Streamlit 前端启动入口
 - [.streamlit/config.toml](/Users/loki/Workspace/GraduationDesign/.streamlit/config.toml)：关闭 Streamlit 首次启动邮箱提示，提升演示稳定性

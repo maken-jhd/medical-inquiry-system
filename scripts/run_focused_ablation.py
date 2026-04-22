@@ -273,16 +273,18 @@ def _run_variant(args: argparse.Namespace, variant: str, cases: list, output_roo
 def _run_single_case(args: argparse.Namespace, variant: str, case, ablation_flags: dict) -> dict:
     print(f"[ablation] variant={variant} case={case.case_id} start", file=sys.stderr, flush=True)
     brain = build_default_brain_from_env(config_overrides=_build_config_overrides(args, variant))
-    patient_agent = VirtualPatientAgent()
+    patient_agent = VirtualPatientAgent(use_llm=True)
 
     try:
         session_id = f"focused_ablation::{variant}::{case.case_id}"
         brain.start_session(session_id)
-        current_output = brain.process_turn(session_id, case.chief_complaint)
+        opening = patient_agent.open_case(case)
+        current_output = brain.process_turn(session_id, opening.opening_text)
         turn_summaries: list[dict] = []
         previous_question_node_id: str | None = None
         previous_pending_action: dict | None = None
         initial_summary = _extract_turn_summary(current_output)
+        initial_summary["opening_text"] = opening.opening_text
         initial_summary["semantic_repeat_as_previous"] = False
         turn_summaries.append(initial_summary)
         previous_question_node_id = (initial_summary.get("pending_action") or {}).get("target_node_id")
