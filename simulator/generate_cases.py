@@ -307,6 +307,13 @@ def write_cases_jsonl(cases: Iterable[VirtualPatientCase], output_file: Path) ->
             handle.write(json.dumps(asdict(case), ensure_ascii=False) + "\n")
 
 
+# 将病例列表序列化为 JSON 数组文件，便于人工查看和外部程序消费。
+def write_cases_json(cases: Iterable[VirtualPatientCase], output_file: Path) -> None:
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    payload = [asdict(case) for case in cases]
+    output_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 # 从 JSONL 文件中读取病例列表，便于后续批量回放。
 def load_cases_jsonl(input_file: Path) -> List[VirtualPatientCase]:
     cases: List[VirtualPatientCase] = []
