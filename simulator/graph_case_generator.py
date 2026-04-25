@@ -1068,55 +1068,278 @@ def _normalize_text(value: str) -> str:
     return text
 
 
+def _iter_string_values(value: Any) -> Iterable[str]:
+    """递归展开 item 中可能参与规则判断的字符串值。"""
+
+    if value is None:
+        return
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped:
+            yield stripped
+        return
+    if isinstance(value, dict):
+        for nested_value in value.values():
+            yield from _iter_string_values(nested_value)
+        return
+    if isinstance(value, (list, tuple, set)):
+        for nested_value in value:
+            yield from _iter_string_values(nested_value)
+        return
+    if isinstance(value, (int, float)):
+        yield str(value)
+
+
+def _item_search_text(item: dict[str, Any]) -> str:
+    """拼接证据名称、标签和附加属性，供 lightweight 规则匹配使用。"""
+
+    parts: list[str] = []
+    for key in (
+        "target_name",
+        "target_label",
+        "test_id",
+        "question_type_hint",
+        "status_label",
+        "attributes",
+    ):
+        parts.extend(_iter_string_values(item.get(key)))
+    return _normalize_text(" ".join(parts))
+
+
+def _parse_numeric_token(token: str) -> float | None:
+    token = token.strip()
+    sci_match = re.fullmatch(r"10\^(\d+)", token)
+    if sci_match:
+        return float(10 ** int(sci_match.group(1)))
+    try:
+        return float(token)
+    except ValueError:
+        return None
+
+
+def _extract_measurement_comparators(text: str) -> list[tuple[str, float]]:
+    matches: list[tuple[str, float]] = []
+    for operator, token in re.findall(r"(<=|>=|<|>|≤|≥)\s*(10\^\d+|\d+(?:\.\d+)?)", text):
+        value = _parse_numeric_token(token)
+        if value is None:
+            continue
+        matches.append((operator, value))
+    return matches
+
+
+def _extract_first_range(text: str) -> tuple[float, float] | None:
+    match = re.search(r"(\d+(?:\.\d+)?)\s*(?:-|–|~|至)\s*(\d+(?:\.\d+)?)", text)
+    if not match:
+        return None
+    lower = _parse_numeric_token(match.group(1))
+    upper = _parse_numeric_token(match.group(2))
+    if lower is None or upper is None:
+        return None
+    return (lower, upper)
+
+
+def _has_concrete_result_markers(name: str) -> bool:
+    normalized_name = _normalize_text(name)
+    if any(marker in name for marker in OPENING_RESULT_MARKERS):
+        return True
+    return any(_normalize_text(marker) in normalized_name for marker in OPENING_RESULT_MARKERS)
+
+
+def _is_plain_cd4_test_name(name: str) -> bool:
+    normalized_name = _normalize_text(name)
+    plain_names = {
+        "cd4",
+        "cd4+",
+        "cd4+t淋巴细胞计数",
+        "cd4+t细胞计数",
+        "cd4细胞计数",
+        "cd4计数",
+        "基线cd4+t淋巴细胞计数",
+    }
+    return normalized_name in plain_names
+
+
+def _cd4_family_rank(item: dict[str, Any]) -> tuple[int, float, int]:
+    """CD4 family 内优先保留更具体且更严重的阈值。"""
+
+    name = str(item.get("target_name") or "")
+    comparators = _extract_measurement_comparators(name)
+    if comparators:
+        operator, value = comparators[-1]
+        if operator in {"<", "<=", "≤"}:
+            return (0, value, 0)
+        if operator in {">", ">=", "≥"}:
+            return (1, -value, 0)
+
+    range_values = _extract_first_range(name)
+    if range_values is not None:
+        lower, upper = range_values
+        return (2, -lower, int(upper - lower))
+
+    normalized_name = _normalize_text(name)
+    if "持续低于" in normalized_name or "显著降低" in normalized_name or "降低" in normalized_name:
+        return (3, 0.0, 0)
+    if "迅速升高" in normalized_name or "升高" in normalized_name:
+        return (4, 0.0, 0)
+    if _is_plain_cd4_test_name(name):
+        return (6, 0.0, 0)
+    if _has_concrete_result_markers(name):
+        return (5, 0.0, 0)
+    return (7, 0.0, 0)
+
+
+def _numeric_family_rank(
+    item: dict[str, Any],
+    *,
+    prefer_higher_for_greater_than: bool = True,
+    prefer_lower_for_less_than: bool = True,
+    plain_test_names: set[str] | None = None,
+    generic_state_terms: Sequence[str] | None = None,
+) -> tuple[int, float, int]:
+    """为一般 numeric family 生成排序键：阈值优先，随后是明确状态，再次是纯检查名。"""
+
+    name = str(item.get("target_name") or "")
+    normalized_name = _normalize_text(name)
+    comparators = _extract_measurement_comparators(name)
+    if comparators:
+        operator, value = comparators[-1]
+        if operator in {"<", "<=", "≤"}:
+            return (0, value if prefer_lower_for_less_than else -value, 0)
+        if operator in {">", ">=", "≥"}:
+            return (0, -value if prefer_higher_for_greater_than else value, 0)
+
+    range_values = _extract_first_range(name)
+    if range_values is not None:
+        lower, upper = range_values
+        return (1, -lower, int(upper - lower))
+
+    if generic_state_terms:
+        for index, term in enumerate(generic_state_terms, start=1):
+            if _normalize_text(term) in normalized_name:
+                return (2, float(index), 0)
+
+    if _has_concrete_result_markers(name):
+        return (2, 99.0, 0)
+
+    if plain_test_names and normalized_name in plain_test_names:
+        return (4, 0.0, 0)
+
+    return (5, 0.0, 0)
+
+
+def _bmi_family_rank(item: dict[str, Any]) -> tuple[int, float, int]:
+    """BMI 分层优先保留更高分层的区间或阈值。"""
+
+    name = str(item.get("target_name") or "")
+    normalized_name = _normalize_text(name)
+    range_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:<=|<|≤)\s*(?:bmi|身体质量指数)\s*(?:<|<=|≤)\s*(\d+(?:\.\d+)?)", normalized_name)
+    if range_match:
+        lower = _parse_numeric_token(range_match.group(1))
+        upper = _parse_numeric_token(range_match.group(2))
+        if lower is not None and upper is not None:
+            return (0, -lower, -int(upper * 100))
+
+    comparators = _extract_measurement_comparators(name)
+    if comparators:
+        operator, value = comparators[-1]
+        if operator in {">", ">=", "≥"}:
+            return (0, -value, 0)
+        if operator in {"<", "<=", "≤"}:
+            return (1, value, 0)
+
+    if _has_concrete_result_markers(name):
+        return (2, 0.0, 0)
+
+    return (3, 0.0, 0)
+
+
 def _infer_conflict_family(item: dict[str, Any]) -> str:
     """推断阳性证据所属的互斥分层族；空字符串表示不参与互斥过滤。"""
 
-    name = _normalize_text(str(item.get("target_name") or ""))
-    if not name:
+    search_text = _item_search_text(item)
+    if not search_text:
         return ""
 
-    if "bmi" in name or "身体质量指数" in name or "kg/m²" in name or "kg/m2" in name:
+    if "bmi" in search_text or "身体质量指数" in search_text or "kg/m²" in search_text or "kg/m2" in search_text:
         return "bmi"
-    if "cd4" in name:
+    if "cd4" in search_text:
         return "cd4"
-    if "hivrna" in name or "病毒载量" in name:
+    if "hivrna" in search_text or "hiv-1rna" in search_text or "病毒载量" in search_text:
         return "hiv_rna"
 
-    if "收缩压" in name:
-        return "blood_pressure_systolic"
-    if "舒张压" in name:
-        return "blood_pressure_diastolic"
-    if "血压" in name:
-        return "blood_pressure"
-
-    if "糖化血红蛋白" in name or "hba1c" in name:
-        return "hba1c"
-    if "空腹血糖" in name:
-        return "fasting_glucose"
-    if "餐后2h血糖" in name or "餐后2小时血糖" in name:
-        return "postprandial_glucose"
-    if "血糖" in name:
-        return "glucose"
-
-    if "甘油三酯" in name:
-        return "triglyceride"
-    if "高密度脂蛋白" in name or "hdl" in name:
+    if "高密度脂蛋白" in search_text or "hdl" in search_text:
         return "hdl"
-    if "低密度脂蛋白" in name or "ldl" in name:
+    if "低密度脂蛋白" in search_text or "ldl" in search_text:
         return "ldl"
-    if "总胆固醇" in name:
+    if "甘油三酯" in search_text or "tg" in search_text:
+        return "triglyceride"
+    if "总胆固醇" in search_text:
         return "total_cholesterol"
-    if "年龄" in name:
+    if "egfr" in search_text or "肾小球滤过率" in search_text:
+        return "egfr"
+    if "年龄" in search_text:
         return "age"
 
     return ""
 
 
-def _conflict_item_sort_key(item: dict[str, Any]) -> tuple[float, float, int, str]:
+def _conflict_item_sort_key(item: dict[str, Any]) -> tuple[int, float, int, float, float, int, str]:
     """互斥证据保留顺序：priority 更高，其次 specificity 更高，再次名称更具体。"""
 
     name = str(item.get("target_name") or "")
+    family = _infer_conflict_family(item)
+
+    if family == "cd4":
+        family_rank = _cd4_family_rank(item)
+    elif family == "hiv_rna":
+        family_rank = _numeric_family_rank(
+            item,
+            plain_test_names={"hivrna", "hiv-1rna", "hiv病毒载量", "病毒载量", "血浆hiv-1rna"},
+            generic_state_terms=("低于检测下限", "完全抑制", "未受抑制", "阳性", "高", "低"),
+        )
+    elif family == "ldl":
+        family_rank = _numeric_family_rank(
+            item,
+            plain_test_names={"ldl-c", "低密度脂蛋白胆固醇"},
+            generic_state_terms=("升高", "降低"),
+        )
+    elif family == "hdl":
+        family_rank = _numeric_family_rank(
+            item,
+            prefer_higher_for_greater_than=False,
+            plain_test_names={"hdl", "高密度脂蛋白胆固醇"},
+            generic_state_terms=("降低", "升高"),
+        )
+    elif family == "triglyceride":
+        family_rank = _numeric_family_rank(
+            item,
+            plain_test_names={"甘油三酯", "tg"},
+            generic_state_terms=("升高", "降低"),
+        )
+    elif family == "total_cholesterol":
+        family_rank = _numeric_family_rank(
+            item,
+            plain_test_names={"总胆固醇"},
+            generic_state_terms=("升高", "降低"),
+        )
+    elif family == "egfr":
+        family_rank = _numeric_family_rank(
+            item,
+            prefer_lower_for_less_than=True,
+            plain_test_names={"egfr", "肾小球滤过率"},
+            generic_state_terms=("降低",),
+        )
+    elif family == "bmi":
+        family_rank = _bmi_family_rank(item)
+    elif family == "age":
+        family_rank = _numeric_family_rank(item, plain_test_names={"年龄"})
+    else:
+        family_rank = (9, 0.0, 0)
+
     return (
+        family_rank[0],
+        family_rank[1],
+        family_rank[2],
         -float(item.get("priority") or 0.0),
         -float(item.get("relation_specificity") or 0.0),
         -len(name),
@@ -1129,10 +1352,13 @@ def _is_disallowed_opening_name(name: str, item: dict[str, Any]) -> bool:
 
     normalized_name = _normalize_text(name)
     group = str(item.get("group") or "")
+    target_label = str(item.get("target_label") or "")
 
-    if group == "pathogen":
+    if target_label == "LabTest":
         return True
-    if group == "detail":
+    if target_label == "Pathogen" or group == "pathogen":
+        return True
+    if target_label == "ClinicalAttribute" or group == "detail":
         return True
 
     if "年龄" in normalized_name:
@@ -1148,15 +1374,46 @@ def _is_disallowed_opening_name(name: str, item: dict[str, Any]) -> bool:
         return True
 
     plain_exam_names = {
+        "cd4",
+        "cd4+",
         "cd4+t淋巴细胞计数",
+        "cd4+t细胞计数",
+        "cd4细胞计数",
+        "基线cd4+t淋巴细胞计数",
         "cd4计数",
         "hivrna",
+        "hiv病毒载量检测",
+        "cmvdna检测",
         "胸部ct",
         "血常规",
         "骨密度",
         "病毒载量",
+        "脑脊液检查",
+        "血脂检测",
+        "骨髓培养",
+        "隐球菌抗原检测",
     }
     if normalized_name in plain_exam_names:
+        return True
+
+    forbidden_finding_terms = (
+        "病死率",
+        "疗效",
+        "耐受性",
+        "无改善",
+        "体征无改善",
+        "无症状",
+        "呼吸频率",
+        "收缩压",
+        "舒张压",
+        "胃镜",
+        "肠镜",
+        "眼底",
+        "筛查",
+        "统计",
+        "风险等级",
+    )
+    if any(term in name for term in forbidden_finding_terms):
         return True
 
     if group in {"lab", "imaging"} and not _looks_like_concrete_exam_result(name):
@@ -1173,10 +1430,7 @@ def _looks_like_concrete_exam_result(name: str) -> bool:
     if not raw_name:
         return False
 
-    if any(marker in raw_name for marker in OPENING_RESULT_MARKERS):
-        return True
-
-    if any(marker in normalized_name for marker in (_normalize_text(marker) for marker in OPENING_RESULT_MARKERS)):
+    if _has_concrete_result_markers(raw_name):
         return True
 
     if re.search(r"(?:<=|>=|<|>|≤|≥)", raw_name):

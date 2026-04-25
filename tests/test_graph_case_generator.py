@@ -29,6 +29,7 @@ def _make_evidence(
     relation_type: str | None = None,
     acquisition_mode: str | None = None,
     evidence_cost: str | None = None,
+    target_label: str | None = None,
 ) -> dict:
     default_relation = {
         "symptom": "MANIFESTS_AS",
@@ -57,7 +58,7 @@ def _make_evidence(
     return {
         "target_node_id": node_id,
         "target_name": name,
-        "target_label": {
+        "target_label": target_label or {
             "symptom": "ClinicalFinding",
             "risk": "RiskFactor",
             "detail": "ClinicalAttribute",
@@ -386,6 +387,136 @@ def test_generator_filters_mutually_exclusive_bmi_positive_slots() -> None:
     assert truth_names == ["BMI>=37.5kg/m²"]
 
 
+# 验证生成器会把多个 CD4 阈值阳性压缩为一个最严重结果。
+def test_generator_filters_mutually_exclusive_cd4_positive_slots() -> None:
+    record = _make_record(
+        "merged_node_cd40001",
+        "CD4互斥病",
+        [
+            _make_evidence("merged_node_cd4_001", "CD4+ T淋巴细胞计数", "lab", priority=2.0),
+            _make_evidence("merged_node_cd4_002", "CD4+ T淋巴细胞计数 < 300/μL", "lab", priority=1.7),
+            _make_evidence("merged_node_cd4_003", "CD4+ T淋巴细胞计数 < 200/μL", "lab", priority=1.8),
+            _make_evidence("merged_node_cd4_004", "CD4+ T淋巴细胞计数 < 50/μL", "lab", priority=1.6),
+            _make_evidence("merged_node_lab_401", "CMV DNA阳性", "lab", priority=1.5),
+            _make_evidence("merged_node_img_401", "胸部CT提示磨玻璃影", "imaging", priority=1.4),
+        ],
+    )
+
+    result = GraphCaseGenerator().generate_from_records([record])
+    exam_case = next(case for case in result.cases if case.metadata.get("case_type") == "exam_driven")
+
+    positive_names = list(exam_case.metadata.get("selected_positive_slots") or [])
+    cd4_names = [name for name in positive_names if "CD4" in name]
+    truth_cd4_names = [
+        truth.aliases[0]
+        for truth in exam_case.slot_truth_map.values()
+        if truth.aliases and "CD4" in truth.aliases[0]
+    ]
+
+    assert cd4_names == ["CD4+ T淋巴细胞计数 < 50/μL"]
+    assert truth_cd4_names == ["CD4+ T淋巴细胞计数 < 50/μL"]
+    assert "CMV DNA阳性" in positive_names
+    assert "胸部CT提示磨玻璃影" in positive_names
+
+
+# 验证 CD4 family 过滤不会误删其他检查结果。
+def test_generator_keeps_non_cd4_exam_results_when_filtering_cd4() -> None:
+    record = _make_record(
+        "merged_node_cd40002",
+        "CD4保留其他检查病",
+        [
+            _make_evidence("merged_node_cd4_101", "CD4+ T淋巴细胞计数 < 300/μL", "lab", priority=1.7),
+            _make_evidence("merged_node_cd4_102", "CD4+ T淋巴细胞计数 < 200/μL", "lab", priority=1.8),
+            _make_evidence("merged_node_cd4_103", "CD4+ T淋巴细胞计数 < 50/μL", "lab", priority=1.6),
+            _make_evidence("merged_node_hivrna_101", "HIV RNA < 50 copies/mL", "lab", priority=1.5),
+            _make_evidence("merged_node_lab_402", "β-D葡聚糖升高", "lab", priority=1.4),
+            _make_evidence("merged_node_img_402", "胸部CT提示磨玻璃影", "imaging", priority=1.3),
+        ],
+    )
+
+    result = GraphCaseGenerator().generate_from_records([record])
+    exam_case = next(case for case in result.cases if case.metadata.get("case_type") == "exam_driven")
+    positive_names = list(exam_case.metadata.get("selected_positive_slots") or [])
+
+    assert sum(1 for name in positive_names if "CD4" in name) == 1
+    assert "HIV RNA < 50 copies/mL" in positive_names
+    assert "β-D葡聚糖升高" in positive_names
+    assert "胸部CT提示磨玻璃影" in positive_names
+
+
+# 验证 HIV RNA / 病毒载量 family 最多只保留一个阳性槽位。
+def test_generator_filters_hiv_rna_family_to_one_positive_slot() -> None:
+    record = _make_record(
+        "merged_node_hivrna0001",
+        "病毒载量互斥病",
+        [
+            _make_evidence("merged_node_hivrna_201", "HIV RNA < 50 copies/mL", "lab", priority=1.7),
+            _make_evidence("merged_node_hivrna_202", "HIV RNA >1000 copies/mL", "lab", priority=1.6),
+            _make_evidence("merged_node_hivrna_203", "HIV病毒载量未受抑制", "lab", priority=1.5),
+            _make_evidence("merged_node_lab_403", "CMV DNA阳性", "lab", priority=1.4),
+            _make_evidence("merged_node_img_403", "胸部CT提示磨玻璃影", "imaging", priority=1.3),
+        ],
+    )
+
+    result = GraphCaseGenerator().generate_from_records([record])
+    exam_case = next(case for case in result.cases if case.metadata.get("case_type") == "exam_driven")
+    positive_names = list(exam_case.metadata.get("selected_positive_slots") or [])
+    hiv_rna_names = [name for name in positive_names if ("HIV RNA" in name or "病毒载量" in name)]
+
+    assert len(hiv_rna_names) == 1
+    assert "CMV DNA阳性" in positive_names
+    assert "胸部CT提示磨玻璃影" in positive_names
+
+
+# 验证 LDL family 去重时不会误删 TG / 总胆固醇 / imaging 等其他 family。
+def test_generator_filters_lipid_family_without_dropping_other_families() -> None:
+    record = _make_record(
+        "merged_node_lipid0001",
+        "血脂互斥病",
+        [
+            _make_evidence("merged_node_ldl_001", "LDL-C ≥ 1.8 mmol/L", "lab", priority=1.6),
+            _make_evidence("merged_node_ldl_002", "LDL-C ≥ 3.0 mmol/L", "lab", priority=1.5),
+            _make_evidence("merged_node_tg_001", "甘油三酯 >= 1.7 mmol/L", "lab", priority=1.4),
+            _make_evidence("merged_node_tc_001", "总胆固醇升高", "lab", priority=1.3),
+            _make_evidence("merged_node_img_404", "胸部CT提示磨玻璃影", "imaging", priority=1.2),
+        ],
+    )
+
+    result = GraphCaseGenerator().generate_from_records([record])
+    exam_case = next(case for case in result.cases if case.metadata.get("case_type") == "exam_driven")
+    positive_names = list(exam_case.metadata.get("selected_positive_slots") or [])
+    ldl_names = [name for name in positive_names if "LDL" in name or "低密度脂蛋白胆固醇" in name]
+
+    assert len(ldl_names) == 1
+    assert "甘油三酯 >= 1.7 mmol/L" in positive_names
+    assert "总胆固醇升高" in positive_names
+    assert "胸部CT提示磨玻璃影" in positive_names
+
+
+# 验证 eGFR family 会保留最严重的阈值，而不会误删其他检查证据。
+def test_generator_filters_egfr_family_to_most_severe_threshold() -> None:
+    record = _make_record(
+        "merged_node_egfr0001",
+        "肾功能互斥病",
+        [
+            _make_evidence("merged_node_egfr_001", "eGFR < 90 mL/min", "lab", priority=1.8),
+            _make_evidence("merged_node_egfr_002", "eGFR < 60 mL·min⁻¹·1.73 m⁻²", "lab", priority=1.7),
+            _make_evidence("merged_node_egfr_003", "eGFR < 30 mL·min⁻¹·1.73 m⁻²", "lab", priority=1.6),
+            _make_evidence("merged_node_lab_404", "CMV DNA阳性", "lab", priority=1.5),
+            _make_evidence("merged_node_img_405", "胸部CT提示磨玻璃影", "imaging", priority=1.4),
+        ],
+    )
+
+    result = GraphCaseGenerator().generate_from_records([record])
+    exam_case = next(case for case in result.cases if case.metadata.get("case_type") == "exam_driven")
+    positive_names = list(exam_case.metadata.get("selected_positive_slots") or [])
+    egfr_names = [name for name in positive_names if "eGFR" in name]
+
+    assert egfr_names == ["eGFR < 30 mL·min⁻¹·1.73 m⁻²"]
+    assert "CMV DNA阳性" in positive_names
+    assert "胸部CT提示磨玻璃影" in positive_names
+
+
 # 验证 opening 会过滤掉不适合患者主动暴露的 detail 槽位。
 def test_generator_filters_non_patient_friendly_opening_slots() -> None:
     record = _make_record(
@@ -428,6 +559,67 @@ def test_generator_keeps_filtered_opening_slots_in_truth_map() -> None:
     assert "CD4+ T淋巴细胞计数" not in opening_names
     assert cd4_truth.aliases == ["CD4+ T淋巴细胞计数"]
     assert cd4_truth.reveal_only_if_asked is True
+
+
+# 验证 opening 会排除 LabTest、Pathogen、ClinicalAttribute 等非病人自然开场槽位。
+def test_generator_opening_excludes_labtest_pathogen_clinical_attribute() -> None:
+    record = _make_record(
+        "merged_node_opening0002",
+        "opening标签过滤病",
+        [
+            _make_evidence(
+                "merged_node_labtest_001",
+                "CD4+ T淋巴细胞计数",
+                "lab",
+                priority=2.0,
+                target_label="LabTest",
+            ),
+            _make_evidence("merged_node_path_302", "巨细胞病毒", "pathogen", priority=1.9),
+            _make_evidence(
+                "merged_node_attr_001",
+                "骨密度测量部位",
+                "detail",
+                priority=1.8,
+                target_label="ClinicalAttribute",
+            ),
+            _make_evidence("merged_node_sym_301", "发热", "symptom", priority=1.7),
+            _make_evidence("merged_node_sym_302", "干咳", "symptom", priority=1.6),
+        ],
+    )
+
+    result = GraphCaseGenerator().generate_from_records([record])
+    ordinary_case = next(case for case in result.cases if case.metadata.get("case_type") == "ordinary")
+    opening_names = list(ordinary_case.metadata.get("opening_slot_names") or [])
+
+    assert "发热" in opening_names
+    assert "CD4+ T淋巴细胞计数" not in opening_names
+    assert "巨细胞病毒" not in opening_names
+    assert "骨密度测量部位" not in opening_names
+    assert ordinary_case.slot_truth_map["merged_node_labtest_001"].reveal_only_if_asked is True
+    assert ordinary_case.slot_truth_map["merged_node_attr_001"].reveal_only_if_asked is True
+
+
+# 验证预后/疗效/统计类 ClinicalFinding 不会进入 opening。
+def test_generator_opening_excludes_prognosis_treatment_statistical_findings() -> None:
+    record = _make_record(
+        "merged_node_opening0003",
+        "预后统计过滤病",
+        [
+            _make_evidence("merged_node_find_001", "AIDS相关病死率高", "symptom", priority=2.0),
+            _make_evidence("merged_node_find_002", "临床症状无改善", "symptom", priority=1.9),
+            _make_evidence("merged_node_find_003", "体征无改善", "symptom", priority=1.8),
+            _make_evidence("merged_node_find_004", "咳嗽", "symptom", priority=1.7),
+        ],
+    )
+
+    result = GraphCaseGenerator().generate_from_records([record])
+    low_cost_case = next(case for case in result.cases if case.metadata.get("case_type") == "low_cost")
+    opening_names = list(low_cost_case.metadata.get("opening_slot_names") or [])
+
+    assert "咳嗽" in opening_names
+    assert "AIDS相关病死率高" not in opening_names
+    assert "临床症状无改善" not in opening_names
+    assert "体征无改善" not in opening_names
 
 
 # 验证检查驱动 opening 允许具体检查结果，但不会主动暴露纯病原体名。

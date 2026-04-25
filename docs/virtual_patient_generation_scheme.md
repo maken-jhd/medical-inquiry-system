@@ -16,7 +16,8 @@
 截至当前版本，图谱病例生成器已经包含一轮面向病例质量的小范围修复：
 
 - 对同一指标的互斥阈值阳性证据做去重，只保留一条
-- 对 opening slots 做 patient-friendly 过滤，避免把纯检查项目名、纯病原体名、测量部位、持续时间等表格化槽位主动暴露给首轮开场
+- 重点覆盖了 `CD4`、`HIV RNA / 病毒载量`、`BMI`、`LDL`、`HDL`、`甘油三酯`、`总胆固醇`、`eGFR` 等指标的去冗余
+- 对 opening slots 做 patient-friendly 过滤，避免把 `LabTest`、`Pathogen`、`ClinicalAttribute` 以及预后/疗效/统计类 finding 主动暴露给首轮开场
 - 保留被过滤证据在 `slot_truth_map` 中的真值，只改变其是否主动暴露
 
 ## 2. 总体定位
@@ -398,13 +399,17 @@ competitor_only_negative >= 1
   - `risk` 且 `acquisition_mode in {direct_ask, history_known}`
   - 具体 `lab/imaging` 结果，例如带有 `阳性`、`升高`、`<`、`>`、`磨玻璃影`、`空洞` 等结果词的项目
 - 不允许主动暴露：
+  - `target_label == LabTest`
+  - `target_label == Pathogen` 或 `group == pathogen`
+  - `target_label == ClinicalAttribute`
   - `年龄`
   - `身体质量指数 / BMI`
   - `测量部位`
   - `持续时间 / 减重持续时间`
-  - 纯检查项目名，如 `CD4+ T淋巴细胞计数`、`HIV RNA`
+  - 纯检查项目名，如 `CD4+ T淋巴细胞计数`、`HIV RNA`、`CMV DNA检测`、`胸部CT`
   - 纯病原体名，如 `巨细胞病毒`、`刚地弓形虫`
-  - 过泛表达，如 `临床症状无改善`
+  - 预后/疗效/统计/筛查类 finding，如 `AIDS相关病死率高`、`临床症状无改善`、`体征无改善`
+  - 过泛表达，如 `异常`、`检查`、`筛查`、`诊断`
 
 如果原始 opening 候选在过滤后为空，生成器会从正向证据里兜底挑选，优先级为：
 
@@ -423,19 +428,49 @@ competitor_only_negative >= 1
 - BMI / 身体质量指数 / `kg/m²`
 - CD4
 - HIV RNA / 病毒载量
-- 血压 / 收缩压 / 舒张压
-- 空腹血糖 / 血糖 / HbA1c / 糖化血红蛋白
 - 甘油三酯
 - HDL
 - LDL
 - 总胆固醇
+- eGFR / 肾小球滤过率
 - 年龄
 
-同一互斥族内只保留一条，排序优先级为：
+需要强调的是：当前实现只做 lightweight 去冗余，不做复杂医学推理。例如：
+
+- 不把普通症状互斥化
+- 不把 `收缩压` 和 `舒张压` 强行并成同一族
+- 不把 HPV 多亚型感染做互斥
+- 不把病原体和对应阳性检测做互斥
+
+同一互斥族内只保留一条，但不同 family 的排序规则不完全相同。
+
+通用回退优先级为：
 
 1. `priority` 更高
 2. `relation_specificity` 更高
 3. `target_name` 更长，也就是通常更具体的描述优先
+
+其中，`CD4` family 有一层额外的严重度排序：
+
+- 结果型证据优先于纯检查项目名
+- `<` / `≤` 阈值中，数值越小越优先
+- `>` / `≥` 阈值中，数值越大越优先
+
+例如：
+
+- `CD4+ T淋巴细胞计数 < 50/μL`
+- `CD4+ T淋巴细胞计数 < 100/μL`
+- `CD4+ T淋巴细胞计数 < 200/μL`
+- `CD4+ T淋巴细胞计数 < 300/μL`
+- `CD4+ T淋巴细胞计数`
+
+如果这些同时出现在同一病例中，最终只保留最具体、最严重的一条，而不会并列保留多个阈值和一个纯检查项目名。
+
+`HIV RNA / 病毒载量`、`LDL`、`HDL`、`甘油三酯`、`总胆固醇`、`eGFR` 则使用“阈值优先于泛化状态，具体值优先于项目名”的 lightweight 规则。例如：
+
+- `HIV RNA < 50 copies/mL` 会优先于 `HIV病毒载量未受抑制` 这类泛化描述
+- `甘油三酯 >= 1.7 mmol/L` 会优先于 `甘油三酯升高`
+- `eGFR < 30` 会优先于 `eGFR < 60` 和 `eGFR < 90`
 
 这样可以避免例如肥胖病例中同时出现：
 
@@ -644,6 +679,12 @@ test_outputs/simulator_cases/graph_cases_20260421/
 - `competitive = 51`
 - 总数 `227`
 
+在当前这轮小范围质量修复后，病例总数没有变化，但抽样质量有所改善，主要体现在：
+
+- opening 中出现 `LabTest`、`Pathogen`、`ClinicalAttribute` 的概率明显下降
+- `BMI` 与 `CD4` 的多阈值并列问题已被显著压缩
+- `selected_positive_slots` 更接近“可并列成立的事实集合”，而不是同一指标不同分层的堆叠
+
 这个数量来自当前图谱与当前模板规则，并不是固定值；只要图谱或模板阈值改变，重新生成后病例数量会变化。
 
 ## 15. 关键实现细节
@@ -695,6 +736,9 @@ test_outputs/simulator_cases/graph_cases_20260421/
 
 - opening 是否还出现不自然的表格化槽位
 - 同一指标的互斥阳性是否被正确清理
+- 是否还出现多个 `CD4` 阈值并列
+- 是否还出现多个 `HIV RNA / 病毒载量` 状态并列
+- 是否还出现多个 `LDL / HDL / TG / TC / eGFR` 同 family 项并列
 - competitive 病例的 shared / target-only / negative 证据是否仍然合理
 
 ## 16. 当前局限性
@@ -712,7 +756,22 @@ test_outputs/simulator_cases/graph_cases_20260421/
 
 这说明 opening 质量已经从“明显错误”转为“基本可用但仍需继续打磨”的阶段。
 
-### 16.2 行为风格还不够丰富
+### 16.2 positive slots 虽已做去冗余，但仍可能保留部分“对话上不自然”的结构化事实
+
+当前实现已经会压缩同一指标的明显互斥阈值，但 `selected_positive_slots` 仍然服务于“病例真值表完整性”，而不是“患者自然口语化表达”。
+
+因此某些病例中仍可能看到：
+
+- `年龄`
+- `身体质量指数（BMI）`
+- `骨密度测量部位`
+- `ART治疗启动`
+
+这类不适合主动开场、但仍适合作为病例事实保留的证据。
+
+这不是 opening 过滤失效，而是当前设计本来就允许“truth map 比 opening 更结构化”。
+
+### 16.3 行为风格还不够丰富
 
 当前 `behavior_style` 主要影响：
 
@@ -725,11 +784,11 @@ test_outputs/simulator_cases/graph_cases_20260421/
 - 时间线表达差异
 - 敏感信息迂回程度差异
 
-### 16.3 LLM 回答仍以短句为主
+### 16.4 LLM 回答仍以短句为主
 
 为了控制事实边界，当前病人代理回答很短，这对稳定性有利，但也意味着对话自然度仍有提升空间。
 
-### 16.4 目前仍以单轮病例骨架为主
+### 16.5 目前仍以单轮病例骨架为主
 
 当前骨架以“有哪些阳性/阴性事实”为中心，尚未系统编码：
 
@@ -802,6 +861,13 @@ conda run -n GraduationDesign python scripts/sample_graph_virtual_patients.py \
 - `selected_positive_slots`
 - `selected_negative_slots`
 - `slot_truth_positive`
+
+特别建议针对以下冲突做定向检查：
+
+- `selected_positive_slots` 中是否还存在多个 `CD4` 阈值并列
+- 是否还存在多个 `HIV RNA / 病毒载量` 状态并列
+- 是否还存在多个 `LDL / HDL / TG / TC / eGFR` 同 family 项并列
+- `opening_slot_names` 是否还包含 `LabTest`、`Pathogen`、`ClinicalAttribute`、预后/疗效/统计类 `ClinicalFinding`
 
 ### 18.3 用生成病例跑 replay
 
