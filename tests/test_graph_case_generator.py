@@ -5,11 +5,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from simulator.case_schema import SlotTruth, VirtualPatientCase
 from simulator.graph_case_generator import (
     DiseaseAuditRecord,
     GraphCaseGenerator,
     GraphCaseGeneratorConfig,
+    build_case_type_sample_payload,
     load_disease_audit_reports,
+    render_case_type_sample_markdown,
 )
 
 
@@ -352,3 +355,187 @@ def test_generator_uses_real_target_node_id_for_slot_truth_map() -> None:
     }
     assert {truth.node_id for truth in low_cost_case.slot_truth_map.values()} == set(low_cost_case.slot_truth_map.keys())
     assert any(not truth.reveal_only_if_asked for truth in low_cost_case.slot_truth_map.values())
+
+
+# 验证生成器会去除同一 BMI 分层族中的互斥阳性证据，只保留优先级最高的一条。
+def test_generator_filters_mutually_exclusive_bmi_positive_slots() -> None:
+    record = _make_record(
+        "merged_node_obesity0001",
+        "肥胖",
+        [
+            _make_evidence("merged_node_bmi_001", "BMI>=37.5kg/m²", "detail", priority=2.0),
+            _make_evidence("merged_node_bmi_002", "32.5<=BMI<37.5kg/m²", "detail", priority=1.8),
+            _make_evidence("merged_node_bmi_003", "28.0<=BMI<32.5kg/m²", "detail", priority=1.6),
+            _make_evidence("merged_node_sym_101", "体重增加", "symptom", priority=1.5),
+            _make_evidence("merged_node_sym_102", "体重难以控制", "symptom", priority=1.4),
+        ],
+    )
+
+    result = GraphCaseGenerator().generate_from_records([record])
+    low_cost_case = next(case for case in result.cases if case.metadata.get("case_type") == "low_cost")
+
+    positive_names = list(low_cost_case.metadata.get("selected_positive_slots") or [])
+    bmi_names = [name for name in positive_names if "BMI" in name or "kg/m²" in name or "身体质量指数" in name]
+    truth_names = [
+        truth.aliases[0]
+        for truth in low_cost_case.slot_truth_map.values()
+        if truth.aliases and ("BMI" in truth.aliases[0] or "kg/m²" in truth.aliases[0] or "身体质量指数" in truth.aliases[0])
+    ]
+
+    assert bmi_names == ["BMI>=37.5kg/m²"]
+    assert truth_names == ["BMI>=37.5kg/m²"]
+
+
+# 验证 opening 会过滤掉不适合患者主动暴露的 detail 槽位。
+def test_generator_filters_non_patient_friendly_opening_slots() -> None:
+    record = _make_record(
+        "merged_node_opening0001",
+        "骨代谢病",
+        [
+            _make_evidence("merged_node_det_101", "骨密度测量部位", "detail", priority=2.0),
+            _make_evidence("merged_node_det_102", "减重持续时间", "detail", priority=1.9),
+            _make_evidence("merged_node_sym_201", "发热", "symptom", priority=1.8),
+            _make_evidence("merged_node_sym_202", "干咳", "symptom", priority=1.7),
+        ],
+    )
+
+    result = GraphCaseGenerator().generate_from_records([record])
+    low_cost_case = next(case for case in result.cases if case.metadata.get("case_type") == "low_cost")
+    opening_names = list(low_cost_case.metadata.get("opening_slot_names") or [])
+
+    assert "骨密度测量部位" not in opening_names
+    assert "减重持续时间" not in opening_names
+    assert any(name in opening_names for name in ("发热", "干咳"))
+
+
+# 验证被 opening 过滤掉的证据若仍在正向证据中，会保留在 truth map 且保持按问再答。
+def test_generator_keeps_filtered_opening_slots_in_truth_map() -> None:
+    record = _make_record(
+        "merged_node_exam0003",
+        "检查项保留病",
+        [
+            _make_evidence("merged_node_lab_201", "CD4+ T淋巴细胞计数", "lab", priority=2.0, relation_specificity=0.9),
+            _make_evidence("merged_node_lab_202", "CMV DNA阳性", "lab", priority=1.9, relation_specificity=0.95),
+            _make_evidence("merged_node_img_201", "胸部CT提示磨玻璃影", "imaging", priority=1.8, relation_specificity=0.92),
+        ],
+    )
+
+    result = GraphCaseGenerator().generate_from_records([record])
+    exam_case = next(case for case in result.cases if case.metadata.get("case_type") == "exam_driven")
+    opening_names = list(exam_case.metadata.get("opening_slot_names") or [])
+    cd4_truth = exam_case.slot_truth_map["merged_node_lab_201"]
+
+    assert "CD4+ T淋巴细胞计数" not in opening_names
+    assert cd4_truth.aliases == ["CD4+ T淋巴细胞计数"]
+    assert cd4_truth.reveal_only_if_asked is True
+
+
+# 验证检查驱动 opening 允许具体检查结果，但不会主动暴露纯病原体名。
+def test_generator_uses_exam_result_as_opening_but_not_plain_pathogen() -> None:
+    record = _make_record(
+        "merged_node_exam0004",
+        "CMV相关病",
+        [
+            _make_evidence("merged_node_lab_301", "CMV DNA阳性", "lab", priority=2.0, relation_specificity=0.95),
+            _make_evidence("merged_node_path_301", "巨细胞病毒", "pathogen", priority=1.9, relation_specificity=0.9),
+            _make_evidence("merged_node_img_301", "胸部CT提示磨玻璃影", "imaging", priority=1.8, relation_specificity=0.9),
+        ],
+    )
+
+    result = GraphCaseGenerator().generate_from_records([record])
+    exam_case = next(case for case in result.cases if case.metadata.get("case_type") == "exam_driven")
+    opening_names = list(exam_case.metadata.get("opening_slot_names") or [])
+
+    assert "CMV DNA阳性" in opening_names
+    assert "巨细胞病毒" not in opening_names
+
+
+# 验证可按四类病例各抽固定数量，供人工抽样检查。
+def test_build_case_type_sample_payload_draws_fixed_count_per_type() -> None:
+    cases = []
+    for case_type in ("ordinary", "low_cost", "exam_driven", "competitive"):
+        for index in range(6):
+            cases.append(
+                VirtualPatientCase(
+                    case_id=f"{case_type}_{index:02d}",
+                    title=f"{case_type}_{index}",
+                    chief_complaint="测试主诉",
+                    metadata={
+                        "case_type": case_type,
+                        "disease_id": f"merged_node_{case_type}_{index:02d}",
+                        "disease_name": f"{case_type}_{index}",
+                    },
+                )
+            )
+
+    payload = build_case_type_sample_payload(cases, sample_size_per_type=5, seed=7)
+
+    assert payload["sampled_case_count"] == 20
+    assert payload["requested_case_types"] == ["ordinary", "low_cost", "exam_driven", "competitive"]
+    for case_type in ("ordinary", "low_cost", "exam_driven", "competitive"):
+        assert len(payload["sampled_cases_by_type"][case_type]) == 5
+
+
+# 验证抽样结果可渲染成人工检查用 Markdown 摘要。
+def test_render_case_type_sample_markdown_includes_core_fields() -> None:
+    payload = build_case_type_sample_payload(
+        [
+            VirtualPatientCase(
+                case_id="ordinary_001",
+                title="普通病例 1",
+                chief_complaint="测试主诉",
+                behavior_style="cooperative",
+                red_flags=["呼吸困难"],
+                hidden_slots=["高危性行为"],
+                metadata={
+                    "case_type": "ordinary",
+                    "disease_id": "merged_node_ordinary001",
+                    "disease_name": "普通病",
+                    "opening_slot_names": ["发热", "干咳"],
+                    "selected_positive_slots": ["发热", "干咳"],
+                    "selected_negative_slots": ["盗汗"],
+                    "evidence_counts_by_group": {"symptom": 2, "risk": 1},
+                },
+                slot_truth_map={
+                    "merged_node_slot1": SlotTruth(node_id="merged_node_slot1", value=True, aliases=["发热"]),
+                    "merged_node_slot2": SlotTruth(node_id="merged_node_slot2", value=False, aliases=["盗汗"]),
+                },
+            ),
+            VirtualPatientCase(
+                case_id="low_cost_001",
+                title="低成本病例 1",
+                chief_complaint="测试主诉",
+                metadata={"case_type": "low_cost", "disease_id": "merged_node_low001", "disease_name": "低成本病"},
+            ),
+            VirtualPatientCase(
+                case_id="exam_driven_001",
+                title="检查驱动病例 1",
+                chief_complaint="测试主诉",
+                metadata={
+                    "case_type": "exam_driven",
+                    "disease_id": "merged_node_exam001",
+                    "disease_name": "检查病",
+                },
+            ),
+            VirtualPatientCase(
+                case_id="competitive_001",
+                title="竞争病例 1",
+                chief_complaint="测试主诉",
+                metadata={
+                    "case_type": "competitive",
+                    "disease_id": "merged_node_comp001",
+                    "disease_name": "竞争病",
+                },
+            ),
+        ]
+        * 5,
+        sample_size_per_type=5,
+        seed=11,
+    )
+
+    markdown = render_case_type_sample_markdown(payload)
+
+    assert "# 图谱病例抽样检查摘要" in markdown
+    assert "## ordinary" in markdown
+    assert "opening_slot_names: 发热、干咳" in markdown
+    assert "slot_truth_negative: 盗汗" in markdown

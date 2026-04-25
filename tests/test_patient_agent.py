@@ -48,3 +48,14 @@ def test_patient_agent_opens_case_from_proactive_slots() -> None:
     assert "发热" in opening.opening_text
     assert "干咳" in opening.opening_text
     assert opening.revealed_slot_ids == ["发热", "干咳"]
+
+
+# 验证 unknown fallback 使用不确定表述，而不是容易被误判为阴性的固定句式。
+def test_unknown_reply_is_uncertain_not_negative() -> None:
+    agent = VirtualPatientAgent(use_llm=False)
+    case = VirtualPatientCase(case_id="case3", title="test", slot_truth_map={})
+
+    reply = agent.answer_question("未命中节点", "有没有盗汗？", case)
+
+    assert reply.answer_text != "没有特别注意到。"
+    assert ("不太确定" in reply.answer_text) or ("不能确定" in reply.answer_text)

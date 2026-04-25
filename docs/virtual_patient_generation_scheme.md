@@ -13,6 +13,12 @@
 
 本文档描述的是当前仓库内已经实现并可运行的方案，而不是纯粹的未来设想。
 
+截至当前版本，图谱病例生成器已经包含一轮面向病例质量的小范围修复：
+
+- 对同一指标的互斥阈值阳性证据做去重，只保留一条
+- 对 opening slots 做 patient-friendly 过滤，避免把纯检查项目名、纯病原体名、测量部位、持续时间等表格化槽位主动暴露给首轮开场
+- 保留被过滤证据在 `slot_truth_map` 中的真值，只改变其是否主动暴露
+
 ## 2. 总体定位
 
 本项目的虚拟病人模块不追求“生成完整自然语言病例叙述文本”，而是采用“图谱骨架 + 受约束病人代理”的实现路线。
@@ -82,6 +88,7 @@ test_outputs/graph_audit/all_diseases_20260420_disease_aliases_only/
 - 图谱病例生成：
   - [simulator/graph_case_generator.py](/Users/loki/Workspace/GraduationDesign/simulator/graph_case_generator.py)
   - [scripts/generate_graph_virtual_patients.py](/Users/loki/Workspace/GraduationDesign/scripts/generate_graph_virtual_patients.py)
+  - [scripts/sample_graph_virtual_patients.py](/Users/loki/Workspace/GraduationDesign/scripts/sample_graph_virtual_patients.py)
 - 病例 schema：
   - [simulator/case_schema.py](/Users/loki/Workspace/GraduationDesign/simulator/case_schema.py)
 - 病人代理：
@@ -342,6 +349,7 @@ competitor_only_negative >= 1
 4. 按模板分别尝试生成 `ordinary / low_cost / exam_driven / competitive`
 5. 形成 `VirtualPatientCase`
 6. 写出 `cases.jsonl`、`cases.json`、`manifest.json`、`summary.md`
+7. 按病例类型重新抽样，写出人工复核用的 `sampled_cases_4x5.json` 与 `sampled_cases_4x5.md`
 
 ### 9.1 DiseaseProfile 中缓存的关键证据池
 
@@ -382,6 +390,60 @@ competitor_only_negative >= 1
 - 对应的 `SlotTruth.reveal_only_if_asked = false`
 
 因此，病人代理首轮发言时，会优先读取这些 opening slots 来组织自然语言开场。
+
+在当前版本中，opening 不是“谁先被选进正向证据就直接暴露”，而是会再经过一轮 patient-friendly 过滤。具体规则是：
+
+- 允许主动暴露：
+  - `symptom`
+  - `risk` 且 `acquisition_mode in {direct_ask, history_known}`
+  - 具体 `lab/imaging` 结果，例如带有 `阳性`、`升高`、`<`、`>`、`磨玻璃影`、`空洞` 等结果词的项目
+- 不允许主动暴露：
+  - `年龄`
+  - `身体质量指数 / BMI`
+  - `测量部位`
+  - `持续时间 / 减重持续时间`
+  - 纯检查项目名，如 `CD4+ T淋巴细胞计数`、`HIV RNA`
+  - 纯病原体名，如 `巨细胞病毒`、`刚地弓形虫`
+  - 过泛表达，如 `临床症状无改善`
+
+如果原始 opening 候选在过滤后为空，生成器会从正向证据里兜底挑选，优先级为：
+
+1. `symptom`
+2. `risk` 且 `acquisition_mode in {direct_ask, history_known}`
+3. 具体 `lab/imaging` 结果
+
+最多保留 3 个 opening slots；如果仍然找不到合适项，则交给病人代理回退到 `chief_complaint` 或保底开场句。
+
+### 9.3 正向证据的互斥清理
+
+为了避免图谱里同一指标的多个分层阈值同时出现在一个病例中，当前生成器会在 `_build_case()` 内先清理正向证据，再写入 `slot_truth_map`。
+
+当前已覆盖的互斥族包括：
+
+- BMI / 身体质量指数 / `kg/m²`
+- CD4
+- HIV RNA / 病毒载量
+- 血压 / 收缩压 / 舒张压
+- 空腹血糖 / 血糖 / HbA1c / 糖化血红蛋白
+- 甘油三酯
+- HDL
+- LDL
+- 总胆固醇
+- 年龄
+
+同一互斥族内只保留一条，排序优先级为：
+
+1. `priority` 更高
+2. `relation_specificity` 更高
+3. `target_name` 更长，也就是通常更具体的描述优先
+
+这样可以避免例如肥胖病例中同时出现：
+
+- `BMI>=37.5kg/m²`
+- `32.5<=BMI<37.5kg/m²`
+- `28.0<=BMI<32.5kg/m²`
+
+这类互斥阳性同时为真的问题。
 
 ## 10. 病人代理设计
 
@@ -432,8 +494,8 @@ competitor_only_negative >= 1
 
 如果系统问到病例骨架中没有的槽位，病人代理会返回：
 
-- 模糊风格：`说不上来，感觉不太明显。`
-- 普通风格：`没有特别注意到。`
+- 模糊风格：`说不上来，不能确定有没有。`
+- 普通风格：`这个我不太确定，没专门注意过。`
 
 这对应现实中的“病人并不知道自己不存在某检查结果”。
 
@@ -541,6 +603,22 @@ Replay 结果中已经新增：
 - 提供人工快速浏览摘要
 - 适合汇报或论文草稿阶段快速查看
 
+### 13.5 `sampled_cases_4x5.json`
+
+用途：
+
+- 按 `ordinary / low_cost / exam_driven / competitive` 四类各抽固定数量病例
+- 便于人工做小样本质检
+- 适合对比不同生成规则调整前后的病例差异
+
+### 13.6 `sampled_cases_4x5.md`
+
+用途：
+
+- 提供抽样病例的 Markdown 摘要
+- 便于直接检查 `opening_slot_names`、`selected_positive_slots`、`selected_negative_slots`
+- 便于发现 opening 不自然、正向证据互斥、竞争病例区分度不足等问题
+
 ## 14. 当前一轮实际输出
 
 截至当前版本，已经基于当前疾病审计目录生成一轮完整图谱病例：
@@ -555,6 +633,8 @@ test_outputs/simulator_cases/graph_cases_20260421/
 - `cases.json`
 - `manifest.json`
 - `summary.md`
+- `sampled_cases_4x5.json`
+- `sampled_cases_4x5.md`
 
 该轮结果共生成：
 
@@ -601,18 +681,36 @@ test_outputs/simulator_cases/graph_cases_20260421/
 
 `manifest.json` 可以直接回答这些问题，因此它不仅是工程调试文件，也是论文实验解释的重要依据。
 
+### 15.4 为什么还需要固定抽样输出
+
+`manifest.json` 更适合解释“生成成功或失败的结构原因”，但不适合直接判断病例自然度。
+
+因此当前实现又补了一层固定抽样输出：
+
+- 用固定随机种子
+- 每类病例固定抽 `5` 条
+- 同时输出 JSON 与 Markdown
+
+这样在每次重新生成病例后，都可以快速检查：
+
+- opening 是否还出现不自然的表格化槽位
+- 同一指标的互斥阳性是否被正确清理
+- competitive 病例的 shared / target-only / negative 证据是否仍然合理
+
 ## 16. 当前局限性
 
 当前方案虽然已经形成闭环，但仍有几个明确局限。
 
-### 16.1 opening slot 仍可能不够自然
+### 16.1 opening 自然度已改善，但 chief complaint 缓存仍可能保留旧式表达
 
-例如某些疾病的 opening 可能被 `年龄`、`HIV感染者` 等 detail/risk 节点占据，导致开场虽然来自骨架，但读起来不像真正主诉。
+当前版本已经对 opening slots 做了过滤，因此 `年龄`、`BMI`、纯病原体名、测量部位、持续时间等不自然槽位一般不会再主动暴露为首轮开场。
 
-这说明：
+但仍有两个剩余问题：
 
-- 骨架驱动开场已经建立
-- 但 opening slot 的筛选规则仍需进一步收紧
+- `chief_complaint` 作为缓存字段，可能仍保留一部分旧式模板表达
+- 某些疾病本身缺少足够自然的症状型低成本证据，因此 opening 虽然合规，但仍然偏弱
+
+这说明 opening 质量已经从“明显错误”转为“基本可用但仍需继续打磨”的阶段。
 
 ### 16.2 行为风格还不够丰富
 
@@ -687,7 +785,25 @@ conda run -n GraduationDesign python scripts/generate_graph_virtual_patients.py 
   --summary-file test_outputs/simulator_cases/graph_cases_20260421/summary.md
 ```
 
-### 18.2 用生成病例跑 replay
+### 18.2 重新按病例类型抽样做人工检查
+
+```bash
+conda run -n GraduationDesign python scripts/sample_graph_virtual_patients.py \
+  --cases-file test_outputs/simulator_cases/graph_cases_20260421/cases.json \
+  --output-file test_outputs/simulator_cases/graph_cases_20260421/sampled_cases_4x5.json \
+  --summary-file test_outputs/simulator_cases/graph_cases_20260421/sampled_cases_4x5.md \
+  --sample-size-per-type 5 \
+  --seed 42
+```
+
+建议每次改动图谱病例生成规则后，都按上面命令重新抽样一次，再人工检查：
+
+- `opening_slot_names`
+- `selected_positive_slots`
+- `selected_negative_slots`
+- `slot_truth_positive`
+
+### 18.3 用生成病例跑 replay
 
 ```bash
 NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/run_batch_replay.py \
@@ -703,6 +819,7 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/run_bat
 
 - [simulator/graph_case_generator.py](/Users/loki/Workspace/GraduationDesign/simulator/graph_case_generator.py)
 - [scripts/generate_graph_virtual_patients.py](/Users/loki/Workspace/GraduationDesign/scripts/generate_graph_virtual_patients.py)
+- [scripts/sample_graph_virtual_patients.py](/Users/loki/Workspace/GraduationDesign/scripts/sample_graph_virtual_patients.py)
 - [simulator/case_schema.py](/Users/loki/Workspace/GraduationDesign/simulator/case_schema.py)
 - [simulator/patient_agent.py](/Users/loki/Workspace/GraduationDesign/simulator/patient_agent.py)
 - [simulator/replay_engine.py](/Users/loki/Workspace/GraduationDesign/simulator/replay_engine.py)
@@ -714,10 +831,11 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/run_bat
 - [cases.jsonl](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260421/cases.jsonl)
 - [manifest.json](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260421/manifest.json)
 - [summary.md](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260421/summary.md)
+- [sampled_cases_4x5.json](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260421/sampled_cases_4x5.json)
+- [sampled_cases_4x5.md](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260421/sampled_cases_4x5.md)
 
 ### 19.3 配套说明
 
 - [simulator/README.md](/Users/loki/Workspace/GraduationDesign/simulator/README.md)
 - [README.md](/Users/loki/Workspace/GraduationDesign/README.md)
 - [phase2_changelog.md](/Users/loki/Workspace/GraduationDesign/docs/phase2_changelog.md)
-

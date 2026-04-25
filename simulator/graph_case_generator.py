@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import random
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -43,6 +44,26 @@ CASE_TYPE_ORDER = ("ordinary", "low_cost", "exam_driven", "competitive")
 POSITIVE_SLOT_LIMIT = 6
 COMPETITIVE_NEGATIVE_SLOT_LIMIT = 3
 DEFAULT_BEHAVIOR_STYLE = "cooperative"
+OPENING_RESULT_MARKERS = (
+    "阳性",
+    "阴性",
+    "升高",
+    "降低",
+    "减少",
+    "增多",
+    "异常",
+    "<",
+    ">",
+    "≤",
+    "≥",
+    "检出",
+    "提示",
+    "磨玻璃影",
+    "空洞",
+    "结节",
+    "浸润",
+    "溃疡",
+)
 
 
 @dataclass(frozen=True)
@@ -136,6 +157,151 @@ class GraphCaseGenerationResult:
     cases: list[VirtualPatientCase]
     manifest: dict[str, Any]
     summary_markdown: str
+
+
+def sample_cases_by_type(
+    cases: Sequence[VirtualPatientCase],
+    *,
+    sample_size_per_type: int = 5,
+    seed: int = 42,
+    case_types: Sequence[str] | None = None,
+) -> dict[str, list[VirtualPatientCase]]:
+    """按病例类型分组抽样，便于人工检查。"""
+
+    requested_case_types = tuple(case_types or CASE_TYPE_ORDER)
+    rng = random.Random(seed)
+    grouped_cases: dict[str, list[VirtualPatientCase]] = {case_type: [] for case_type in requested_case_types}
+
+    for case in cases:
+        case_type = str(case.metadata.get("case_type") or "")
+        if case_type in grouped_cases:
+            grouped_cases[case_type].append(case)
+
+    sampled: dict[str, list[VirtualPatientCase]] = {}
+    for case_type in requested_case_types:
+        pool = sorted(grouped_cases.get(case_type) or [], key=lambda item: item.case_id)
+        if len(pool) < sample_size_per_type:
+            raise ValueError(
+                f"病例类型 {case_type} 可用数量不足：需要 {sample_size_per_type}，实际只有 {len(pool)}"
+            )
+        sampled[case_type] = rng.sample(pool, sample_size_per_type)
+
+    return sampled
+
+
+def build_case_type_sample_payload(
+    cases: Sequence[VirtualPatientCase],
+    *,
+    sample_size_per_type: int = 5,
+    seed: int = 42,
+    source_file: Path | None = None,
+    case_types: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    """构造按病例类型抽样后的可落盘 JSON 负载。"""
+
+    sampled_cases = sample_cases_by_type(
+        cases,
+        sample_size_per_type=sample_size_per_type,
+        seed=seed,
+        case_types=case_types,
+    )
+    ordered_case_types = tuple(case_types or CASE_TYPE_ORDER)
+    return {
+        "source_file": str(source_file) if source_file is not None else None,
+        "sample_size_per_type": sample_size_per_type,
+        "seed": seed,
+        "requested_case_types": list(ordered_case_types),
+        "available_case_count_by_type": {
+            case_type: sum(1 for case in cases if str(case.metadata.get("case_type") or "") == case_type)
+            for case_type in ordered_case_types
+        },
+        "sampled_case_count": sum(len(items) for items in sampled_cases.values()),
+        "sampled_cases_by_type": {
+            case_type: [asdict(case) for case in sampled_cases.get(case_type) or []]
+            for case_type in ordered_case_types
+        },
+    }
+
+
+def write_case_type_sample_payload(payload: dict[str, Any], output_file: Path) -> None:
+    """将病例类型抽样结果写入 JSON 文件。"""
+
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    output_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def render_case_type_sample_markdown(payload: dict[str, Any]) -> str:
+    """将病例类型抽样结果渲染成人工检查用 Markdown。"""
+
+    requested_case_types = [str(item) for item in payload.get("requested_case_types") or []]
+    available_counts = payload.get("available_case_count_by_type") or {}
+    sampled_cases_by_type = payload.get("sampled_cases_by_type") or {}
+
+    lines = [
+        "# 图谱病例抽样检查摘要",
+        "",
+        f"- source_file: {payload.get('source_file') or '-'}",
+        f"- sample_size_per_type: {int(payload.get('sample_size_per_type') or 0)}",
+        f"- seed: {int(payload.get('seed') or 0)}",
+        f"- sampled_case_count: {int(payload.get('sampled_case_count') or 0)}",
+        "",
+        "## 抽样概览",
+        "",
+        "| case_type | available_count | sampled_count |",
+        "| --- | ---: | ---: |",
+    ]
+
+    for case_type in requested_case_types:
+        sampled_items = sampled_cases_by_type.get(case_type) or []
+        lines.append(
+            f"| {case_type} | {int(available_counts.get(case_type) or 0)} | {len(sampled_items)} |"
+        )
+
+    for case_type in requested_case_types:
+        sampled_items = sampled_cases_by_type.get(case_type) or []
+        lines.extend(
+            [
+                "",
+                f"## {case_type}",
+                "",
+            ]
+        )
+
+        if not sampled_items:
+            lines.extend(["- 无样本", ""])
+            continue
+
+        for index, case in enumerate(sampled_items, start=1):
+            metadata = case.get("metadata") or {}
+            lines.extend(
+                [
+                    f"### {index}. {case.get('title') or '-'}",
+                    "",
+                    f"- case_id: `{case.get('case_id') or '-'}`",
+                    f"- disease_name: {metadata.get('disease_name') or '-'}",
+                    f"- disease_id: `{metadata.get('disease_id') or '-'}`",
+                    f"- behavior_style: `{case.get('behavior_style') or '-'}`",
+                    f"- chief_complaint_cache: {case.get('chief_complaint') or '-'}",
+                    f"- opening_slot_names: {_join_markdown_values(metadata.get('opening_slot_names') or [])}",
+                    f"- selected_positive_slots: {_join_markdown_values(metadata.get('selected_positive_slots') or [])}",
+                    f"- selected_negative_slots: {_join_markdown_values(metadata.get('selected_negative_slots') or [])}",
+                    f"- red_flags: {_join_markdown_values(case.get('red_flags') or [])}",
+                    f"- hidden_slots: {_join_markdown_values(case.get('hidden_slots') or [])}",
+                    f"- slot_truth_positive: {_join_markdown_values(_collect_slot_truth_names(case, expected_value=True))}",
+                    f"- slot_truth_negative: {_join_markdown_values(_collect_slot_truth_names(case, expected_value=False))}",
+                    f"- evidence_counts_by_group: {_render_group_count_markdown(metadata.get('evidence_counts_by_group') or {})}",
+                    "",
+                ]
+            )
+
+    return "\n".join(lines)
+
+
+def write_case_type_sample_markdown(payload: dict[str, Any], output_file: Path) -> None:
+    """将病例类型抽样 Markdown 摘要写入文件。"""
+
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    output_file.write_text(render_case_type_sample_markdown(payload), encoding="utf-8")
 
 
 def load_disease_audit_reports(audit_root: Path) -> tuple[list[DiseaseAuditRecord], list[dict[str, Any]]]:
@@ -699,6 +865,8 @@ class GraphCaseGenerator:
     ) -> VirtualPatientCase:
         """将选中的证据列表渲染成 VirtualPatientCase。"""
 
+        positive_items = _filter_conflicting_positive_items(positive_items)
+        opening_items = _filter_opening_items(opening_items, positive_items)
         slot_truth_map: dict[str, SlotTruth] = {}
         opening_node_ids = [
             str(item.get("target_node_id") or "")
@@ -811,6 +979,46 @@ def render_generation_summary_markdown(manifest: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _join_markdown_values(values: Sequence[Any]) -> str:
+    items = [str(value).strip() for value in values if str(value).strip()]
+    return "、".join(items) if items else "-"
+
+
+def _collect_slot_truth_names(case: dict[str, Any], *, expected_value: bool) -> list[str]:
+    names: list[str] = []
+    slot_truth_map = case.get("slot_truth_map") or {}
+    if not isinstance(slot_truth_map, dict):
+        return names
+
+    for truth in slot_truth_map.values():
+        if not isinstance(truth, dict):
+            continue
+        if truth.get("value") is not expected_value:
+            continue
+        aliases = truth.get("aliases") or []
+        alias_names = [str(alias).strip() for alias in aliases if str(alias).strip()]
+        if alias_names:
+            names.append(alias_names[0])
+            continue
+        node_id = str(truth.get("node_id") or "").strip()
+        if node_id:
+            names.append(node_id)
+
+    return names
+
+
+def _render_group_count_markdown(group_counts: dict[str, Any]) -> str:
+    if not isinstance(group_counts, dict):
+        return "-"
+    parts = []
+    for group in STANDARD_GROUPS:
+        value = int(group_counts.get(group) or 0)
+        if value <= 0:
+            continue
+        parts.append(f"{group}={value}")
+    return "，".join(parts) if parts else "-"
+
+
 def _build_slot_truth(item: dict[str, Any], value: bool) -> SlotTruth:
     """从证据条目构造 SlotTruth。"""
 
@@ -858,6 +1066,134 @@ def _normalize_text(value: str) -> str:
     text = value.strip().lower()
     text = re.sub(r"[\s\u3000]+", "", text)
     return text
+
+
+def _infer_conflict_family(item: dict[str, Any]) -> str:
+    """推断阳性证据所属的互斥分层族；空字符串表示不参与互斥过滤。"""
+
+    name = _normalize_text(str(item.get("target_name") or ""))
+    if not name:
+        return ""
+
+    if "bmi" in name or "身体质量指数" in name or "kg/m²" in name or "kg/m2" in name:
+        return "bmi"
+    if "cd4" in name:
+        return "cd4"
+    if "hivrna" in name or "病毒载量" in name:
+        return "hiv_rna"
+
+    if "收缩压" in name:
+        return "blood_pressure_systolic"
+    if "舒张压" in name:
+        return "blood_pressure_diastolic"
+    if "血压" in name:
+        return "blood_pressure"
+
+    if "糖化血红蛋白" in name or "hba1c" in name:
+        return "hba1c"
+    if "空腹血糖" in name:
+        return "fasting_glucose"
+    if "餐后2h血糖" in name or "餐后2小时血糖" in name:
+        return "postprandial_glucose"
+    if "血糖" in name:
+        return "glucose"
+
+    if "甘油三酯" in name:
+        return "triglyceride"
+    if "高密度脂蛋白" in name or "hdl" in name:
+        return "hdl"
+    if "低密度脂蛋白" in name or "ldl" in name:
+        return "ldl"
+    if "总胆固醇" in name:
+        return "total_cholesterol"
+    if "年龄" in name:
+        return "age"
+
+    return ""
+
+
+def _conflict_item_sort_key(item: dict[str, Any]) -> tuple[float, float, int, str]:
+    """互斥证据保留顺序：priority 更高，其次 specificity 更高，再次名称更具体。"""
+
+    name = str(item.get("target_name") or "")
+    return (
+        -float(item.get("priority") or 0.0),
+        -float(item.get("relation_specificity") or 0.0),
+        -len(name),
+        name,
+    )
+
+
+def _is_disallowed_opening_name(name: str, item: dict[str, Any]) -> bool:
+    """判断证据名称是否属于不适合患者主动开场的槽位。"""
+
+    normalized_name = _normalize_text(name)
+    group = str(item.get("group") or "")
+
+    if group == "pathogen":
+        return True
+    if group == "detail":
+        return True
+
+    if "年龄" in normalized_name:
+        return True
+    if "bmi" in normalized_name or "身体质量指数" in normalized_name or "kg/m²" in normalized_name or "kg/m2" in normalized_name:
+        return True
+    if "测量部位" in normalized_name:
+        return True
+    if "持续时间" in normalized_name:
+        return True
+
+    if normalized_name in {"异常", "感染", "检查", "筛查", "诊断", "临床症状无改善"}:
+        return True
+
+    plain_exam_names = {
+        "cd4+t淋巴细胞计数",
+        "cd4计数",
+        "hivrna",
+        "胸部ct",
+        "血常规",
+        "骨密度",
+        "病毒载量",
+    }
+    if normalized_name in plain_exam_names:
+        return True
+
+    if group in {"lab", "imaging"} and not _looks_like_concrete_exam_result(name):
+        return True
+
+    return False
+
+
+def _looks_like_concrete_exam_result(name: str) -> bool:
+    """判断是否像“可以直接说给医生听”的具体检查结果，而不是纯检查项目名。"""
+
+    raw_name = name.strip()
+    normalized_name = _normalize_text(raw_name)
+    if not raw_name:
+        return False
+
+    if any(marker in raw_name for marker in OPENING_RESULT_MARKERS):
+        return True
+
+    if any(marker in normalized_name for marker in (_normalize_text(marker) for marker in OPENING_RESULT_MARKERS)):
+        return True
+
+    if re.search(r"(?:<=|>=|<|>|≤|≥)", raw_name):
+        return True
+
+    if normalized_name in {
+        "cd4+t淋巴细胞计数",
+        "cd4计数",
+        "hivrna",
+        "病毒载量",
+        "胸部ct",
+        "血常规",
+        "骨密度",
+    }:
+        return False
+
+    return False
 
 
 def _evidence_key(item: dict[str, Any]) -> str:
@@ -913,6 +1249,120 @@ def _is_low_cost_evidence(item: dict[str, Any]) -> bool:
 
 def _is_chief_complaint_friendly(item: dict[str, Any]) -> bool:
     return _is_low_cost_evidence(item)
+
+
+def _filter_conflicting_positive_items(items: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """过滤同一互斥分层族中的重复阳性证据，只保留一个。"""
+
+    item_by_key = {_evidence_key(item): dict(item) for item in items}
+    best_keys_by_family: dict[str, str] = {}
+    for item in items:
+        family = _infer_conflict_family(item)
+        if not family:
+            continue
+
+        current_best_key = best_keys_by_family.get(family)
+        candidate_key = _evidence_key(item)
+        if current_best_key is None:
+            best_keys_by_family[family] = candidate_key
+            continue
+
+        current_best_item = item_by_key[current_best_key]
+        if _conflict_item_sort_key(item) < _conflict_item_sort_key(current_best_item):
+            best_keys_by_family[family] = candidate_key
+
+    filtered: list[dict[str, Any]] = []
+    emitted_families: set[str] = set()
+    for item in items:
+        family = _infer_conflict_family(item)
+        if not family:
+            filtered.append(dict(item))
+            continue
+
+        if family in emitted_families:
+            continue
+        if _evidence_key(item) != best_keys_by_family.get(family):
+            continue
+
+        filtered.append(dict(item))
+        emitted_families.add(family)
+
+    return filtered
+
+
+def _filter_opening_items(
+    opening_items: Sequence[dict[str, Any]],
+    positive_items: Sequence[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """过滤不适合患者主动暴露的 opening 证据，并在必要时兜底。"""
+
+    positive_item_by_key = {_evidence_key(item): dict(item) for item in positive_items}
+    filtered_opening_items: list[dict[str, Any]] = []
+    for item in opening_items:
+        key = _evidence_key(item)
+        positive_item = positive_item_by_key.get(key)
+        if positive_item is None:
+            continue
+        if not _is_opening_eligible(positive_item):
+            continue
+        filtered_opening_items.append(positive_item)
+
+    filtered_opening_items = _limit_unique_items(filtered_opening_items, limit=3)
+    if filtered_opening_items:
+        return filtered_opening_items
+
+    fallback_groups = [
+        lambda item: str(item.get("group") or "") == "symptom",
+        lambda item: (
+            str(item.get("group") or "") == "risk"
+            and str(item.get("acquisition_mode") or "") in LOW_COST_ACQUISITION_MODES
+        ),
+        lambda item: (
+            str(item.get("group") or "") in {"lab", "imaging"}
+            and _looks_like_concrete_exam_result(str(item.get("target_name") or ""))
+        ),
+    ]
+    fallback_items: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    for matcher in fallback_groups:
+        for item in positive_items:
+            key = _evidence_key(item)
+            if key in seen_keys:
+                continue
+            if not _is_opening_eligible(item):
+                continue
+            if not matcher(item):
+                continue
+            fallback_items.append(dict(item))
+            seen_keys.add(key)
+            if len(fallback_items) >= 3:
+                return fallback_items
+
+    return fallback_items
+
+
+def _is_opening_eligible(item: dict[str, Any]) -> bool:
+    """判断某条证据是否适合在患者首轮开场中主动暴露。"""
+
+    name = str(item.get("target_name") or "").strip()
+    if not name:
+        return False
+
+    if _is_disallowed_opening_name(name, item):
+        return False
+
+    group = str(item.get("group") or "")
+    acquisition_mode = str(item.get("acquisition_mode") or "")
+    if group == "symptom":
+        return True
+
+    if group == "risk" and acquisition_mode in LOW_COST_ACQUISITION_MODES:
+        return True
+
+    if group in {"lab", "imaging"} and _looks_like_concrete_exam_result(name):
+        return True
+
+    return False
 
 
 def _is_exam_evidence(item: dict[str, Any]) -> bool:

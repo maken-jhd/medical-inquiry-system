@@ -196,9 +196,9 @@ class VirtualPatientAgent:
             return PatientReply(llm_answer, confidence=0.4 if case.behavior_style == "vague" else 0.5)
 
         if case.behavior_style == "vague":
-            return PatientReply("说不上来，感觉不太明显。", confidence=0.4)
+            return PatientReply("说不上来，不能确定有没有。", confidence=0.4)
 
-        return PatientReply("没有特别注意到。", confidence=0.5)
+        return PatientReply("这个我不太确定，没专门注意过。", confidence=0.5)
 
     def _try_generate_opening_with_llm(
         self,
