@@ -34,6 +34,18 @@ class EvidenceParserConfig:
             "腹泻": ["腹泻", "拉肚子", "稀便"],
             "皮疹": ["皮疹", "红疹", "起疹子"],
             "体重下降": ["体重下降", "消瘦", "变瘦"],
+            "畏光": ["畏光", "怕光"],
+            "视力下降": ["视力下降", "视力模糊", "看东西模糊"],
+            "嗜睡": ["嗜睡", "老是想睡", "总想睡觉"],
+            "精神错乱": ["精神错乱", "意识混乱", "神志不清"],
+            "认知异常": ["认知异常", "记性差", "记忆力下降", "痴呆"],
+            "吞咽困难": ["吞咽困难", "吞东西困难"],
+            "胸痛": ["胸痛", "胸口痛"],
+            "咯血": ["咯血", "咳血"],
+            "步态异常": ["步态异常", "走路不稳"],
+            "言语异常": ["言语异常", "说话不清", "说话含糊"],
+            "HIV感染": ["HIV感染", "HIV感染者", "艾滋病", "艾滋病患者"],
+            "免疫功能低下": ["免疫功能低下", "免疫力低", "免疫力比较低"],
             "高危性行为": ["高危性行为", "无保护性行为", "不安全性行为"],
             "输血史": ["输血史", "输过血"],
         }
@@ -59,7 +71,9 @@ class EvidenceParser:
     ) -> A1ExtractionResult:
         if self.llm_client is not None and self.llm_client.is_available() and self.config.use_llm_extractor:
             try:
-                return self._run_a1_with_llm(patient_input, known_feature_names)
+                llm_result = self._run_a1_with_llm(patient_input, known_feature_names)
+                if len(llm_result.key_features) > 0:
+                    return llm_result
             except Exception:
                 if not self.config.fallback_to_rules:
                     raise
@@ -73,6 +87,9 @@ class EvidenceParser:
         action: MctsAction,
     ) -> A4DeductiveResult:
         target_name = action.target_node_name
+
+        # 先把注意力聚焦到包含 target 的短分句，再识别直接短答、否定、模糊和支持性片段，
+        # 避免整句里其他无关描述污染当前目标证据判断。
         focused_spans = self._collect_target_relevant_spans(patient_text, target_name)
         direct_reply = self._classify_direct_reply(patient_text)
         negation_span = self._extract_target_span(
@@ -97,6 +114,8 @@ class EvidenceParser:
             supporting_span,
         )
 
+        # reasoning 只负责解释本次判断为什么是 exist / non_exist / unknown，
+        # 方便后续 evidence_state、audit 和前端复盘直接复用。
         if existence == "non_exist":
             reasoning = f"患者回答中出现了针对“{target_name}”的否定表达。"
         elif existence == "exist" and certainty == "doubt":
@@ -106,6 +125,7 @@ class EvidenceParser:
         else:
             reasoning = f"当前回答不足以对“{target_name}”形成明确判断。"
 
+        # 若同一回答里同时出现支持与否定，先打上 contradiction 标记，供后续 judge/router 更保守处理。
         contradiction_detected = bool(negation_span and supporting_span and negation_span != supporting_span)
 
         return A4DeductiveResult(
@@ -141,12 +161,16 @@ class EvidenceParser:
         mentioned_results = self._extract_mentioned_exam_results(patient_text, mentioned_tests, exam_kind)
         mentioned_exam_kinds = self._infer_exam_kinds_from_mentions(mentioned_tests, mentioned_results)
 
+        # 一旦患者明确说出了检查名称或结果，即便没说“做过”，也可合理推断为 done。
         if availability == "unknown" and (len(mentioned_tests) > 0 or len(mentioned_results) > 0):
             availability = "done"
 
         needs_followup = False
         followup_reason = ""
 
+        # exam_context 的 follow-up 触发条件分两类：
+        # - 知道做过，但还没说清具体结果
+        # - 连是否做过都说不清，需要先澄清 availability
         if availability == "done" and len(mentioned_results) == 0:
             needs_followup = True
             followup_reason = (
@@ -193,6 +217,7 @@ class EvidenceParser:
     ) -> List[SlotUpdate]:
         updates: List[SlotUpdate] = []
 
+        # 只有“做过检查”且给出了可解析结果时，才尝试把回答映射回具体证据节点。
         if exam_result.availability != "done" or len(exam_result.mentioned_results) == 0:
             return updates
 
@@ -205,6 +230,8 @@ class EvidenceParser:
             if not isinstance(candidate, dict):
                 continue
 
+            # match 会把自由文本结果压成 true/false + certain/uncertain，
+            # 让后续状态机能像普通 A4 一样消费它。
             match = self._match_exam_result_to_candidate(exam_result, candidate)
 
             if match is None:
@@ -238,6 +265,7 @@ class EvidenceParser:
             )
 
             if len(updates) >= 3:
+                # 一次 exam_context 回答最多回填几个高置信候选，避免“一句话误命中太多节点”。
                 break
 
         return updates
@@ -251,6 +279,14 @@ class EvidenceParser:
         current_hypothesis: HypothesisScore | None,
         alternatives: list[HypothesisScore],
     ) -> DeductiveDecision:
+        if self._should_skip_llm_deductive_judge(patient_context, action, answer_interpretation):
+            return self._build_rule_based_deductive_decision(
+                action,
+                answer_interpretation,
+                current_hypothesis,
+                alternatives,
+            )
+
         if self.llm_client is not None and self.llm_client.is_available() and self.config.use_llm_deductive_judge:
             try:
                 payload = self.llm_client.run_structured_prompt(
@@ -273,6 +309,32 @@ class EvidenceParser:
             answer_interpretation,
             current_hypothesis,
             alternatives,
+        )
+
+    # 明确短答的 targeted verification 通常不需要再走一次 LLM judge，规则决策即可支撑后续路由。
+    def _should_skip_llm_deductive_judge(
+        self,
+        patient_context: PatientContext,
+        action: MctsAction,
+        answer_interpretation: A4DeductiveResult,
+    ) -> bool:
+        if action.action_type != "verify_evidence":
+            return False
+
+        if bool(answer_interpretation.metadata.get("has_contradiction", False)):
+            return False
+
+        direct_reply = str(answer_interpretation.metadata.get("direct_reply") or "").strip()
+        if direct_reply in {"positive", "negative", "uncertain"}:
+            return True
+
+        normalized_text = patient_context.raw_text.strip()
+        if len(normalized_text) > 18:
+            return False
+
+        return (
+            answer_interpretation.existence in {"exist", "non_exist", "unknown"}
+            and answer_interpretation.certainty in {"confident", "doubt"}
         )
 
     # 将 A4 演绎分析结果转换为可写入状态机的槽位更新。
@@ -428,6 +490,7 @@ class EvidenceParser:
             )
             normalized_names.add(feature.normalized_name)
 
+        # 再用手工词典从患者原话中补漏，主要覆盖高频症状、风险因素和宿主信息。
         for normalized_name, aliases in self.config.feature_aliases.items():
             for alias in aliases:
                 if alias in patient_text:
@@ -447,6 +510,8 @@ class EvidenceParser:
                     normalized_names.add(normalized_name)
                     break
 
+        # 最后再扫一遍上游传入的 known_feature_names，
+        # 这样对“上一轮已经关注过的节点”会更敏感，不容易漏掉患者直接复述的原词。
         for feature_name in candidate_names:
             if feature_name in normalized_names:
                 continue
@@ -497,6 +562,7 @@ class EvidenceParser:
 
         stripped_text = patient_text.strip()
 
+        # 先处理几类非常短、语义高度稳定的回答，减少后续模式判断的歧义。
         if stripped_text in {"有", "有的", "是的", "会", "存在"}:
             return "exist", "confident"
 
@@ -506,6 +572,8 @@ class EvidenceParser:
         if any(phrase in stripped_text for phrase in generic_unknown_phrases):
             return "unknown", "doubt"
 
+        # 接着判断整句级否定，再判断命中词附近的局部否定/模糊语气，
+        # 尽量把“没有发热，但有点咳嗽”这类句子识别得更稳。
         if any(re.search(pattern, stripped_text) is not None for pattern in negation_patterns):
             return "non_exist", "confident"
 
@@ -557,12 +625,15 @@ class EvidenceParser:
             "正常",
         )
 
+        # 明确没做过的表达优先级最高，避免“没做，但医生提到 CT”被误判为 done。
         if any(pattern in normalized for pattern in not_done_patterns):
             return "not_done"
 
+        # 其次识别“做过 / 报告 / 阳性 / 异常”等 done 线索。
         if any(pattern in normalized for pattern in done_patterns):
             return "done"
 
+        # 如果没明确说 done/not_done，但已经提到具体检查名，也大概率代表做过。
         if len(self._extract_mentioned_tests(patient_text, exam_kind)) > 0:
             return "done"
 
@@ -611,6 +682,7 @@ class EvidenceParser:
         mentioned_tests: Sequence[str],
         exam_kind: str,
     ) -> List[ExamMentionedResult]:
+        # 先按自然分句切开，再逐句判断是否包含结果关键词或隐式数值结果。
         clauses = [
             clause.strip()
             for clause in re.split(r"[，。！？；;,.!\n]", patient_text)
@@ -648,6 +720,7 @@ class EvidenceParser:
             if not has_result_keyword and not has_numeric_result:
                 continue
 
+            # 每条结果分句都尽量绑定一个 test_name，并归一成 positive/negative/high/low。
             test_name = self._choose_result_test_name(clause, mentioned_tests, exam_kind)
             normalized_result = self._classify_exam_result_text(f"{test_name} {clause}")
             result = ExamMentionedResult(
@@ -768,6 +841,8 @@ class EvidenceParser:
 
         value = numbers[0]
 
+        # 这里只做最常见、最临床相关的阈值粗分类，
+        # 目标不是替代完整报告解析，而是让“CD4 150”“PaO2 68”能顺利进入槽位。
         if any(keyword in normalized_text for keyword in ("cd4", "t淋巴")):
             if value < 200:
                 return "low"
@@ -941,6 +1016,7 @@ class EvidenceParser:
         next_stage = str(payload.get("next_stage", "A3"))
         decision_type = str(payload.get("decision_type", "need_more_information"))
 
+        # 先把 LLM 输出收敛到系统允许的枚举，避免上游判断分支被自由文本打穿。
         if decision_type not in {
             "confirm_hypothesis",
             "exclude_hypothesis",
@@ -953,6 +1029,8 @@ class EvidenceParser:
         if next_stage not in {"A1", "A2", "A3", "A4", "STOP", "FALLBACK"}:
             next_stage = "A3"
 
+        # supporting/negation/uncertain span 继续挂到 metadata，
+        # 这样 router、audit 和前端都能追溯本轮判断是基于哪段患者原话。
         return DeductiveDecision(
             existence=str(payload.get("existence", answer_interpretation.existence)),
             certainty=str(payload.get("certainty", answer_interpretation.certainty)),
@@ -982,9 +1060,12 @@ class EvidenceParser:
     ) -> DeductiveDecision:
         margin = 0.0
 
+        # margin 只在“当前主假设已存在且存在 alternatives”时才有意义，
+        # 用来区分“已确认关键证据”后是直接 STOP 还是继续 A3。
         if current_hypothesis is not None and len(alternatives) > 0:
             margin = current_hypothesis.score - max(item.score for item in alternatives)
 
+        # 明确阳性：支持当前路径；若主假设优势足够明显，可给出 STOP 倾向。
         if answer_interpretation.existence == "exist" and answer_interpretation.certainty == "confident":
             next_stage = "STOP" if current_hypothesis is not None and margin >= 1.0 else "A3"
             return DeductiveDecision(
@@ -1004,6 +1085,7 @@ class EvidenceParser:
                 },
             )
 
+        # 明确阴性：当前关键证据被反驳，优先退回 A2 重整 hypothesis 排名。
         if answer_interpretation.existence == "non_exist" and answer_interpretation.certainty == "confident":
             return DeductiveDecision(
                 existence="non_exist",
@@ -1023,6 +1105,7 @@ class EvidenceParser:
                 },
             )
 
+        # 模糊阳性：保留当前假设，但继续 A3 复核，不急着终止路径。
         if answer_interpretation.existence == "exist" and answer_interpretation.certainty == "doubt":
             return DeductiveDecision(
                 existence="exist",
@@ -1040,6 +1123,7 @@ class EvidenceParser:
                 },
             )
 
+        # 模糊阴性：不直接排除，先把它当成“需要更多信息”的矛盾分析入口。
         if answer_interpretation.existence == "non_exist" and answer_interpretation.certainty == "doubt":
             return DeductiveDecision(
                 existence="non_exist",

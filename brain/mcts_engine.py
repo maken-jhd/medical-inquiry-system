@@ -94,12 +94,16 @@ class MctsEngine:
         current = tree.get_node(tree.root_id)
 
         while True:
+            # 当前节点自己已经终止时，说明这条分支不再值得继续扩展。
             if current.terminal:
                 return None
 
+            # 没有 child 就是真正可扩展的叶子，直接返回给 expand + rollout 使用。
             if len(current.children_ids) == 0:
                 return current
 
+            # tree policy 只在“仍可继续”的孩子里挑选；
+            # 已 terminal 的 child 不再参与 UCT 打分。
             children = [
                 tree.get_node(child_id)
                 for child_id in current.children_ids
@@ -107,6 +111,7 @@ class MctsEngine:
             ]
 
             if len(children) == 0:
+                # 如果所有孩子都已经终止，把当前节点也标记为 terminal，避免后续反复访问空分支。
                 tree.mark_terminal(current.node_id, {"terminal_reason": "all_children_terminal"})
                 return None
 
@@ -120,6 +125,7 @@ class MctsEngine:
                 ),
             )[0]
 
+            # 一旦遇到未访问过的节点，或它本身还是叶子，就交给 rollout 阶段处理。
             if current.visit_count == 0 or len(current.children_ids) == 0:
                 return current
 
@@ -134,15 +140,19 @@ class MctsEngine:
         created: list[TreeNode] = []
 
         for index, action in enumerate(actions):
+            # 扩展宽度由 max_child_nodes 控制，避免单个叶子分叉过多拖慢 rollout。
             if index >= self.config.max_child_nodes:
                 break
 
             child_id = f"{parent.node_id}::{action.action_id}"
 
             if child_id in tree.nodes:
+                # 同一动作已经扩过时直接复用，避免重复创建节点打乱 visit/value 统计。
                 created.append(tree.get_node(child_id))
                 continue
 
+            # child 节点只保存继续搜索所需的最小元数据：
+            # 动作本体、目标节点、prior 分数和当前 hypothesis 绑定关系。
             child = TreeNode(
                 node_id=child_id,
                 state_signature=child_id,
@@ -224,6 +234,7 @@ class MctsEngine:
             child = tree.get_node(child_id)
             action = child.metadata.get("action")
 
+            # 根节点选真实下一问时，显式排除已经问过的 target，减少重复追问。
             if isinstance(action, MctsAction) and action.target_node_id in excluded_ids:
                 continue
 
@@ -232,6 +243,8 @@ class MctsEngine:
         if len(children) == 0:
             return None
 
+        # 根节点选择更偏 exploitation：
+        # 先看 average_value，再看 visit_count，最后才看 prior_score。
         best_child = sorted(
             children,
             key=lambda item: (

@@ -22,7 +22,7 @@ from simulator.graph_case_generator import (  # noqa: E402
 DEFAULT_AUDIT_ROOT = (
     PROJECT_ROOT / "test_outputs" / "graph_audit" / "all_diseases_20260420_disease_aliases_only"
 )
-DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "test_outputs" / "simulator_cases" / "graph_cases_generated"
+DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "test_outputs" / "simulator_cases" / "graph_cases_20260426_final"
 
 
 def parse_args() -> argparse.Namespace:

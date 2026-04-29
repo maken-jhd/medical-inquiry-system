@@ -22,6 +22,7 @@
 - 第一阶段搜索专用知识图谱处理链：[knowledge_graph/README.md](/Users/loki/Workspace/GraduationDesign/knowledge_graph/README.md)
 - 旧版全量指南图谱备份：[knowledge_graph_bak/README.md](/Users/loki/Workspace/GraduationDesign/knowledge_graph_bak/README.md)
 - 第二阶段问诊大脑：[brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
+- 第二阶段问诊大脑详细运行链路指南：[brain_runtime_call_chain_guide.md](/Users/loki/Workspace/GraduationDesign/docs/brain_runtime_call_chain_guide.md)
 - 虚拟病人与离线回放：[simulator/README.md](/Users/loki/Workspace/GraduationDesign/simulator/README.md)
 - 图谱驱动虚拟病人详细方案：[virtual_patient_generation_scheme.md](/Users/loki/Workspace/GraduationDesign/docs/virtual_patient_generation_scheme.md)
 - 前端演示界面：[frontend/README.md](/Users/loki/Workspace/GraduationDesign/frontend/README.md)
@@ -290,6 +291,8 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 - `A4`：已支持目标感知解释、可选 LLM deductive judge 与显式路由
 - `SearchTree + UCT + rollout`：已支持多次 rollout 的 `select -> expand -> simulate -> backpropagate`
 - `TrajectoryEvaluator`：已支持路径聚类、相似度驱动 diversity 和可选 LLM verifier 模式
+- `llm_verifier`：当前会对齐 stop rule 的最早接受窗口；在 `turn_index` 或 `trajectory_count` 尚未达到可停止条件前，会先延后 verifier 调用并退回轻量 fallback 评分，避免 competitive replay 在早期追问轮次反复支付高成本评审
+- `rollout / reroot`：当前使用轻量 `SessionState` 快照，不再把 `search_tree`、`last_search_result` 等运行时大对象递归复制进树节点；这能显著降低 competitive replay 后期的内存膨胀与 GC 卡顿
 
 当前仍未完成的重点：
 
@@ -324,19 +327,37 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 - `slot_truth_map` 使用真实图谱 `target_node_id` 作为 key，中文证据名称写入 `aliases`
 - 当前已同时支持输出 `cases.jsonl` 和便于人工查看的 `cases.json`
 - `run_batch_replay.py` 当前可直接读取 `JSONL` 或 `JSON` 数组病例文件
+- `run_batch_replay.py` 当前支持病例级并发，默认 `--case-concurrency 4`；并发时每个病例使用独立 brain 实例，避免共享 `StateTracker`
+- 对于标准 batch replay，先做小样本 smoke 更合适；当前支持 `--limit 10` 只先跑前 10 个病例
+- `run_batch_replay.py` 当前会直接向终端设备输出运行信息；即使通过 `conda run` 启动，也会在病例启动、病例完成和长时间运行期间持续输出可见日志
+- `run_batch_replay.py` 当前会在终端持续输出病例级进度条，并每 15 秒输出一次心跳，例如“已完成病例：2 / 10，活动病例：2，当前最久：case_xxx（已运行 12:30）”
+- `run_batch_replay.py` 当前会像前端实时模式一样自动读取 `configs/frontend.yaml` 与 `configs/frontend.local.yaml`，把 Neo4j / LLM / brain 配置桥接到当前 CLI 进程环境
+- `run_batch_replay.py` 当前启动时会直接记录 `llm_available=true/false`；如果你看到病人回答耗时几乎为 0，先看这里是否其实没有启用 LLM
+- `run_batch_replay.py` 当前会在每个病例完成后立即追加写入 `replay_results.jsonl`、`run.log`，并刷新 `benchmark_summary.json` 与 `status.json`
+- `run_batch_replay.py` 默认支持断点续跑：若输出目录里已经有 `replay_results.jsonl`，会自动跳过已完成病例；如需强制重跑，可加 `--no-resume`
+- `run_batch_replay.py` 当前会记录病例级耗时信息：每个病例的 opening、初始 brain、逐轮 patient/brain、finalize 和总耗时会写入 `replay_results.jsonl`，并在 `benchmark_summary.json` / `status.json` 中聚合 `timing_summary`；运行日志对亚秒级耗时会保留更高精度，避免全部显示成 `0.00`
+- `simulator/replay_engine.py` 当前会先累计原始浮点耗时，再在落盘前统一 round；这能减少毫秒级病例里 `brain_turn_seconds_total` 被逐轮 round 放大的误导
+- `run_batch_replay.py` 当前在 `Ctrl+C` / `SIGTERM` 中断时会先写入 `status.json` / `run.log`，再强制退出进程，避免 `ThreadPoolExecutor` 的并发 worker 持续占用大量内存
+- `run_batch_replay.py` 当前输出的 `final_report.metadata` 已做轻量化处理，不再携带原始 `search_tree` 和 `last_search_result` 运行态对象，以降低批量回放的内存占用
 - 病人代理当前已改为“骨架驱动开场”：首轮输入优先由 `patient_agent.open_case(case)` 基于 opening slots 生成，而不是直接把 `chief_complaint` 当作唯一入口
+- `brain/service.py` 当前对主诉澄清增加了防重复保护：若已经追问过一次 `chief complaint` 但仍无任何可推理线索，会以 `repeated_chief_complaint_without_signal` 终止，避免 bad opening 在 intake 环节空转 8 轮
+- `brain/med_extractor.py` 与 `brain/evidence_parser.py` 当前补了 competitive 病例常见症状 / 风险词典，并对字符串型 `clinical_features` 输出增加了容错；即使 LLM schema 返回较松，也不至于把整段特征直接丢掉
+- `simulator/graph_case_generator.py` 当前会过滤 `competitive` 病例里 `HIV感染 / HIV感染者 / 抗逆转录病毒治疗 / 免疫功能低下` 这类背景 opening，并优先回退到目标病自己的症状、具体检查结果或疾病名
 - 在配置了可用 LLM 时，病人代理会使用受约束的 LLM 表达；否则自动退回规则模板
+- 当前 LLM 调用已支持显式 `enable_thinking` 开关，默认值为 `false`，避免依赖服务端默认行为
 
 当前已经基于：
 
 - [all_diseases_20260420_disease_aliases_only](/Users/loki/Workspace/GraduationDesign/test_outputs/graph_audit/all_diseases_20260420_disease_aliases_only)
 
-生成了一轮图谱驱动病例输出：
+生成了一轮正式图谱驱动病例输出：
 
-- [cases.json](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260421/cases.json)
-- [cases.jsonl](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260421/cases.jsonl)
-- [manifest.json](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260421/manifest.json)
-- [summary.md](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260421/summary.md)
+- [cases.json](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260426_final/cases.json)
+- [cases.jsonl](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260426_final/cases.jsonl)
+- [manifest.json](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260426_final/manifest.json)
+- [summary.md](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260426_final/summary.md)
+- [sampled_cases_4x5.json](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260426_final/sampled_cases_4x5.json)
+- [sampled_cases_4x5.md](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260426_final/sampled_cases_4x5.md)
 
 当前这轮共生成：
 
@@ -345,6 +366,12 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 - `exam_driven = 61`
 - `competitive = 51`
 - 总数 `227`
+
+当前抽样检查默认使用固定随机种子重新抽取四类病例，各 `5` 条，共 `20` 条，便于在规则修复后快速复核：
+
+- `opening_slot_names` 是否仍混入 `LabTest / Pathogen / ClinicalAttribute`
+- `selected_positive_slots` 是否仍出现多个 `CD4` 阈值或 `HIV RNA / 病毒载量` 状态并列
+- `selected_positive_slots` 是否仍出现多个 `LDL / HDL / TG / TC / eGFR` 同 family 项并列
 
 当前 `replay_engine` 已经不再是占位文件，而是能够驱动 `brain/service.py` 跑通最小的“系统问 -> 病人答 -> 系统再问”自动回放闭环，并支持批量回放。
 
@@ -394,10 +421,10 @@ streamlit run frontend/app.py --server.port 8514
 实验复盘模式当前可识别：
 
 - `focused_repair_summary.jsonl`：最适合逐轮复盘，包含 root best action、repair selected action、reject reason、reroot、A4 evidence audit 等字段
-- `replay_results.jsonl`：普通虚拟病人 replay 输出，包含问答轮次和 final_report
+- `replay_results.jsonl`：普通虚拟病人 replay 输出，包含问答轮次和 final_report；其中 `final_report.metadata` 默认只保留轻量摘要，不再原样序列化整棵搜索树和完整搜索结果对象
 - `ablation_summary.jsonl`：病例级 ablation 摘要
 - `focused_metrics.json`、`ablation_metrics.json`、`benchmark_summary.json`、`profile_summary.tsv`：实验指标汇总
-- `status.json`、`run.log`：运行状态与日志尾部
+- `status.json`、`run.log`：运行状态与增量日志；标准 `batch replay` 现在也会持续更新这两份文件，便于断点续跑和前端查看运行进度，其中会包含当前活动病例以及病例级耗时统计
 
 实时模式配置读取顺序：
 
@@ -518,7 +545,7 @@ export OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://dashscope.aliyuncs.com/compat
 export OPENAI_MODEL="${OPENAI_MODEL:-qwen3-max}"
 export NEO4J_PASSWORD="你的密码"
 
-conda run -n GraduationDesign python scripts/run_batch_replay.py --max-turns 5
+conda run --no-capture-output -n GraduationDesign python scripts/run_batch_replay.py --max-turns 5 --case-concurrency 4
 ```
 
 这条端到端 smoke 会走：

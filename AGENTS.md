@@ -16,6 +16,7 @@
 
 - 仓库文档以中文为主，新增说明、代码注释、测试注释优先使用中文。
 - `brain/`、`simulator/`、`tests/` 已约定：文件顶部有中文说明，类/函数或测试函数附近保留简短中文用途说明。
+- 对于 `brain/`、`simulator/` 等核心流程较长的函数，除了函数上方用途说明外，函数内部的关键步骤、阶段切换、分支入口前也要补充简短中文注释，帮助后续读代码的人顺着控制流理解实现。
 - 保持现有 Python 风格：类型标注、`dataclass`、轻量配置对象和显式依赖注入。
 - 不要把真实 API Key、Neo4j 私密密码或本机配置提交进仓库。私密前端配置写入 `configs/frontend.local.yaml`，该文件已被忽略。
 - 不要随意提交或依赖大型本地产物：`HIV/`、`HIV_cleaned/`、`test_outputs/`、`output_graph_test*.jsonl` 都被忽略。
@@ -23,6 +24,7 @@
 - 触碰 `knowledge_graph/` 时，默认遵循线上问诊搜索专用本体：候选诊断统一用 `Disease`；证据标签为 `ClinicalFinding`、`ClinicalAttribute`、`LabTest`、`LabFinding`、`ImagingFinding`、`Pathogen`、`RiskFactor`、`PopulationGroup`，关系重点是 `R1/R2/A3/A4` 会消费的诊断与证据边。
 - 当前抽取端为证据节点预留 `acquisition_mode` 和 `evidence_cost`，用于后续区分可直接询问证据和高成本检查证据；除非用户明确要求，本字段预留不应顺手改动 `brain/` 的搜索排序。
 - 不要把旧版全量指南图谱的 `Recommendation`、`Medication`、`TreatmentRegimen`、`GuidelineDocument`、`EvidenceSpan`、`Assertion` 等标签重新加回当前活跃抽取端，除非用户明确要求切回旧方向。
+- 每完成一个相对独立的工作部分，除非用户明确说明不需要，都要同步更新相关 `README.md`，并在工作记录文档中登记本次工作内容、影响范围、输出文件和验证结果；默认工作记录文档使用 `docs/phase2_changelog.md`，如果用户指定了其他记录文档，则以用户指定为准。
 
 ## 常用命令
 

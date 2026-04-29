@@ -32,6 +32,8 @@ class TrajectoryEvaluatorConfig:
     diversity_weight: float = 0.4
     agent_eval_weight: float = 0.3
     agent_eval_mode: str = "fallback"
+    llm_verifier_min_turn_index: int = 0
+    llm_verifier_min_trajectory_count: int = 1
 
 
 class TrajectoryEvaluator:
@@ -64,8 +66,12 @@ class TrajectoryEvaluator:
         self,
         grouped: Dict[Tuple[str, str], List[ReasoningTrajectory]],
         patient_context: PatientContext | None = None,
+        session_turn_index: int | None = None,
     ) -> List[FinalAnswerScore]:
         total_trajectories = sum(len(items) for items in grouped.values())
+
+        # answer_candidates 会传给 verifier，帮助它知道当前不是“单答案判断”，
+        # 而是在比较一组互相竞争的最终答案。
         answer_candidates = [
             {
                 "answer_id": answer_id,
@@ -77,6 +83,9 @@ class TrajectoryEvaluator:
         scores: List[FinalAnswerScore] = []
 
         for (answer_id, answer_name), trajectories in grouped.items():
+            # consistency 看这个答案占了多少 rollout，
+            # diversity 看同一答案内部路径是否过于单一，
+            # agent_evaluation 再补一个更偏“临床可信度”的视角。
             consistency = len(trajectories) / total_trajectories if total_trajectories > 0 else 0.0
             diversity = self._compute_diversity(trajectories)
             agent_evaluation, agent_metadata = self._compute_agent_evaluation(
@@ -85,6 +94,7 @@ class TrajectoryEvaluator:
                 answer_name=answer_name,
                 patient_context=patient_context,
                 answer_candidates=answer_candidates,
+                session_turn_index=session_turn_index,
             )
             final_score = (
                 consistency * self.config.consistency_weight
@@ -103,6 +113,7 @@ class TrajectoryEvaluator:
                 )
             )
 
+        # 最终还是统一按 final_score 排序，把“答案组聚合后的 top1”交给 stop/verifier/repair。
         return sorted(scores, key=lambda item: (-item.final_score, item.answer_name))
 
     # 从已评分的答案分组中选出最终答案。
@@ -138,11 +149,29 @@ class TrajectoryEvaluator:
         answer_name: str,
         patient_context: PatientContext | None = None,
         answer_candidates: list[dict] | None = None,
+        session_turn_index: int | None = None,
     ) -> tuple[float, dict]:
         if len(trajectories) == 0:
             return 0.0, {"verifier_mode": "empty", "verifier_called": False}
 
+        # llm_verifier 模式下，先看当前是否满足“值得调用 verifier”的时间窗口；
+        # 不满足就先退回启发式，避免每轮都调用高成本评审。
         if self.config.agent_eval_mode == "llm_verifier":
+            deferred_reason = self._llm_verifier_deferred_reason(
+                trajectory_count=len(trajectories),
+                session_turn_index=session_turn_index,
+            )
+            if deferred_reason is not None:
+                fallback_score, fallback_metadata = self._compute_fallback_agent_evaluation(trajectories)
+                return fallback_score, {
+                    **fallback_metadata,
+                    "verifier_mode": "llm_verifier_deferred",
+                    "verifier_called": False,
+                    "verifier_deferred_reason": deferred_reason,
+                    "verifier_deferred_turn_index": session_turn_index,
+                    "verifier_deferred_trajectory_count": len(trajectories),
+                }
+
             llm_result = self._compute_llm_agent_evaluation(
                 trajectories,
                 answer_id=answer_id,
@@ -152,6 +181,8 @@ class TrajectoryEvaluator:
             )
 
             if llm_result is not None:
+                # verifier 返回的 should_accept / reject_reason / accept_reason
+                # 会直接成为 stop_rules 和 repair 的控制信号。
                 return llm_result["score"], {
                     "verifier_mode": "llm_verifier",
                     "verifier_called": True,
@@ -170,6 +201,7 @@ class TrajectoryEvaluator:
                 }
 
         if self.config.agent_eval_mode != "fallback":
+            # 其余模式暂时退回简单的轨迹均值，不引入额外验证语义。
             total_score = sum(item.score for item in trajectories)
             normalized = total_score / len(trajectories)
             return max(min(normalized, 1.0), 0.0), {
@@ -177,6 +209,28 @@ class TrajectoryEvaluator:
                 "verifier_called": False,
             }
 
+        return self._compute_fallback_agent_evaluation(trajectories)
+
+    # 对尚未达到“可终止观察窗口”的轮次延后 LLM verifier，避免每轮都支付高成本评审。
+    def _llm_verifier_deferred_reason(
+        self,
+        *,
+        trajectory_count: int,
+        session_turn_index: int | None,
+    ) -> str | None:
+        min_turn_index = max(int(self.config.llm_verifier_min_turn_index), 0)
+        min_trajectory_count = max(int(self.config.llm_verifier_min_trajectory_count), 1)
+
+        if session_turn_index is not None and session_turn_index < min_turn_index:
+            return "turn_index_too_low"
+
+        if trajectory_count < min_trajectory_count:
+            return "trajectory_count_too_low"
+
+        return None
+
+    # 使用原有启发式聚合分数作为 verifier 未出场时的轻量替代。
+    def _compute_fallback_agent_evaluation(self, trajectories: List[ReasoningTrajectory]) -> tuple[float, dict]:
         total_score = sum(item.score for item in trajectories)
         best_score = max(item.score for item in trajectories)
         terminal_ratio = (
@@ -198,6 +252,8 @@ class TrajectoryEvaluator:
         if self.llm_client is None or not self.llm_client.is_available() or patient_context is None:
             return None
 
+        # 只把该答案组里得分最高的最佳轨迹送给 verifier，
+        # 避免 prompt 过重，同时仍保留 trajectory_count 和 answer_candidates 作为群体背景。
         best_trajectory = sorted(trajectories, key=lambda item: (-item.score, item.trajectory_id))[0]
 
         try:
@@ -219,6 +275,8 @@ class TrajectoryEvaluator:
         if not isinstance(payload, dict):
             return None
 
+        # verifier 输出必须被二次标准化：
+        # schema 里漏填字段、布尔值文本化、reject_reason 不合规等情况都在这里兜住。
         try:
             score = float(payload.get("score", 0.0))
         except Exception:
@@ -272,6 +330,8 @@ class TrajectoryEvaluator:
     ) -> tuple[str, str, bool]:
         raw_reason = str(payload.get("accept_reason", "")).strip()
 
+        # accept_reason 是 stop 后解释和实验统计的重要字段；
+        # 若 LLM 漏填，就用低风险启发式补齐，并显式标记不是 schema 原值。
         if raw_reason in ALLOWED_ACCEPT_REASONS:
             return raw_reason, "llm_schema", True
 
@@ -307,6 +367,7 @@ class TrajectoryEvaluator:
     ) -> tuple[str, str, bool]:
         raw_reason = str(payload.get("reject_reason", "")).strip()
 
+        # reject_reason 是 repair 分流的关键控制信号，必须收敛到三类固定枚举。
         if raw_reason in ALLOWED_REJECT_REASONS:
             return raw_reason, "llm_schema", True
 

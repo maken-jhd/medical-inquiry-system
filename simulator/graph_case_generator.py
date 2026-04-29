@@ -64,6 +64,14 @@ OPENING_RESULT_MARKERS = (
     "浸润",
     "溃疡",
 )
+BACKGROUND_OPENING_RISK_TERMS = (
+    "hiv",
+    "aids",
+    "艾滋",
+    "抗逆转录病毒",
+    "art",
+    "免疫功能低下",
+)
 
 
 @dataclass(frozen=True)
@@ -702,7 +710,13 @@ class GraphCaseGenerator:
                 candidate.competitor_only_negative,
                 limit=COMPETITIVE_NEGATIVE_SLOT_LIMIT,
             )
-            chief_text = _render_low_cost_complaint(shared_items, fallback_name=profile.record.disease_name)
+            positive_items = _limit_unique_items([*shared_items, *target_only_items], limit=POSITIVE_SLOT_LIMIT)
+            opening_items = _select_competitive_opening_items(
+                shared_items=shared_items,
+                target_only_items=target_only_items,
+                positive_items=positive_items,
+            )
+            chief_text = _render_low_cost_complaint(opening_items, fallback_name=profile.record.disease_name)
             metadata_extra = {
                 "competitor_disease_id": candidate.competitor.record.disease_id,
                 "competitor_disease_name": candidate.competitor.record.disease_name,
@@ -721,8 +735,8 @@ class GraphCaseGenerator:
                     profile=profile,
                     case_type="competitive",
                     chief_complaint=chief_text,
-                    opening_items=shared_items,
-                    positive_items=_limit_unique_items([*shared_items, *target_only_items], limit=POSITIVE_SLOT_LIMIT),
+                    opening_items=opening_items,
+                    positive_items=positive_items,
                     negative_items=negative_items,
                     metadata_extra=metadata_extra,
                     title_suffix=f"{CASE_TYPE_LABELS['competitive']}（vs {candidate.competitor.record.disease_name}）",
@@ -1358,6 +1372,8 @@ def _is_disallowed_opening_name(name: str, item: dict[str, Any]) -> bool:
         return True
     if target_label == "Pathogen" or group == "pathogen":
         return True
+    if target_label == "PopulationGroup":
+        return True
     if target_label == "ClinicalAttribute" or group == "detail":
         return True
 
@@ -1371,6 +1387,8 @@ def _is_disallowed_opening_name(name: str, item: dict[str, Any]) -> bool:
         return True
 
     if normalized_name in {"异常", "感染", "检查", "筛查", "诊断", "临床症状无改善"}:
+        return True
+    if group == "risk" and any(term in normalized_name for term in BACKGROUND_OPENING_RISK_TERMS):
         return True
 
     plain_exam_names = {
@@ -1593,6 +1611,22 @@ def _filter_opening_items(
                 return fallback_items
 
     return fallback_items
+
+
+def _select_competitive_opening_items(
+    *,
+    shared_items: Sequence[dict[str, Any]],
+    target_only_items: Sequence[dict[str, Any]],
+    positive_items: Sequence[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """为竞争病例优先挑选自然开场项，避免把 HIV/ART 背景信息当主诉。"""
+
+    shared_opening_items = _filter_opening_items(shared_items, positive_items)
+    if len(shared_opening_items) >= 2:
+        return shared_opening_items
+
+    supplement_items = _filter_opening_items(target_only_items, positive_items)
+    return _limit_unique_items([*shared_opening_items, *supplement_items], limit=3)
 
 
 def _is_opening_eligible(item: dict[str, Any]) -> bool:

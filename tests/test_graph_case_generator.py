@@ -332,6 +332,79 @@ def test_generator_respects_max_competitors_per_disease() -> None:
     assert len(two_cases) == 2
 
 
+# 验证 competitive opening 会跳过 HIV / ART 背景项，并回退到目标病自己的症状线索。
+def test_generator_competitive_opening_falls_back_to_target_symptoms() -> None:
+    target = _make_record(
+        "merged_node_comp_opening001",
+        "目标病-症状回退",
+        [
+            _make_evidence("merged_node_shared_risk_001", "HIV感染", "risk", priority=1.9),
+            _make_evidence("merged_node_shared_risk_002", "抗逆转录病毒治疗", "risk", priority=1.8),
+            _make_evidence("merged_node_target_sym_001", "发热", "symptom", priority=1.7),
+            _make_evidence("merged_node_target_sym_002", "头痛", "symptom", priority=1.6),
+        ],
+    )
+    competitor = _make_record(
+        "merged_node_comp_opening002",
+        "竞争病-背景更像",
+        [
+            _make_evidence("merged_node_shared_risk_101", "HIV感染", "risk", priority=1.9),
+            _make_evidence("merged_node_shared_risk_102", "抗逆转录病毒治疗", "risk", priority=1.8),
+            _make_evidence("merged_node_comp_sym_001", "胸痛", "symptom", priority=1.5),
+            _make_evidence("merged_node_comp_sym_002", "盗汗", "symptom", priority=1.4),
+        ],
+    )
+
+    result = GraphCaseGenerator().generate_from_records([target, competitor])
+    case = next(
+        case
+        for case in result.cases
+        if case.metadata.get("case_type") == "competitive"
+        and case.metadata.get("disease_id") == target.disease_id
+    )
+
+    opening_names = list(case.metadata.get("opening_slot_names") or [])
+    assert "HIV感染" not in opening_names
+    assert "抗逆转录病毒治疗" not in opening_names
+    assert any(name in opening_names for name in ("发热", "头痛"))
+    assert "HIV感染" not in case.chief_complaint
+
+
+# 验证 competitive opening 若共享项和 target-only 都不适合自然开场，会回退到疾病名。
+def test_generator_competitive_opening_falls_back_to_disease_name_when_no_natural_signal() -> None:
+    target = _make_record(
+        "merged_node_comp_opening003",
+        "肥胖",
+        [
+            _make_evidence("merged_node_shared_risk_201", "HIV感染", "risk", priority=1.9),
+            _make_evidence("merged_node_shared_risk_202", "抗逆转录病毒治疗", "risk", priority=1.8),
+            _make_evidence("merged_node_target_det_001", "BMI>=28.0kg/m2", "detail", priority=1.7),
+            _make_evidence("merged_node_target_det_002", "体脂含量女性>=30%", "detail", priority=1.6),
+        ],
+    )
+    competitor = _make_record(
+        "merged_node_comp_opening004",
+        "血脂异常",
+        [
+            _make_evidence("merged_node_shared_risk_301", "HIV感染", "risk", priority=1.9),
+            _make_evidence("merged_node_shared_risk_302", "抗逆转录病毒治疗", "risk", priority=1.8),
+            _make_evidence("merged_node_comp_det_001", "LDL-C ≥ 3.0 mmol/L", "detail", priority=1.5),
+            _make_evidence("merged_node_comp_det_002", "ASCVD风险等级", "detail", priority=1.4),
+        ],
+    )
+
+    result = GraphCaseGenerator().generate_from_records([target, competitor])
+    case = next(
+        case
+        for case in result.cases
+        if case.metadata.get("case_type") == "competitive"
+        and case.metadata.get("disease_id") == target.disease_id
+    )
+
+    assert list(case.metadata.get("opening_slot_names") or []) == []
+    assert case.chief_complaint == "最近想咨询一下肥胖相关的情况。"
+
+
 # 验证生成的 slot_truth_map key 和 SlotTruth.node_id 都使用真实 target_node_id。
 def test_generator_uses_real_target_node_id_for_slot_truth_map() -> None:
     record = _make_record(

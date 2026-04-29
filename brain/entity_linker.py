@@ -57,6 +57,11 @@ class EntityLinker:
 
     # 对单个 mention 做候选查询并选择最佳匹配。
     def _link_single_mention(self, mention: str) -> LinkedEntity:
+        # 查询阶段同时覆盖：
+        # - 精确 name / canonical_name
+        # - alias 命中
+        # - 包含关系
+        # 这样能兼顾标准术语与患者口语化表述。
         rows = self.client.run_query(
             """
             MATCH (n)
@@ -77,12 +82,15 @@ class EntityLinker:
         if len(rows) == 0:
             return LinkedEntity(mention=mention)
 
+        # 排序时统一走同一套相似度函数，避免查询阶段的命中顺序直接决定最终链接结果。
         scored = sorted(
             rows,
             key=lambda item: -self._compute_similarity(mention, str(item.get("canonical_name", "")), item.get("aliases", [])),
         )
         best = scored[0]
         similarity = self._compute_similarity(mention, str(best.get("canonical_name", "")), best.get("aliases", []))
+
+        # top_matches 会挂到 metadata，方便 R1 调试“为什么链接到了这个图谱节点”。
         top_matches = [
             {
                 "node_id": item.get("node_id"),
@@ -109,6 +117,8 @@ class EntityLinker:
         candidates = [canonical_name, *aliases]
         scores: list[float] = []
 
+        # 基础相似度来自字符串编辑相似度，
+        # 再叠加 exact match / alias exact / 医学同义词的小幅加成。
         for candidate in candidates:
             if len(candidate) == 0:
                 continue

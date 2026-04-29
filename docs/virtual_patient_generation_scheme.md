@@ -659,7 +659,7 @@ Replay 结果中已经新增：
 截至当前版本，已经基于当前疾病审计目录生成一轮完整图谱病例：
 
 ```text
-test_outputs/simulator_cases/graph_cases_20260421/
+test_outputs/simulator_cases/graph_cases_20260426_final/
 ```
 
 其中包含：
@@ -838,19 +838,19 @@ test_outputs/simulator_cases/graph_cases_20260421/
 ```bash
 conda run -n GraduationDesign python scripts/generate_graph_virtual_patients.py \
   --audit-root test_outputs/graph_audit/all_diseases_20260420_disease_aliases_only \
-  --output-file test_outputs/simulator_cases/graph_cases_20260421/cases.jsonl \
-  --output-json-file test_outputs/simulator_cases/graph_cases_20260421/cases.json \
-  --manifest-file test_outputs/simulator_cases/graph_cases_20260421/manifest.json \
-  --summary-file test_outputs/simulator_cases/graph_cases_20260421/summary.md
+  --output-file test_outputs/simulator_cases/graph_cases_20260426_final/cases.jsonl \
+  --output-json-file test_outputs/simulator_cases/graph_cases_20260426_final/cases.json \
+  --manifest-file test_outputs/simulator_cases/graph_cases_20260426_final/manifest.json \
+  --summary-file test_outputs/simulator_cases/graph_cases_20260426_final/summary.md
 ```
 
 ### 18.2 重新按病例类型抽样做人工检查
 
 ```bash
 conda run -n GraduationDesign python scripts/sample_graph_virtual_patients.py \
-  --cases-file test_outputs/simulator_cases/graph_cases_20260421/cases.json \
-  --output-file test_outputs/simulator_cases/graph_cases_20260421/sampled_cases_4x5.json \
-  --summary-file test_outputs/simulator_cases/graph_cases_20260421/sampled_cases_4x5.md \
+  --cases-file test_outputs/simulator_cases/graph_cases_20260426_final/cases.json \
+  --output-file test_outputs/simulator_cases/graph_cases_20260426_final/sampled_cases_4x5.json \
+  --summary-file test_outputs/simulator_cases/graph_cases_20260426_final/sampled_cases_4x5.md \
   --sample-size-per-type 5 \
   --seed 42
 ```
@@ -873,11 +873,12 @@ conda run -n GraduationDesign python scripts/sample_graph_virtual_patients.py \
 
 ```bash
 NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/run_batch_replay.py \
-  --cases-file test_outputs/simulator_cases/graph_cases_20260421/cases.json \
-  --max-turns 8
+  --cases-file test_outputs/simulator_cases/graph_cases_20260426_final/cases.json \
+  --max-turns 8 \
+  --case-concurrency 4
 ```
 
-注意：当前 `run_batch_replay.py` 既支持 `cases.jsonl`，也支持 `cases.json`。
+注意：当前 `run_batch_replay.py` 既支持 `cases.jsonl`，也支持 `cases.json`，并支持病例级并发；并发时每个病例使用独立 brain 实例，避免共享会话状态。
 
 ## 19. 相关文件索引
 
@@ -893,12 +894,12 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/run_bat
 
 ### 19.2 当前实验输出
 
-- [cases.json](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260421/cases.json)
-- [cases.jsonl](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260421/cases.jsonl)
-- [manifest.json](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260421/manifest.json)
-- [summary.md](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260421/summary.md)
-- [sampled_cases_4x5.json](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260421/sampled_cases_4x5.json)
-- [sampled_cases_4x5.md](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260421/sampled_cases_4x5.md)
+- [cases.json](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260426_final/cases.json)
+- [cases.jsonl](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260426_final/cases.jsonl)
+- [manifest.json](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260426_final/manifest.json)
+- [summary.md](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260426_final/summary.md)
+- [sampled_cases_4x5.json](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260426_final/sampled_cases_4x5.json)
+- [sampled_cases_4x5.md](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260426_final/sampled_cases_4x5.md)
 
 ### 19.3 配套说明
 

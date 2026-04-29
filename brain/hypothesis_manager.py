@@ -52,6 +52,7 @@ class HypothesisManager:
         patient_context: PatientContext | None,
         candidates: Iterable[HypothesisCandidate],
     ) -> A2HypothesisResult:
+        # 先按当前 R1 score 做一次基础排序，再用候选之间的竞争关系轻量重排。
         sorted_candidates = sorted(
             candidates,
             key=lambda item: (-item.score, item.name),
@@ -62,6 +63,8 @@ class HypothesisManager:
         alternatives: List[HypothesisCandidate] = []
 
         if len(ranked_candidates) > 0:
+            # 若可用，LLM 负责把“为什么 top1 胜过 alternatives”补成更强的语义判断；
+            # 否则继续使用规则重排后的排序结果。
             llm_result = self._try_rank_with_llm(patient_context, ranked_candidates)
 
             if llm_result is not None:
@@ -151,6 +154,7 @@ class HypothesisManager:
         recommended_next_evidence: list[str] | None = None,
         alternative_candidates: list[dict] | None = None,
     ) -> List[HypothesisScore]:
+        # repair 不直接原地改 session_state，而是先 clone 一份 hypothesis 列表再做分数调整。
         ranked = [self._clone_hypothesis(item) for item in hypotheses]
         alternative_items = list(alternative_candidates or [])
         preferred_evidence = [
@@ -164,6 +168,7 @@ class HypothesisManager:
             metadata = dict(hypothesis.metadata)
             matched_alternative = self._match_verifier_alternative(hypothesis, alternative_items)
 
+            # 当前被 verifier 拒停的答案会按 reject_reason 受到不同幅度的下调。
             if current_answer_id and hypothesis.node_id == current_answer_id:
                 if reject_reason == "strong_alternative_not_ruled_out":
                     score_delta -= self.config.verifier_uncertainty_penalty
@@ -172,10 +177,13 @@ class HypothesisManager:
                 elif reject_reason == "trajectory_insufficient":
                     score_delta -= self.config.verifier_trajectory_penalty
 
+            # 如果 verifier 明确点名某个备选诊断，就给它额外抬分，帮助 repair 阶段真正关注竞争者。
             if matched_alternative is not None:
                 score_delta += max(self.config.verifier_alt_bonus - index * 0.05, self.config.verifier_alt_bonus * 0.5)
                 metadata["verifier_alternative_reason"] = matched_alternative.get("reason", "")
 
+            # repair 推荐证据会和 hypothesis 自己已有的推荐证据合并，
+            # 供后续 action_builder 在排序时同时感知“当前假设缺什么”和“verifier 想补什么”。
             hypothesis_preferred_evidence = self._merge_recommended_evidence(
                 metadata.get("recommended_next_evidence", []),
                 [],
@@ -300,10 +308,12 @@ class HypothesisManager:
         patient_context: PatientContext | None,
         candidates: list[HypothesisCandidate],
     ) -> A2HypothesisResult | None:
+        # 没有 patient_context 或没有可用 LLM 时直接跳过，不强行走模型排序。
         if self.llm_client is None or not self.llm_client.is_available() or patient_context is None:
             return None
 
         try:
+            # 只把 top 几个高分候选送给 LLM，避免 prompt 过长且削弱排序聚焦。
             payload = self.llm_client.run_structured_prompt(
                 "a2_hypothesis_generation",
                 {
@@ -320,6 +330,7 @@ class HypothesisManager:
         if not isinstance(primary_payload, dict):
             return None
 
+        # LLM 返回的候选要尽量回对到现有图谱候选，避免凭空生成一个新疾病对象。
         primary_hypothesis = self._coerce_candidate(primary_payload, candidates)
         alternatives = [
             self._coerce_candidate(item, candidates)
@@ -349,6 +360,7 @@ class HypothesisManager:
         if len(candidates) <= 1:
             return candidates
 
+        # 先统计“哪些证据被多个候选共享”，后面才能区分 unique evidence 和 overlap evidence。
         evidence_frequency: dict[str, int] = {}
 
         for candidate in candidates:
@@ -364,6 +376,10 @@ class HypothesisManager:
         reranked: list[HypothesisCandidate] = []
 
         for candidate in candidates:
+            # 对每个候选计算：
+            # - unique_evidence_count：越多越有区分性
+            # - overlap_ratio：共享证据越多越泛化
+            # - feature_coverage / semantic_score：保留原始 R1 支持强度
             evidence_names = [
                 str(item)
                 for item in candidate.metadata.get("evidence_names", [])
@@ -411,6 +427,7 @@ class HypothesisManager:
         why_primary_beats_alternatives = result.metadata.get("why_primary_beats_alternatives", "")
 
         if primary is not None:
+            # primary 会记录“支持它的特征、冲突特征、为什么比 alternatives 更优”。
             primary = HypothesisCandidate(
                 node_id=primary.node_id,
                 name=primary.name,
@@ -430,6 +447,7 @@ class HypothesisManager:
         enriched_alternatives: list[HypothesisCandidate] = []
 
         for alternative in alternatives:
+            # alternatives 只保留相对 primary 的竞争角色和 why_not_primary 说明，供前端解释使用。
             enriched_alternatives.append(
                 HypothesisCandidate(
                     node_id=alternative.node_id,
@@ -462,6 +480,7 @@ class HypothesisManager:
         node_id = payload.get("node_id")
         name = payload.get("name")
 
+        # 优先回对已有候选，只有完全对不齐时才构造一个 llm_only 占位对象。
         for item in candidates:
             if node_id and item.node_id == node_id:
                 return item

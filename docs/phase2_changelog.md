@@ -10,6 +10,35 @@
 - `phase2_execution_checklist.md` 更偏“路线设计与待办清单”
 - 本文更偏“已经发生过哪些阶段性变化、分别解决了什么问题”
 
+## 近期更新：2026-04-29 复杂函数可读性增强
+
+### 本次目标
+
+- 为 `brain/` 中较长或较复杂的函数补充函数内部中文注释
+- 让后续阅读者可以直接顺着源码理解“患者输入 -> A1/A2/A3/A4 -> search -> verifier -> repair -> report”的关键链路
+
+### 本次改动
+
+- 在 `brain/service.py`、`brain/stop_rules.py`、`brain/retriever.py`、`brain/evidence_parser.py`、`brain/simulation_engine.py`、`brain/action_builder.py`、`brain/hypothesis_manager.py`、`brain/trajectory_evaluator.py`、`brain/report_builder.py` 等核心模块中，为长函数的关键分支、状态写回、排序逻辑和 fallback / repair 入口补充了中文块级注释
+- 同时补充了 `brain/med_extractor.py`、`brain/entity_linker.py`、`brain/llm_client.py`、`brain/mcts_engine.py`、`brain/state_tracker.py`、`brain/router.py` 等支撑模块中的关键步骤注释
+- 更新了 [brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)，把“复杂函数内部也要有中文块级注释”写成目录级约定
+
+### 解决的问题
+
+- 之前很多函数虽然有函数级说明，但函数内部的阶段切换、guarded gate、repair、rollout、R1/R2 排序来源仍然需要靠来回跳转代码才能理解
+- 对首次接手 `brain/` 的同学来说，`service.py`、`stop_rules.py`、`simulation_engine.py` 这类文件的阅读成本偏高
+- 这次改动后，核心控制流和状态流转点都能在源码就地读懂，更适合继续维护、调试和撰写论文实现说明
+
+### 影响范围
+
+- 仅增加注释与 README / changelog 说明，不改变业务逻辑
+- 主要影响 `brain/` 目录下的可读性与维护成本
+
+### 验证结果
+
+- 已执行 `python -m compileall brain`
+- 结果通过，未发现语法错误
+
 ## 一、第二阶段总目标
 
 第二阶段的目标不是简单把知识图谱接到一个问答界面上，而是构建一个更接近论文 Med-MCTS 思路的问诊系统。这个阶段希望同时完成下面几件事：
@@ -1107,3 +1136,1157 @@ focused replay / ablation 汇总新增：
 - verifier 现在被定位为“候选接受信号提供者”，允许在临床上较可信时先给出 accept 信号
 - 最终是否停止仍由结构化 gate 校验 confirmed evidence、negative/doubtful 证据、强替代候选和答案稳定性
 - focused validation 脚本默认 `CASE_CONCURRENCY=5`，同一 profile 内最多 5 个病例并行回放，以降低真实 qwen3-max smoke 的等待时间
+
+## 十二、2026-04-26：图谱驱动病例重生成与固定抽样刷新
+
+### 本次目标
+
+- 在不修改知识图谱抽取链路的前提下，基于现有审计目录重新生成一轮图谱驱动虚拟病人病例
+- 使用固定随机种子重新执行四类病例各 `5` 条的抽样，刷新人工质检材料
+- 将本次输出路径、计数结果和抽样用途同步回 README 与 changelog
+
+### 本次执行的命令
+
+重新生成病例：
+
+```bash
+conda run -n GraduationDesign python scripts/generate_graph_virtual_patients.py \
+  --audit-root test_outputs/graph_audit/all_diseases_20260420_disease_aliases_only \
+  --output-file test_outputs/simulator_cases/graph_cases_20260421/cases.jsonl \
+  --output-json-file test_outputs/simulator_cases/graph_cases_20260421/cases.json \
+  --manifest-file test_outputs/simulator_cases/graph_cases_20260421/manifest.json \
+  --summary-file test_outputs/simulator_cases/graph_cases_20260421/summary.md
+```
+
+重新抽样：
+
+```bash
+conda run -n GraduationDesign python scripts/sample_graph_virtual_patients.py \
+  --cases-file test_outputs/simulator_cases/graph_cases_20260421/cases.json \
+  --output-file test_outputs/simulator_cases/graph_cases_20260421/sampled_cases_4x5.json \
+  --summary-file test_outputs/simulator_cases/graph_cases_20260421/sampled_cases_4x5.md \
+  --sample-size-per-type 5 \
+  --seed 42
+```
+
+### 本次输出
+
+- [cases.json](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260421/cases.json)
+- [cases.jsonl](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260421/cases.jsonl)
+- [manifest.json](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260421/manifest.json)
+- [summary.md](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260421/summary.md)
+- [sampled_cases_4x5.json](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260421/sampled_cases_4x5.json)
+- [sampled_cases_4x5.md](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260421/sampled_cases_4x5.md)
+
+### 本次结果
+
+- `ordinary = 66`
+- `low_cost = 49`
+- `exam_driven = 61`
+- `competitive = 51`
+- 总病例数 `227`
+- 固定抽样数 `20`
+
+### 本次验证
+
+- 病例生成脚本正常完成，输出计数与上一轮一致
+- 抽样脚本正常完成，四类病例各抽 `5` 条
+- 本次没有新增代码逻辑修改，也没有额外运行单元测试
+
+## 十三、2026-04-26：正式目录 graph_cases_20260426_final 生成与抽样
+
+### 本次目标
+
+- 将图谱驱动虚拟病人的正式产物切换到新的输出目录 `graph_cases_20260426_final`
+- 用最新生成器重新生成完整病例集，并重新执行四类病例各 `5` 条的固定抽样
+- 同步脚本默认路径、README 和详细方案文档中的产物路径
+
+### 本次执行的命令
+
+重新生成病例：
+
+```bash
+conda run -n GraduationDesign python scripts/generate_graph_virtual_patients.py \
+  --audit-root test_outputs/graph_audit/all_diseases_20260420_disease_aliases_only \
+  --output-file test_outputs/simulator_cases/graph_cases_20260426_final/cases.jsonl \
+  --output-json-file test_outputs/simulator_cases/graph_cases_20260426_final/cases.json \
+  --manifest-file test_outputs/simulator_cases/graph_cases_20260426_final/manifest.json \
+  --summary-file test_outputs/simulator_cases/graph_cases_20260426_final/summary.md
+```
+
+重新抽样：
+
+```bash
+conda run -n GraduationDesign python scripts/sample_graph_virtual_patients.py \
+  --cases-file test_outputs/simulator_cases/graph_cases_20260426_final/cases.json \
+  --output-file test_outputs/simulator_cases/graph_cases_20260426_final/sampled_cases_4x5.json \
+  --summary-file test_outputs/simulator_cases/graph_cases_20260426_final/sampled_cases_4x5.md \
+  --sample-size-per-type 5 \
+  --seed 42
+```
+
+### 本次输出
+
+- [cases.json](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260426_final/cases.json)
+- [cases.jsonl](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260426_final/cases.jsonl)
+- [manifest.json](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260426_final/manifest.json)
+- [summary.md](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260426_final/summary.md)
+- [sampled_cases_4x5.json](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260426_final/sampled_cases_4x5.json)
+- [sampled_cases_4x5.md](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260426_final/sampled_cases_4x5.md)
+
+### 本次结果
+
+- 正式目录切换到 `graph_cases_20260426_final`
+- 抽样目录随正式目录同步更新
+- 脚本默认路径与 README / 方案文档引用已同步刷新
+- 重新生成结果：
+  - `ordinary = 66`
+  - `low_cost = 49`
+  - `exam_driven = 61`
+  - `competitive = 51`
+  - 总病例数 `227`
+  - 固定抽样数 `20`
+
+### 抽样检查
+
+针对 `sampled_cases_4x5.json` 的 20 个样本，额外做了一次程序化检查，重点确认：
+
+- 同一病例是否出现多个 `CD4` 阈值
+- 同一病例是否出现多个 `HIV RNA / 病毒载量` 状态
+- 是否出现多个 `BMI` 分层
+- `opening_slot_names` 中是否仍出现 `骨密度测量部位`、`减重持续时间`、单独病原体名
+
+本次检查结果：
+
+- 未发现多个 `CD4` 阈值并列
+- 未发现多个 `HIV RNA / 病毒载量` 状态并列
+- 未发现多个 `BMI` 分层并列
+- 未发现 `opening_slot_names` 混入 `骨密度测量部位`、`减重持续时间`、单独病原体名
+
+### replay 运行前置检查
+
+本次同时检查了 batch replay 的运行条件与结果产物能力：
+
+- LLM 侧默认模型配置为 `qwen3-max`
+- LLM base URL 已指向 DashScope OpenAI 兼容接口
+- 本机存在 `configs/frontend.local.yaml`
+- 当前环境或本机配置中：
+  - `LLM API Key` 已配置
+  - `Neo4j password` 已配置
+- 标准 `run_batch_replay.py` 当前默认是串行执行，不带并发
+- `replay_results.jsonl` 已可记录：
+  - `opening_text`
+  - 每轮 `question_text`
+  - 每轮 `answer_text`
+  - `final_report`
+  - `initial_output`
+- 前端实验复盘模式已能直接读取 `replay_results.jsonl` 与 `benchmark_summary.json` 做展示
+
+### 本次验证
+
+- 重新生成命令已成功完成
+- 重新抽样命令已成功完成
+- 抽样规则检查通过
+- 本次没有新增核心生成逻辑修改，因此未额外运行单元测试
+
+## 十四、2026-04-26：标准 batch replay 增加病例级并发
+
+### 本次目标
+
+- 为 `scripts/run_batch_replay.py` 增加病例级并发，缩短 200+ 图谱病例的正式回放耗时
+- 保持 replay 结果结构不变，不修改病例 schema，不改前端读取协议
+- 默认并发数设置为 `4`
+
+### 本次实现
+
+- 为 `run_batch_replay.py` 新增参数：
+  - `--case-concurrency`
+- 默认值为 `4`
+- 并发实现采用 `ThreadPoolExecutor`
+- 每个并发任务都会独立创建：
+  - `ConsultationBrain`
+  - `VirtualPatientAgent`
+  - `ReplayEngine`
+
+这样做的原因是：
+
+- `StateTracker` 维护可变会话状态，不适合多个病例共享同一个 brain 实例并发运行
+- 通过“每病例独立 brain”可以安全并发，同时复用 Neo4j 读查询与 LLM 调用能力
+
+### 结果影响
+
+- `replay_results.jsonl` 结构不变
+- `benchmark_summary.json` 额外补充：
+  - `case_concurrency`
+  - `case_file`
+- 前端实验复盘模式无需额外适配，仍可直接读取 `replay_results.jsonl` 与 `benchmark_summary.json`
+
+### 文档同步
+
+- [README.md](/Users/loki/Workspace/GraduationDesign/README.md)
+- [simulator/README.md](/Users/loki/Workspace/GraduationDesign/simulator/README.md)
+- [virtual_patient_generation_scheme.md](/Users/loki/Workspace/GraduationDesign/docs/virtual_patient_generation_scheme.md)
+
+## 十五、2026-04-26：标准 batch replay 增加 limit，用于 10 例 smoke
+
+### 本次目标
+
+- 在标准 `run_batch_replay.py` 中增加一个轻量的病例数量限制参数
+- 便于在正式全量回放前，先跑前 `10` 个病例做 smoke
+
+### 本次实现
+
+- 新增参数：
+  - `--limit`
+- 语义：
+  - `0` 表示不限制
+  - `10` 表示只运行前 `10` 个病例
+- `benchmark_summary.json` 额外补充：
+  - `case_limit`
+
+### 使用建议
+
+对于当前这种标准 batch replay：
+
+- 不建议先折腾“深度思考模式”
+- 更合适的顺序是：
+  1. 先用默认模型配置跑 `--limit 10`
+  2. 确认 Neo4j、LLM、日志与前端展示链路正常
+  3. 再决定是否全量跑 `227` 个病例
+
+## 十七、2026-04-26：batch replay 增加终端进度条
+
+### 本次目标
+
+- 改善标准 `run_batch_replay.py` 的终端可观测性
+- 在小样本 smoke 或全量回放时，实时看到已完成病例数和总病例数
+
+### 本次实现
+
+- [run_batch_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_batch_replay.py)
+  - 新增 `_format_progress_line()`
+  - 新增 `_emit_progress()`
+  - `run_cases` 执行期间会向 `stderr` 持续输出进度条
+- 典型输出形式：
+
+```text
+[batch_replay] 进度 [##########--------------] 已完成病例：2 / 10
+```
+
+### 结果影响
+
+- 不改变 `stdout` 最终 JSON 摘要
+- 不改变 `replay_results.jsonl`
+- 不改变 `benchmark_summary.json`
+- 只增强终端运行时可见性
+
+## 十八、2026-04-26：压缩 batch replay 最终报告中的重量级 metadata
+
+### 本次目标
+
+- 降低标准 `run_batch_replay.py` 在批量运行时的内存占用
+- 避免把完整搜索树和完整搜索结果对象长期挂在每个病例的 `final_report` 上
+
+### 问题来源
+
+此前 `ReportBuilder.build_final_report()` 会把 `session_state.metadata` 原样写入：
+
+- `search_tree`
+- `last_search_result`
+
+这两个字段本身都是运行态对象。批量 replay 时，每个病例的 `ReplayResult.final_report` 都会继续引用它们，导致已经跑完的病例也无法及时释放对应的搜索树和轨迹对象，内存占用会被持续放大。
+
+### 本次实现
+
+- [brain/report_builder.py](/Users/loki/Workspace/GraduationDesign/brain/report_builder.py)
+  - 新增 `_build_public_metadata()`
+  - 新增 `_sanitize_lightweight_metadata_value()`
+  - 新增 `search_tree` 轻量摘要：
+    - `search_tree_summary.root_id`
+    - `search_tree_summary.node_count`
+  - 新增 `last_search_result` 轻量摘要：
+    - `best_answer_id`
+    - `best_answer_name`
+    - `trajectory_count`
+    - `answer_group_score_count`
+  - 最终报告不再原样保留：
+    - `search_tree`
+    - `last_search_result`
+- [tests/test_report_builder.py](/Users/loki/Workspace/GraduationDesign/tests/test_report_builder.py)
+  - 新增回归测试，确保最终报告 metadata 中不再出现原始重量级对象
+
+### 结果影响
+
+- `replay_results.jsonl` 仍可直接被前端实验复盘模式读取
+- `final_report` 的核心字段不变：
+  - `candidate_hypotheses`
+  - `best_final_answer`
+  - `answer_group_scores`
+  - `why_this_answer_wins`
+  - `trajectory_count`
+- 仅 `final_report.metadata` 从“原始运行态对象”改为“轻量摘要 + 小型 JSON 友好字段”
+
+### 验证
+
+执行：
+
+```bash
+conda run -n GraduationDesign python -m pytest tests/test_report_builder.py tests/test_run_batch_replay.py tests/test_replay_engine.py -q
+```
+
+结果：
+
+```text
+9 passed
+```
+
+## 十九、2026-04-26：batch replay 支持增量落盘与断点续跑
+
+### 本次目标
+
+- 让标准 `run_batch_replay.py` 在长时间运行时更可靠
+- 每完成一个病例立即落盘，而不是等全部结束后一次性写出
+- 若运行被中断，下次启动时可以自动跳过已完成病例
+
+### 本次实现
+
+- [scripts/run_batch_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_batch_replay.py)
+  - 新增 `_run_cases_streaming()`，允许病例完成后立刻触发回调
+  - 标准主流程改为“每完成一个病例就立刻”：
+    - 追加写入 `replay_results.jsonl`
+    - 追加写入 `run.log`
+    - 覆盖更新 `benchmark_summary.json`
+    - 覆盖更新 `status.json`
+  - 新增 `_load_existing_replay_results()`，启动时会读取已有 `replay_results.jsonl`
+  - 默认启用断点续跑：若输出目录里已经存在已完成病例，会自动按 `case_id` 跳过
+  - 新增参数：
+    - `--no-resume`：禁用断点续跑，强制重跑全部病例
+
+### 结果影响
+
+- 即使 batch replay 意外中断，已经完成的病例结果也不会丢失
+- 再次运行同一输出目录时，系统会直接从未完成病例继续
+- 前端实验复盘模式可直接读取：
+  - `replay_results.jsonl`
+  - `benchmark_summary.json`
+  - `status.json`
+  - `run.log`
+
+### 验证
+
+执行：
+
+```bash
+conda run -n GraduationDesign python -m pytest tests/test_run_batch_replay.py tests/test_replay_engine.py -q
+```
+
+结果：
+
+```text
+8 passed
+```
+
+## 二十、2026-04-26：batch replay 增加病例级耗时统计
+
+### 本次目标
+
+- 定位标准 batch replay 为什么会长时间卡住
+- 不再只知道“还没跑完”，而是能看到慢在：
+  - opening 生成
+  - 首轮 brain 处理
+  - 患者逐轮回答
+  - brain 逐轮处理
+  - finalize
+
+### 本次实现
+
+- [simulator/replay_engine.py](/Users/loki/Workspace/GraduationDesign/simulator/replay_engine.py)
+  - `ReplayTurn` 新增：
+    - `patient_answer_seconds`
+    - `brain_turn_seconds`
+    - `total_seconds`
+  - `ReplayResult` 新增：
+    - `timing`
+  - 每个病例现在会记录：
+    - `started_at`
+    - `finished_at`
+    - `opening_seconds`
+    - `initial_brain_seconds`
+    - `patient_answer_seconds_total`
+    - `brain_turn_seconds_total`
+    - `finalize_seconds`
+    - `total_seconds`
+    - `max_patient_answer_seconds`
+    - `max_brain_turn_seconds`
+    - `slowest_turn_index`
+    - `slowest_turn_total_seconds`
+- [scripts/run_batch_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_batch_replay.py)
+  - `benchmark_summary.json` 新增 `timing_summary`
+  - `status.json` 新增 `timing_summary`
+  - `run.log` 现在会在每个病例完成时输出完整耗时拆分
+  - `run.log` / `status.json` 还会记录当前已启动的活动病例，便于判断是不是某几个病例异常慢
+
+### 结果影响
+
+- 现在只要打开：
+  - `run.log`
+  - `status.json`
+  - `benchmark_summary.json`
+  就能快速判断慢在哪里
+- 对前端实验复盘没有破坏性影响；只是 replay 结果里多了 timing 字段
+
+### 验证
+
+执行：
+
+```bash
+conda run -n GraduationDesign python -m pytest tests/test_run_batch_replay.py tests/test_replay_engine.py -q
+```
+
+结果：
+
+```text
+8 passed
+```
+
+## 二十一、2026-04-26：修复 Ctrl+C 中断后线程池不退出导致的高内存占用
+
+### 本次目标
+
+- 解决用户在 `batch replay` 运行中按下 `Ctrl+C` 后，Python 进程仍长期占用大量内存的问题
+- 避免主线程已中断，但 `ThreadPoolExecutor` worker 仍继续运行
+
+### 问题原因
+
+标准 `ThreadPoolExecutor` 的 worker 线程是非 daemon。此前 `run_batch_replay.py` 使用：
+
+- `with ThreadPoolExecutor(...) as executor`
+
+当 `KeyboardInterrupt` 在主线程中触发时，`with` 语句退出会调用：
+
+- `executor.shutdown(wait=True)`
+
+这会导致主进程继续等待并发 worker 收尾。对于已经进入 Neo4j 检索、LLM 调用或搜索推理的任务，这种等待可能很长，因此表现为：
+
+- 终端已经按下 `Ctrl+C`
+- 但 `python3.10` 进程仍继续占用几十 GB 内存
+
+### 本次实现
+
+- [scripts/run_batch_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_batch_replay.py)
+  - 将 `_run_cases_streaming()` 中的 `ThreadPoolExecutor` 改为手动管理，而不是依赖 `with`
+  - 捕获 `KeyboardInterrupt` 时先执行：
+    - `executor.shutdown(wait=False, cancel_futures=True)`
+  - 主流程在写完：
+    - `status.json`
+    - `run.log`
+    后，不再 `raise SystemExit(130)`，而是调用：
+    - `_force_exit_after_interrupt()`
+    - 内部使用 `os._exit(130)` 直接结束进程
+
+### 结果影响
+
+- `Ctrl+C` 后不会再长时间等待线程池自然收尾
+- 已落盘的：
+  - `replay_results.jsonl`
+  - `benchmark_summary.json`
+  - `status.json`
+  - `run.log`
+  仍然保留，可直接续跑
+- 由于当前已经支持断点续跑，强制退出不会破坏下一次恢复运行
+
+### 验证
+
+执行：
+
+```bash
+conda run -n GraduationDesign python -m pytest tests/test_run_batch_replay.py tests/test_replay_engine.py -q
+```
+
+结果：
+
+```text
+9 passed
+```
+
+## 二十二、2026-04-26：增强 batch replay 的终端可见性与运行中心跳
+
+### 本次目标
+
+- 解决用户运行 `batch replay` 半小时后终端几乎没有任何输出、无法判断是否卡住的问题
+- 让 `conda run` 场景下也能看到实时启动/完成/心跳信息
+
+### 问题原因
+
+此前标准 `run_batch_replay.py` 虽然已经支持进度条，但仍有两个现实限制：
+
+- 进度只会在病例完成时更新；如果并发中的最后 1-2 个病例运行很久，终端会长时间沉默
+- 用户常用的是：
+  - `conda run -n GraduationDesign python scripts/run_batch_replay.py ...`
+  在默认 capture 模式下，`stdout/stderr` 的实时输出不稳定，容易让人误以为后端“完全没有反应”
+
+### 本次实现
+
+- [scripts/run_batch_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_batch_replay.py)
+  - 新增终端输出助手，优先直接写 `/dev/tty`，退回时再写 `stderr`
+  - 保留病例级进度条，但改为每次更新都输出完整可见行
+  - 新增病例启动提示：
+    - `病例启动 3/10：case_id=...`
+  - 新增病例完成提示：
+    - `病例完成 8/10：case_id=... total_seconds=...`
+  - 新增后台心跳线程，默认每 15 秒输出一次：
+    - 已完成病例数
+    - 当前活动病例数
+    - 当前运行时间最长的活动病例
+  - `status.json` 对外仍只保留：
+    - `case_id`
+    - `case_title`
+    - `started_at`
+    不暴露内部 `started_epoch`
+
+### 结果影响
+
+- 即使长时间没有新病例完成，终端也会持续输出心跳
+- 更容易判断系统到底是：
+  - 正在正常运行
+  - 卡在某个长病例
+  - 已经有病例启动但尚未完成
+- 对外部结果文件没有破坏性影响：
+  - `replay_results.jsonl`
+  - `benchmark_summary.json`
+  - `status.json`
+  - `run.log`
+  都维持原有用途
+
+### 建议运行方式
+
+为避免 `conda run` 的输出捕获影响观察，当前推荐：
+
+```bash
+conda run --no-capture-output -n GraduationDesign python scripts/run_batch_replay.py ...
+```
+
+### 验证
+
+执行：
+
+```bash
+conda run -n GraduationDesign python -m pytest tests/test_run_batch_replay.py tests/test_replay_engine.py -q
+```
+
+结果将在本轮修改完成后记录。
+
+实际执行：
+
+```bash
+conda run -n GraduationDesign python -m pytest tests/test_run_batch_replay.py tests/test_replay_engine.py -q
+```
+
+结果：
+
+```text
+11 passed
+```
+
+## 二十三、2026-04-26：修正 batch replay 的信号中断与亚秒级耗时日志
+
+### 本次目标
+
+- 继续追查 `Ctrl+C` 后 Python 进程仍残留的问题
+- 解释并修正 `run.log` 中大量 `0.00` 耗时导致的可观测性误导
+
+### 现象复盘
+
+用户提供的 `run.log` 显示了两个问题：
+
+- 部分病例完成后，`total_seconds / opening_seconds / brain_turn_seconds_total` 看起来全是 `0.00`
+- 中断后仍需要手动 `kill` 残留 Python 进程
+
+进一步检查落盘结果发现：
+
+- 那些“全 0”病例并非真的没有运行，而是实际耗时处于毫秒级，例如：
+  - `initial_brain_seconds = 0.0001`
+  - `brain_turn_seconds_total = 0.0008`
+  - `total_seconds = 0.0007`
+- 由于 `run.log` 统一保留两位小数，毫秒级耗时被四舍五入成了 `0.00`
+- 病人回答侧持续接近 `0.00`，在当前 smoke 命令下通常意味着：
+  - 实际已经退回规则回答
+  - 或当前环境未提供可用 LLM key
+
+### 本次实现
+
+- [scripts/run_batch_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_batch_replay.py)
+  - 新增 `_format_duration_value()`：
+    - 对 `<1s` 的耗时保留四位小数
+    - 对 `>=1s` 的耗时保留两位小数
+  - 启动时追加记录：
+    - `llm_available=true/false`
+  - 新增显式信号处理：
+    - `SIGINT`
+    - `SIGTERM`
+  - 中断时仍保持原有策略：
+    - 先写 `status.json`
+    - 再写 `run.log`
+    - 最后强制退出进程
+  - 运行结束或测试场景下，显式恢复原信号处理器
+
+### 结果影响
+
+- `run.log` 不会再把 `0.0007s` 这类真实运行时间误显示成 `0.00`
+- 看到 `patient_answer_seconds_total≈0` 时，可以直接结合启动行里的 `llm_available` 判断是不是已经退回规则病人
+- 中断路径不再只依赖 `KeyboardInterrupt`，也覆盖 `SIGTERM`
+
+### 验证
+
+执行：
+
+```bash
+conda run -n GraduationDesign python -m pytest tests/test_run_batch_replay.py tests/test_replay_engine.py -q
+conda run -n GraduationDesign python -m py_compile scripts/run_batch_replay.py simulator/replay_engine.py
+```
+
+结果：
+
+```text
+11 passed
+py_compile passed
+```
+
+## 二十四、2026-04-26：让 batch replay CLI 自动读取 frontend 本机配置
+
+### 本次目标
+
+- 解决 `frontend.local.yaml` 已配置 API key，但 `run_batch_replay.py` 单独运行时仍显示 `llm_available=false` 的问题
+- 统一前端实时模式与 CLI replay 的配置来源
+
+### 本次实现
+
+- [scripts/run_batch_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_batch_replay.py)
+  - 启动时自动执行：
+    - `load_frontend_config()`
+    - `apply_config_to_environment(...)`
+  - 这样 CLI replay 会像前端一样读取：
+    - `configs/frontend.yaml`
+    - `configs/frontend.local.yaml`
+  - 然后再构建：
+    - `LlmClient`
+    - `ConsultationBrain`
+    - `VirtualPatientAgent`
+
+### 结果影响
+
+- 不再要求每次手动 `export DASHSCOPE_API_KEY` / `OPENAI_MODEL` / `NEO4J_PASSWORD`
+- 只要本机 `frontend.local.yaml` 已配置，batch replay 启动日志中的：
+  - `llm_available=true/false`
+  就能真实反映当前 CLI 环境
+
+### 验证
+
+执行：
+
+```bash
+conda run -n GraduationDesign python -m pytest tests/test_run_batch_replay.py tests/test_replay_engine.py -q
+conda run -n GraduationDesign python -m py_compile scripts/run_batch_replay.py
+```
+
+结果：
+
+```text
+11 passed
+py_compile passed
+```
+
+## 十六、2026-04-26：显式关闭 LLM 深度思考
+
+### 本次目标
+
+- 不再依赖 DashScope / OpenAI compatible 服务端的默认 thinking 行为
+- 把 `enable_thinking` 做成明确配置，并默认关闭
+
+### 本次实现
+
+- [brain/llm_client.py](/Users/loki/Workspace/GraduationDesign/brain/llm_client.py)
+  - 新增 `enable_thinking` 配置读取
+  - 支持从 `OPENAI_ENABLE_THINKING` / `DASHSCOPE_ENABLE_THINKING` 读取
+  - 默认值为 `false`
+  - 调用 `chat.completions.create()` 时显式传入：
+    - `extra_body={"enable_thinking": false}`
+- [frontend/config_loader.py](/Users/loki/Workspace/GraduationDesign/frontend/config_loader.py)
+  - 新增 `llm.enable_thinking`
+  - 会桥接为环境变量 `OPENAI_ENABLE_THINKING`
+- [configs/frontend.yaml](/Users/loki/Workspace/GraduationDesign/configs/frontend.yaml)
+  - 默认配置加入 `enable_thinking: false`
+
+### 结果影响
+
+- 当前仓库内的标准 LLM 调用已明确关闭深度思考
+- 前端配置表会直接显示“LLM 深度思考：关闭”
+- 后续如果要临时开启，只需要把：
+  - `configs/frontend.local.yaml` 中的 `llm.enable_thinking`
+  - 或环境变量 `OPENAI_ENABLE_THINKING`
+  改为 `true`
+
+### 本次意义
+
+- 刷新了当前用于人工质检的抽样材料
+- 让 `README.md`、`simulator/README.md` 和 changelog 中记录的输出文件保持与当前实际落盘内容一致
+- 为后续继续检查 `selected_positive_slots` 与 `opening_slot_names` 是否仍有结构化残留提供了统一入口
+
+## 二十五、2026-04-26：收口 competitive opening、intake 空转与 replay timing 口径
+
+### 本次目标
+
+- 接住一批 `competitive` bench replay 在 intake 阶段空转的问题
+- 修掉 `HIV感染 / 抗逆转录病毒治疗 / 免疫功能低下` 被直接渲染成主诉 opening 的病例质量问题
+- 让 batch replay 的 timing 字段更接近真实口径，避免毫秒级 round 累计误导
+
+### 现象复盘
+
+这轮排查先确认了两件事：
+
+- `run_batch_replay.py` 接入前端本机配置后，CLI 启动日志已经可以稳定显示 `llm_available=true`
+- 但即使 LLM 可用，仍有一批 `competitive` 病例会在首轮 opening 就把背景风险信息当成主诉，例如：
+  - `最近主要想咨询一下HIV感染、抗逆转录病毒治疗相关的情况。`
+
+进一步复盘发现问题分成三层：
+
+- `brain/service.py`
+  - 对无信息 opening 会不断重复 `collect_chief_complaint`
+- `brain/med_extractor.py` / `brain/evidence_parser.py`
+  - 规则词典对 `畏光 / 视力下降 / 嗜睡 / 精神错乱 / 认知异常` 等 competitive 常见表达覆盖不足
+  - LLM 若返回 `clinical_features: "嗜睡、精神错乱、痴呆"` 这类字符串，而不是数组，会被整段丢掉
+- `simulator/graph_case_generator.py`
+  - `competitive` opening 直接使用 `shared_low_cost`
+  - 一旦 shared 里主要是 `HIV感染 / HIV感染者 / ART / 免疫功能低下` 这类背景项，就会把它们直接渲染成 chief complaint
+
+另外，timing 里还暴露了一个可观测性问题：
+
+- 某些毫秒级病例会出现：
+  - `initial_brain_seconds = 0.0001`
+  - `brain_turn_seconds_total = 0.0008`
+  - `total_seconds = 0.0007`
+- 这不代表 wall-clock 丢失，而是逐轮 round 后累计，导致 `brain_turn_seconds_total` 被放大
+
+### 本次实现
+
+- [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - 新增 repeated chief complaint 保护
+  - 若已经追问过一次主诉，但回答仍无任何可推理线索，则直接以：
+    - `repeated_chief_complaint_without_signal`
+    停止，而不是继续空转 8 轮
+
+- [brain/med_extractor.py](/Users/loki/Workspace/GraduationDesign/brain/med_extractor.py)
+  - 扩充 competitive 常见症状 / 风险 fallback 词典
+  - 新增对字符串型 `clinical_features` 的容错解析
+  - 会把这类输出拆成可落到 `PatientContext.clinical_features` 的结构化条目
+
+- [brain/evidence_parser.py](/Users/loki/Workspace/GraduationDesign/brain/evidence_parser.py)
+  - 扩充 A1 fallback 词典
+  - 若 LLM 通道成功返回但 `key_features=[]`，自动退回规则抽取，而不是把“空成功”当成有效结果
+
+- [simulator/graph_case_generator.py](/Users/loki/Workspace/GraduationDesign/simulator/graph_case_generator.py)
+  - `competitive` opening 改为：
+    - 先选 shared 里的自然开场项
+    - 不足时再用 target-only 的症状 / 具体检查结果补足
+    - 若仍没有自然 opening，则回退到疾病名
+  - opening 过滤中新增：
+    - `PopulationGroup`
+    - `HIV感染 / HIV感染者 / HIV/AIDS / 抗逆转录病毒治疗 / 免疫功能低下`
+    这类背景风险项不再作为 chief complaint
+
+- [simulator/replay_engine.py](/Users/loki/Workspace/GraduationDesign/simulator/replay_engine.py)
+  - timing 改为先累计原始浮点耗时，再在落盘前统一 round
+  - 降低毫秒级病例里逐轮 round 带来的放大误导
+
+- [scripts/run_batch_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_batch_replay.py)
+  - 续跑读取历史 `replay_results.jsonl` 时，保留逐轮：
+    - `patient_answer_seconds`
+    - `brain_turn_seconds`
+    - `total_seconds`
+
+### 结果影响
+
+- `competitive` 病例不再把 `HIV / ART / 免疫功能低下` 直接当成开场主诉
+- 即使 opening 仍然较弱，brain 也不会继续重复 `__chief_complaint__` 到最大轮次
+- LLM schema 稍微“松”一点时，A1 / MedExtractor 仍能保住核心线索
+- batch replay 的 timing 字段更适合和真实 wall-clock 一起看，不会再因为逐轮 round 把毫秒级累计放大
+
+### 验证
+
+执行：
+
+```bash
+conda run -n GraduationDesign python -m pytest tests/test_graph_case_generator.py tests/test_replay_engine.py tests/test_run_batch_replay.py -q
+conda run -n GraduationDesign python -m pytest tests/test_service_stop_flow.py tests/test_med_extractor.py tests/test_evidence_parser.py -q
+conda run -n GraduationDesign python scripts/generate_graph_virtual_patients.py
+```
+
+结果：
+
+- `35 passed`
+- `26 passed`
+- 重新生成正式图谱病例输出：
+  - `generated_case_count = 227`
+  - `competitive = 51`
+- 对新生成的 `graph_cases_20260426_final/cases.json` 复查后：
+  - `competitive` 中 `HIV / ART / 免疫功能低下` 式 opening 数量为 `0`
+
+## 二十六、2026-04-26：延后早期 verifier，收紧 competitive 慢病例的每轮成本
+
+### 本次目标
+
+- 处理 `competitive` replay 中少数病例长时间占住 worker、不在数分钟内收口的问题
+- 避免在还不可能 stop 的早期轮次反复调用高成本 `trajectory_agent_verifier`
+
+### 现象复盘
+
+继续复盘 `graph_cases_20260426_smoke10` 后，确认：
+
+- `kg_competitive_1094c4fa_vs_77bbd6d1_001` 这类病例并不是坏 opening 或 intake 死循环
+- 真正问题是高混淆神经系统竞争病例在常规追问里重复支付多次 LLM 成本
+
+在修复前，对同一慢病例做 turn profile，曾观察到：
+
+- `TURN 0` 约 `39s`
+- `TURN 1` 约 `33s`
+- `TURN 2` 约 `36s`
+
+其中主要消耗来自：
+
+- `A2` 在 A3 常规追问中重复重算
+- `A4 deductive judge` 对“没有步态异常”这类明确短答也继续调用 LLM
+- `trajectory_agent_verifier` 在每轮都运行，即使：
+  - `turn_index` 还没达到最早可接受窗口
+  - 同一答案的 `trajectory_count` 也还不足以 stop
+
+### 本次实现
+
+- [brain/trajectory_evaluator.py](/Users/loki/Workspace/GraduationDesign/brain/trajectory_evaluator.py)
+  - 新增：
+    - `llm_verifier_min_turn_index`
+    - `llm_verifier_min_trajectory_count`
+  - 当当前轮次还没进入可停止观察窗口时：
+    - 不调用 `trajectory_agent_verifier`
+    - 临时退回 fallback agent evaluation
+    - 在 metadata 中记录：
+      - `verifier_mode = llm_verifier_deferred`
+      - `verifier_deferred_reason`
+
+- [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - `run_reasoning_search()` 现在会把 `session_turn_index` 传给 `TrajectoryEvaluator`
+  - 默认构造会把 verifier 延后阈值对齐到 stop 配置：
+    - `min_turn_index_before_final_answer`
+    - `min_trajectory_count_before_accept`
+
+- [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml)
+  - 显式加入：
+    - `path_evaluation.llm_verifier_min_turn_index: 2`
+    - `path_evaluation.llm_verifier_min_trajectory_count: 2`
+
+### 结果影响
+
+- 早期 A3 追问轮次不会再因为 verifier 过早出场而把单轮耗时拉到 30~40 秒
+- verifier 仍保留在真正可能 stop 或需要更严谨终局评审的窗口里
+- repair / guarded gate 的主要语义不变，但不再在“还不可能终止”的轮次提前付费
+
+### 验证
+
+执行：
+
+```bash
+conda run -n GraduationDesign python -m pytest tests/test_trajectory_evaluator.py tests/test_service_config.py tests/test_service_stop_flow.py tests/test_evidence_parser.py tests/test_med_extractor.py -q
+python -m py_compile brain/trajectory_evaluator.py brain/service.py
+```
+
+结果：
+
+- `34 passed`
+- `py_compile` 通过
+
+对同一慢病例 `kg_competitive_1094c4fa_vs_77bbd6d1_001` 做 turn-by-turn 复核后，前 6 个 brain turn 耗时已经下降到：
+
+- `TURN 0 = 25.267s`
+- `TURN 1 = 17.302s`
+- `TURN 2 = 15.920s`
+- `TURN 3 = 11.727s`
+- `TURN 4 = 8.330s`
+- `TURN 5 = 9.331s`
+
+这说明当前问题已经从“单轮 30~40 秒连续堆叠、导致病例长时间占住 worker”明显收缩到“仍然偏慢，但回到可接受的分钟级 replay 成本”。
+
+## 二十七、2026-04-26：修掉 competitive 晚期 replay 的大对象复制与 GC 爆炸
+
+### 本次目标
+
+- 继续处理少数 `competitive` 病例在第 7~8 轮突然退化到数百秒甚至上千秒的问题
+- 判断这类超慢病例到底是：
+  - 医学推理逻辑错误
+  - LLM / Neo4j 外部调用变慢
+  - 还是 Python 本地运行时对象膨胀
+
+### 现象复盘
+
+在上一轮优化后，大多数病例已经回到 `100~160s` 左右，但仍有少数病例在最后几轮异常退化，例如：
+
+- `kg_competitive_3726b8b4_vs_b4059736_001`
+  - `total_seconds = 1145.24`
+  - `slowest_turn = 8:476.61s`
+- `kg_competitive_2102c689_vs_b247711a_001`
+  - `total_seconds = 1737.95`
+  - `slowest_turn = 8:1449.70s`
+- `kg_competitive_32e052bf_vs_d0c8e771_001`
+  - 在原 smoke10 中直到用户中断前仍未完成
+
+逐轮轨迹显示，这些病例在后期常出现明显跑偏的问题，例如：
+
+- `新型冠状病毒感染 vs 结核病`
+  - 后面开始追问 `BMI`
+  - 甚至追问 `抗病毒药依从性`
+- `CMV肺炎 vs CMV脑炎`
+  - 在 verifier 拒停后不断被引向 `HIV感染者` / `免疫抑制状态`
+
+这说明：
+
+- 病例本身不是 bad opening
+- 也不只是 LLM 调得慢
+- 而是后期 repair / reroot 过程中，某些通用高连接证据节点被带入搜索，进而放大运行时状态复制成本
+
+为了确认是不是本地运行时问题，对卡长中的 Python 进程做了采样，看到：
+
+- 一个进程主要卡在：
+  - `dict_dealloc`
+- 另一个进程主要卡在：
+  - `gc_collect_main`
+  - `deduce_unreachable`
+- 当时物理内存已经膨胀到：
+  - `14.9GB`
+  - `19.0GB`
+
+所以这次慢的主因不是网络，而是：
+
+- 搜索树 / rollout state / 最近搜索结果之间形成了巨大的对象图
+- reroot 时又把这些对象通过 `deepcopy(state)` 递归复制进新的树节点
+- 最后在第 7~8 轮触发超重 GC
+
+### 根因定位
+
+进一步检查发现，问题集中在两条链上：
+
+- [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - `_ensure_search_tree()` 创建新 root 时，会把：
+    - `deepcopy(state)`
+    存进 root metadata 的 `rollout_state`
+  - 但此时 `state.metadata` 里可能已经带着旧的：
+    - `search_tree`
+    - `last_search_result`
+- `run_reasoning_search()` 中 child node 也会保存 rollout state
+  - 一旦 rollout state 本身再带着旧树、旧 search result，就会出现递归复制
+
+换句话说，之前晚期超慢的更准确机制是：
+
+- verifier 拒停
+- reroot 频繁发生
+- 每次 reroot 都把上一轮整棵树和最近搜索结果再拷一层
+- Python 最后把大量时间花在对象析构和 GC 上
+
+### 本次实现
+
+- [brain/state_tracker.py](/Users/loki/Workspace/GraduationDesign/brain/state_tracker.py)
+  - 新增：
+    - `get_rollout_session_copy()`
+    - `build_rollout_session_snapshot()`
+  - rollout 专用快照只保留推演必需字段：
+    - `turn_index`
+    - `active_topics`
+    - `slots`
+    - `evidence_states`
+    - `exam_context`
+    - `candidate_hypotheses`
+    - `asked_node_ids`
+    - `fail_count`
+  - 明确去掉：
+    - `metadata`
+    - `trajectories`
+    - `action_stats`
+    - `state_visit_stats`
+
+- [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - `_ensure_search_tree()` 创建 root 时，不再使用：
+    - `deepcopy(state)`
+  - 改为：
+    - `tracker.get_rollout_session_copy(session_id)`
+  - `_build_rollout_context_from_leaf()` 在没有缓存 state 时，也改为取轻量 rollout copy
+  - child node 写回 `rollout_state` 时，再次做轻量 snapshot，避免未来改动把重 metadata 带回来
+
+### 结果影响
+
+- reroot 不再递归复制旧的 `search_tree` 与 `last_search_result`
+- competitive 病例后几轮不再因为 Python GC 爆炸而拖到 8 分钟 / 24 分钟
+- 这次修复主要改变的是运行时内存行为，不改变医学推理判定本身
+
+### 验证
+
+执行：
+
+```bash
+conda run -n GraduationDesign python -m pytest tests/test_state_tracker.py tests/test_service_repair_flow.py tests/test_service_stop_flow.py tests/test_trajectory_evaluator.py -q
+python -m py_compile brain/state_tracker.py brain/service.py
+```
+
+结果：
+
+- `24 passed`
+- `py_compile` 通过
+
+另外对三条最慢病例做了单病例复测：
+
+- `kg_competitive_2102c689_vs_b247711a_001`
+  - 修复前：
+    - `total_seconds = 1737.95`
+    - `max_brain_turn_seconds = 1439.18`
+  - 修复后：
+    - `total_seconds = 93.90`
+    - `max_brain_turn_seconds = 8.98`
+
+- `kg_competitive_3726b8b4_vs_b4059736_001`
+  - 修复前：
+    - `total_seconds = 1145.24`
+    - `max_brain_turn_seconds = 470.61`
+  - 修复后：
+    - `total_seconds = 118.93`
+    - `max_brain_turn_seconds = 14.06`
+
+- `kg_competitive_32e052bf_vs_d0c8e771_001`
+  - 原 smoke10 中未在用户中断前完成
+  - 修复后单跑：
+    - `total_seconds = 111.97`
+    - `max_brain_turn_seconds = 10.49`
+
+### 当前结论
+
+这批“最后一条特别慢”的根因主要是诊断系统的运行时实现问题，而不是病例质量问题本身：
+
+- 病例会让系统进入更容易 reroot / repair 的高混淆路径
+- 但真正把耗时放大到几十分钟的，是 rollout state 对 `search_tree` / `last_search_result` 的递归复制与后续 GC 爆炸
+
+因此，这次优先修运行时对象管理是正确顺序。
+
+## 二十八、2026-04-27：补充 brain 详细运行链路指南
+
+### 本次目标
+
+- 为后续论文写作、答辩讲解和代码交接补一份可以直接顺着源码阅读的 `brain` 运行说明
+- 重点回答“病人说了一句话之后，系统内部到底按什么顺序调用了哪些函数”
+- 把实时模式、CLI 与离线 replay 共用的主入口和差异讲清楚
+
+### 本次实现
+
+- 新增文档：
+  - [brain_runtime_call_chain_guide.md](/Users/loki/Workspace/GraduationDesign/docs/brain_runtime_call_chain_guide.md)
+  - 内容覆盖：
+    - `start_session()` / `process_turn()` 作为统一对外入口
+    - `PatientContext`、`SessionState`、`MctsAction`、`SearchResult`、`StopDecision` 等核心运行时对象
+    - 从 `MedExtractor -> update_from_pending_action -> A1 -> A2 -> A3/search -> verifier/repair -> report` 的完整单轮链路
+    - `collect_chief_complaint`、`collect_exam_context`、普通 `verify_evidence` 三类回答处理分支
+    - `run_reasoning_search()` 内部的 `search tree / select_leaf / R2 / ActionBuilder / rollout / backprop / trajectory evaluator`
+    - 实时前端、CLI、`ReplayEngine` 的外层调用链
+
+- 更新入口文档：
+  - [README.md](/Users/loki/Workspace/GraduationDesign/README.md)
+    - 增加 brain 详细运行链路指南链接
+  - [brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
+    - 在目录关系区补充详细运行链路说明入口
+
+### 结果影响
+
+- 现在可以从文档直接回答：
+  - 首轮主诉进入系统后具体跑了哪些函数
+  - 后续病人回答上一轮问题时，A4 和状态更新先发生什么
+  - 为什么系统不是机械的 `A1 -> A2 -> A3 -> A4` 单向流水线，而是“先消化上一问，再决定下一步”的单轮编排器
+  - verifier / guarded gate / repair 为什么会让系统“已经像能停了，但还继续问一轮”
+
+### 验证
+
+- 人工逐文件核对并回填到文档：
+  - [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - [brain/state_tracker.py](/Users/loki/Workspace/GraduationDesign/brain/state_tracker.py)
+  - [brain/types.py](/Users/loki/Workspace/GraduationDesign/brain/types.py)
+  - [brain/retriever.py](/Users/loki/Workspace/GraduationDesign/brain/retriever.py)
+  - [brain/action_builder.py](/Users/loki/Workspace/GraduationDesign/brain/action_builder.py)
+  - [brain/simulation_engine.py](/Users/loki/Workspace/GraduationDesign/brain/simulation_engine.py)
+  - [brain/trajectory_evaluator.py](/Users/loki/Workspace/GraduationDesign/brain/trajectory_evaluator.py)
+  - [simulator/replay_engine.py](/Users/loki/Workspace/GraduationDesign/simulator/replay_engine.py)
+  - [simulator/patient_agent.py](/Users/loki/Workspace/GraduationDesign/simulator/patient_agent.py)
+- 本次为纯文档更新，未改动运行逻辑，因此未额外执行单元测试
+
+## 二十九、2026-04-28：为 `process_turn()` 补充分段中文注释
+
+### 本次目标
+
+- 让 `brain/service.py` 里的核心单轮编排函数 `process_turn()` 更容易被直接阅读
+- 不改任何控制流，只在关键阶段切换处补充“这一段为什么存在”的中文说明
+- 让后续读代码的人能更容易把源码和 `brain_runtime_call_chain_guide.md` 对上
+
+### 本次实现
+
+- [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - 在 `process_turn()` 内部新增分段中文注释，覆盖：
+    - 单轮入口先做 `increment_turn + ingest_patient_turn + update_from_pending_action`
+    - A1 / entity linking 的执行条件
+    - `route_after_a4` 与 `route_after_slot_update` 如何共同决定 `effective_stage`
+    - 检查 follow-up、主诉澄清、fallback 等快捷分支
+    - 常规主路径中的 `A2 -> run_reasoning_search()`
+    - search 结束后的 `stop rule -> verifier -> repair`
+    - 为什么要把 `selected_action` 再写回 `pending_action`
+
+- [brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
+  - 在 `service.py` 说明处补充：
+    - `process_turn()` 已带分段中文注释，便于顺着源码阅读控制流
+
+### 结果影响
+
+- 现在即使不先看详细设计文档，也能直接在 `process_turn()` 源码里看到：
+  - 哪一段是在消化上一轮回答
+  - 哪一段是在决定本轮是否跑 A1 / A2 / A3
+  - 哪一段是在做 stop / verifier / repair
+  - 哪一段是在构造下一轮 `pending_action`
+
+### 验证
+
+- 执行：
+
+```bash
+python -m py_compile brain/service.py
+```
+
+- 结果：
+  - `py_compile` 通过
+
+- 本次仅增加注释，未改动运行逻辑，因此未额外执行单元测试
+
+## 三十、2026-04-28：补充 AGENTS 长期注释约定
+
+### 本次目标
+
+- 把“核心函数内部关键步骤前也要有中文注释”固化进仓库级 agent 约定
+- 避免后续只满足“文件头 / 函数头有中文说明”，但长函数内部仍缺少流程分段注释
+
+### 本次实现
+
+- 更新：
+  - [AGENTS.md](/Users/loki/Workspace/GraduationDesign/AGENTS.md)
+- 新增约定：
+  - 对于 `brain/`、`simulator/` 等核心流程较长的函数，除了函数上方用途说明外，函数内部的关键步骤、阶段切换、分支入口前也要补充简短中文注释，帮助后续读代码的人顺着控制流理解实现
+
+### 结果影响
+
+- 以后仓库里的注释规范不再只要求：
+  - 文件顶部说明
+  - 类 / 函数用途说明
+- 还明确要求：
+  - 长函数内部关键步骤前的中文分段注释
+
+### 验证
+
+- 人工核对 [AGENTS.md](/Users/loki/Workspace/GraduationDesign/AGENTS.md) 中“工作原则”小节，新增规则已写入
+- 本次为文档规则更新，未涉及代码逻辑与测试执行

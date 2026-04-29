@@ -78,6 +78,8 @@ class SimulationEngine:
         session_state: SessionState,
         primary_hypothesis: HypothesisCandidate | HypothesisScore | None = None,
     ) -> SimulationOutcome:
+        # simulation 不真的调用 LLM 或患者代理，
+        # 而是用动作 prior、关系类型和当前 hypothesis 分数做一个浅层期望收益估计。
         relation_type = str(action.metadata.get("relation_type", ""))
         relation_bonus = float(self.config.relation_bonus_map.get(relation_type, 0.75))
         hypothesis_score = float(primary_hypothesis.score) if primary_hypothesis is not None else 0.0
@@ -86,6 +88,10 @@ class SimulationEngine:
         negative_probability = max(0.05, 1.0 - positive_probability - doubtful_probability)
         contradiction_priority = float(action.metadata.get("contradiction_priority", 0.0))
 
+        # 三条分支分别代表：
+        # - positive：目标证据被确认
+        # - negative：目标证据被否定
+        # - doubtful：患者回答模糊，价值最低但仍可能提供轻微信号
         positive_reward = (
             action.prior_score * relation_bonus * self.config.positive_reward_multiplier
             + hypothesis_score * 0.35
@@ -134,6 +140,8 @@ class SimulationEngine:
         hypothesis_id = action.hypothesis_id or "UNKNOWN"
         hypothesis_name = primary_hypothesis.name if primary_hypothesis is not None else "UNKNOWN"
         branch_payloads = self._build_branch_payloads(action, outcome)
+
+        # 单动作 rollout 直接选择期望收益最高的回答分支，构成最轻量的一条前瞻轨迹。
         selected_branch = sorted(branch_payloads, key=lambda item: (-item["weighted_reward"], item["branch"]))[0]
 
         steps = [
@@ -176,6 +184,7 @@ class SimulationEngine:
         current_hypothesis: HypothesisCandidate | HypothesisScore | None = None,
         competing_hypotheses: list[HypothesisScore] | None = None,
     ) -> ReasoningTrajectory:
+        # rollout 只在临时副本上推进，绝不直接污染真实 session_state。
         rollout_state = deepcopy(state)
         hypothesis = self._resolve_hypothesis(node, rollout_state, current_hypothesis)
         alternatives = list(competing_hypotheses or [])
@@ -189,6 +198,8 @@ class SimulationEngine:
         while action is not None and step_depth < max_depth:
             step_depth += 1
             visited_action_ids.add(action.action_id)
+
+            # 每一层都做“动作预演 -> 选择最优回答分支 -> route -> 回写临时状态 -> 取下一问”。
             outcome = self.simulate_action(action, rollout_state, hypothesis)
             branch_payloads = self._build_branch_payloads(action, outcome)
             selected_branch = sorted(
@@ -202,6 +213,8 @@ class SimulationEngine:
             total_reward += step_reward + context_bonus
             last_stage = decision.next_stage
 
+            # 一旦选中了某条模拟回答，就把它像真实 A4 一样写回 rollout_state，
+            # 这样后续 R2/action selection 才能基于“已知新证据”继续展开。
             self._apply_rollout_state_update(
                 rollout_state,
                 action,
@@ -241,9 +254,11 @@ class SimulationEngine:
                 ]
             )
 
+            # 模拟 path 已经满足 STOP 或当前决策要求终止时，不再继续往下 rollout。
             if decision.next_stage == "STOP" or decision.should_terminate_current_path:
                 break
 
+            # route 可能让当前主假设保持不变，也可能切到 alternatives 中的下一个候选。
             hypothesis, alternatives = self._advance_hypothesis_after_route(
                 hypothesis,
                 rollout_state,
@@ -255,6 +270,7 @@ class SimulationEngine:
             if decision.next_stage not in {"A2", "A3"}:
                 break
 
+            # 继续为新的 hypothesis / rollout_state 选择下一条 follow-up action。
             action = self._select_follow_up_action(
                 hypothesis,
                 alternatives,
@@ -267,6 +283,7 @@ class SimulationEngine:
             if action is None:
                 break
 
+        # 最终轨迹保留 rollout_state 副本，供树节点缓存和后续 reroot/repair 使用。
         final_hypothesis = hypothesis or self._resolve_hypothesis(node, rollout_state, current_hypothesis)
         trajectory = ReasoningTrajectory(
             trajectory_id=f"trajectory::{node.node_id}",
@@ -320,6 +337,7 @@ class SimulationEngine:
             outcome.metadata.get("doubtful_branch_reward", outcome.expected_reward * self.config.doubtful_reward_multiplier)
         )
 
+        # rollout 统一只看三种标准回答分支，保证 router / deductive judge 可复用同一套下游逻辑。
         return [
             {
                 "branch": "positive",
@@ -408,6 +426,8 @@ class SimulationEngine:
         elif deductive_result.certainty == "doubt":
             slot_certainty = "uncertain"
 
+        # rollout 里的模拟回答也会同步写槽位和 evidence_state，
+        # 这样后续 hypothesis feedback 与 follow-up selection 才能读取到完整上下文。
         state.slots[action.target_node_id] = SlotState(
             node_id=action.target_node_id,
             status=slot_status,
@@ -434,6 +454,8 @@ class SimulationEngine:
         )
 
         related_ids = [action.hypothesis_id] if action.hypothesis_id is not None else None
+
+        # 最后把这条模拟证据反馈回 hypothesis 排名，供下一层 rollout 继续沿着“更新后的诊断竞争态”推进。
         state.candidate_hypotheses = hypothesis_manager.apply_evidence_feedback(
             state.candidate_hypotheses,
             state.evidence_states[action.target_node_id],
@@ -478,6 +500,8 @@ class SimulationEngine:
         if current_hypothesis is None:
             return None
 
+        # follow-up selection 仍沿用正式链路里的 R2 + action_builder，
+        # 只是额外过滤 rollout 里已经访问过的动作和已问过节点。
         rows = retriever.retrieve_r2_expected_evidence(current_hypothesis, state, top_k=4)
         actions = action_builder.build_verification_actions(
             rows,
@@ -506,6 +530,8 @@ class SimulationEngine:
         target_name = action.target_node_name
         question_type_hint = str(action.metadata.get("question_type_hint", "symptom"))
 
+        # 如果目标证据已经在患者原话里出现过，rollout 会给一点轻量 bonus，
+        # 反映“这条路径更贴近当前会话上下文”。
         if target_name in raw_text or target_name in normalized_feature_names:
             return 0.1
 

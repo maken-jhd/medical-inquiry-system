@@ -38,6 +38,11 @@ class ActionBuilder:
         actions: List[MctsAction] = []
         exam_context_actions: dict[str, MctsAction] = {}
         alternatives = list(competing_hypotheses or [])
+
+        # 先从当前 hypothesis metadata 中取出两类推荐信号：
+        # - hypothesis 自己推荐的下一步证据
+        # - verifier repair 推荐补齐的关键证据
+        # 后续会把这些信号融合进动作 prior 和 metadata。
         preferred_evidence = self._collect_preferred_evidence(current_hypothesis, "recommended_next_evidence")
         verifier_preferred_evidence = self._collect_preferred_evidence(current_hypothesis, "verifier_recommended_next_evidence")
         hypothesis_preferred_evidence = self._collect_preferred_evidence(
@@ -46,6 +51,8 @@ class ActionBuilder:
         )
 
         for row in rows:
+            # 单条 R2 证据会融合：
+            # 图谱优先级、反证价值、候选假设重叠、推荐证据命中度、获取成本和患者负担。
             priority = float(row.get("priority", 0.0))
             contradiction_priority = float(row.get("contradiction_priority", 0.0))
             relation_weight = float(row.get("relation_weight", 0.0))
@@ -88,6 +95,8 @@ class ActionBuilder:
             priority += accessibility_bias
             patient_burden = self._estimate_patient_burden(acquisition_mode, evidence_cost, question_type_hint)
 
+            # 高成本检查证据不会直接问“结果是什么”，
+            # 而是先看当前 session 里是否已经知道患者做没做过这类检查。
             if exam_kind is not None and session_state is not None and self._is_high_cost_exam_mode(acquisition_mode):
                 general_availability = self._get_exam_availability(session_state, "general")
                 availability = self._get_exam_availability(session_state, exam_kind)
@@ -96,6 +105,8 @@ class ActionBuilder:
                     continue
 
                 if general_availability == "unknown":
+                    # 若还不知道是否做过检查，则把多个高成本证据收敛成一次 exam_context 追问，
+                    # 避免患者在不知道做没做检查前就被逐条追问具体结果。
                     self._accumulate_exam_context_action(
                         exam_context_actions,
                         exam_kind="general",
@@ -114,6 +125,7 @@ class ActionBuilder:
                     )
                     continue
 
+            # 低成本可直接问的证据，或检查上下文已知可继续追问的证据，在这里转成真正的 verify action。
             actions.append(
                 MctsAction(
                     action_id=f"verify::{hypothesis_id}::{row['node_id']}",
@@ -150,6 +162,7 @@ class ActionBuilder:
                 )
             )
 
+        # 高成本证据聚合出的 exam_context 动作最后再并入统一动作列表参与排序。
         actions.extend(exam_context_actions.values())
         return sorted(actions, key=lambda item: (-item.prior_score, item.target_node_name))
 
@@ -177,12 +190,15 @@ class ActionBuilder:
     def render_question_text(self, action: MctsAction, style: str = "clinical") -> str:
         custom_question = str(action.metadata.get("question_text") or "").strip()
 
+        # 若上游已经显式提供 question_text，则优先使用，避免在 repair/follow-up 场景被模板覆盖。
         if len(custom_question) > 0:
             return custom_question
 
         question_type_hint = str(action.metadata.get("question_type_hint", "symptom"))
         target_name = action.target_node_name
 
+        # 检查上下文动作和普通 verify 动作走不同问法：
+        # 前者问“做过没/结果怎样”，后者问“有没有这个证据”。
         if action.action_type == self.config.exam_context_action_type:
             return self._render_exam_context_question(action)
 
@@ -194,6 +210,7 @@ class ActionBuilder:
         if specific_question is not None:
             return specific_question
 
+        # 最后才回退到按 question_type_hint 的通用模板，保证未命中特化规则时也能自然发问。
         target_text = self.patient_friendly_target_name(target_name)
 
         if question_type_hint == "lab":
@@ -218,6 +235,8 @@ class ActionBuilder:
         raw_name = str(target_name or "").strip()
         normalized = self._normalize_evidence_text(raw_name)
 
+        # 下面按几个高频医学语义簇分别改写成人话：
+        # ART、免疫状态、病原学、影像、氧合和风险因素。
         if self._is_art_related(normalized):
             if any(keyword in normalized for keyword in ("依从", "漏服", "停药", "不规律")):
                 return "治疗 HIV/艾滋病的抗病毒药最近有漏服、停药或吃得不规律"
@@ -335,6 +354,9 @@ class ActionBuilder:
         recommended_bonus: float,
     ) -> None:
         action = actions_by_kind.get(exam_kind)
+
+        # candidate_payload 保存“这次 exam_context 动作到底在替哪些具体证据探路”，
+        # 后续 exam_context 回答解析后会再尝试把结果映射回这些节点。
         candidate_payload = {
             "node_id": row["node_id"],
             "label": row.get("label", "Unknown"),
@@ -353,6 +375,8 @@ class ActionBuilder:
         }
 
         if action is None:
+            # 同一类检查只创建一个动作：
+            # 例如多个化验项会合并成一次“最近有没有做过化验”的追问。
             action_type = (
                 self.config.general_exam_context_action_type
                 if exam_kind == "general"
@@ -389,6 +413,7 @@ class ActionBuilder:
             actions_by_kind[exam_kind] = action
             return
 
+        # 若该类动作已存在，只补充候选证据、示例名称和 family tags，不再新建动作。
         action.prior_score = max(action.prior_score, priority - 0.05)
         action.metadata["is_red_flag"] = bool(action.metadata.get("is_red_flag", False)) or bool(
             row.get("is_red_flag", False)
@@ -595,6 +620,8 @@ class ActionBuilder:
         normalized_target = self._normalize_evidence_text(target_name)
         best_match_score = 0.0
 
+        # 匹配顺序从强到弱：
+        # 精确规范化命中 -> 包含关系 -> family/tag 重叠 -> token overlap。
         for preferred in preferred_evidence:
             normalized_preferred = self._normalize_evidence_text(preferred)
             preferred_tags = self._infer_evidence_tags(preferred)

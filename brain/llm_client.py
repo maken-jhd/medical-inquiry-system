@@ -20,11 +20,13 @@ class LlmClient:
         base_url: str | None = None,
         api_key: str | None = None,
         timeout_seconds: float | None = None,
+        enable_thinking: bool | None = None,
     ) -> None:
         self.model = model or os.getenv("OPENAI_MODEL", "qwen3-max")
         self.base_url = base_url or os.getenv("OPENAI_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
         self.api_key = api_key or os.getenv("DASHSCOPE_API_KEY") or os.getenv("OPENAI_API_KEY")
         self.timeout_seconds = timeout_seconds if timeout_seconds is not None else self._read_timeout_seconds()
+        self.enable_thinking = enable_thinking if enable_thinking is not None else self._read_enable_thinking()
         self._client: OpenAI | None = None
 
         if self.api_key:
@@ -49,16 +51,28 @@ class LlmClient:
 
         return max(timeout, 5.0)
 
+    # 显式读取是否开启深度思考；默认关闭，避免依赖服务端默认行为。
+    def _read_enable_thinking(self) -> bool:
+        raw_value = (
+            os.getenv("OPENAI_ENABLE_THINKING")
+            or os.getenv("DASHSCOPE_ENABLE_THINKING")
+            or "false"
+        )
+        return str(raw_value).strip().lower() in {"1", "true", "yes", "on"}
+
     # 执行结构化 Prompt，并尝试将输出反序列化为指定 schema。
     def run_structured_prompt(self, prompt_name: str, variables: dict, schema: Type[Any]) -> Any:
         if self._client is None:
             raise RuntimeError("当前未配置可用的大模型客户端。")
 
+        # 所有结构化调用都走统一 prompt 构造和 JSON response_format，
+        # 这样上游模块只关心 prompt_name 和变量，不需要重复拼 system/user message。
         prompt = self._build_prompt(prompt_name, variables)
         response = self._client.chat.completions.create(
             model=self.model,
             temperature=0,
             response_format={"type": "json_object"},
+            extra_body={"enable_thinking": self.enable_thinking},
             messages=[
                 {
                     "role": "system",
@@ -77,6 +91,9 @@ class LlmClient:
     # 根据 prompt 名称和变量构建统一的文本提示。
     def _build_prompt(self, prompt_name: str, variables: dict) -> str:
         verifier_acceptance_profile = os.getenv("TRAJECTORY_VERIFIER_ACCEPTANCE_PROFILE", "baseline")
+
+        # 这里集中维护所有结构化 prompt 模板；
+        # 各业务模块只传入 prompt_name，避免 prompt 文本散落在整个 brain 目录。
         prompt_blocks = {
             "med_extractor": (
                 "请从患者原话中提取一般信息 P 和临床特征 C。"
@@ -144,6 +161,9 @@ class LlmClient:
                 + self._build_verifier_acceptance_profile_prompt(verifier_acceptance_profile)
             ),
         }
+
+        # verifier prompt 还会额外拼 acceptance_profile 的补充说明，
+        # 让实验脚本只改环境变量就能切换“更保守 / 更宽松”的验收口径。
         prefix = prompt_blocks.get(prompt_name, "请完成结构化医学推理，并输出 JSON。")
         return prefix + "\n\n" + json.dumps(variables, ensure_ascii=False, indent=2, default=self._json_default)
 
@@ -151,6 +171,7 @@ class LlmClient:
     def _build_verifier_acceptance_profile_prompt(self, profile: str) -> str:
         normalized = profile.strip().lower()
 
+        # 不同 profile 只改 verifier 的“停诊倾向”，不改变最终输出 schema。
         if normalized in {"conservative", "strict", "high_precision"}:
             return (
                 "当前 acceptance_profile=conservative。"
@@ -211,4 +232,5 @@ class LlmClient:
         try:
             return schema(**payload)
         except Exception:
+            # schema 对不齐时保留原始 payload，方便上游 fallback 或调试。
             return payload

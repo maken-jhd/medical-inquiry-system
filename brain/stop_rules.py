@@ -173,11 +173,14 @@ class StopRuleEngine:
         if answer_score is None:
             return StopDecision(False, "no_answer_score")
 
+        # 每次都先把当前 top answer 和记一次 verifier 愿意接受的候选写入历史，
+        # 这样 guarded gate 后续才能判断“答案是否刚切换”“之前 accept 过的是不是另一个答案”。
         acceptance_profile = self._acceptance_profile()
         self._record_answer_candidate(session_state, answer_score)
         self._record_verifier_accept_candidate(session_state, answer_score)
         answer_score.metadata["acceptance_profile"] = acceptance_profile
 
+        # 先过基础的时间窗口和轨迹数量门槛，避免问诊过早停止。
         if session_state is not None and session_state.turn_index < self.config.min_turn_index_before_final_answer:
             return StopDecision(False, "turn_index_too_low", float(session_state.turn_index))
 
@@ -195,11 +198,14 @@ class StopRuleEngine:
         ):
             return StopDecision(False, "verifier_rejected_stop", answer_score.agent_evaluation)
 
+        # guarded_lenient profile 只放宽 verifier prompt，
+        # 但最终是否允许停诊仍要经过结构化安全闸门二次确认。
         guarded_decision = self._check_guarded_lenient_acceptance(answer_score, session_state, acceptance_profile)
 
         if guarded_decision is not None:
             return guarded_decision
 
+        # 若没触发 guarded gate，再退回常规数值阈值判断。
         if answer_score.consistency < self.config.min_answer_consistency:
             return StopDecision(False, "consistency_too_low", answer_score.consistency)
 
@@ -226,6 +232,8 @@ class StopRuleEngine:
         session_state: SessionState | None,
         acceptance_profile: str,
     ) -> StopDecision | None:
+        # 只有 guarded_lenient profile 才启用这道 gate；
+        # baseline / strict 等模式仍使用普通阈值，不走额外安全校验。
         if acceptance_profile not in GUARDED_LENIENT_PROFILES:
             return None
 
@@ -237,6 +245,7 @@ class StopRuleEngine:
         if verifier_mode != "llm_verifier" or not bool(answer_score.metadata.get("verifier_should_accept", False)):
             return None
 
+        # 先提炼出所有“是否能停”需要看的结构化证据特征，并挂到 metadata 里便于前端和复盘查看。
         guard_features = self._build_guarded_acceptance_features(answer_score, session_state)
         answer_score.metadata.update(
             {
@@ -246,6 +255,8 @@ class StopRuleEngine:
         )
         session_state.metadata["last_guarded_acceptance_features"] = dict(guard_features)
 
+        # 所有安全特征最后会被压缩成一个最主要的 block_reason，
+        # 这样 repair 分流和实验统计都能稳定消费。
         block_reason = self._select_guarded_block_reason(guard_features)
 
         if len(block_reason) == 0:
@@ -260,6 +271,8 @@ class StopRuleEngine:
             }
             return None
 
+        # 一旦 block，就把拒停原因、guard features 和审计条目全部写回，
+        # 后续 repair 可以据此选更有针对性的补证据动作。
         metadata = {
             **guard_features,
             "acceptance_profile": acceptance_profile,
@@ -297,6 +310,10 @@ class StopRuleEngine:
         answer_score: FinalAnswerScore,
         session_state: SessionState,
     ) -> dict:
+        # 先拆出三类关键证据：
+        # - confirmed：exist + confident 的关键支持
+        # - provisional：exist + doubt 的高价值 anchor
+        # - negative/doubtful：会削弱当前答案的反向证据
         confirmed_key_evidence = self._collect_confirmed_key_evidence(answer_score, session_state)
         provisional_key_evidence = self._collect_provisional_key_evidence(answer_score, session_state)
         negative_or_doubtful_key_evidence = self._collect_negative_or_doubtful_key_evidence(
@@ -349,6 +366,8 @@ class StopRuleEngine:
             and not self._has_prior_verifier_accept_for_answer(answer_score, session_state)
         )
 
+        # 返回的 feature dict 会同时服务：
+        # guarded gate 判停、repair 推荐证据、前端调试展示和实验审计。
         return {
             "guarded_early_accept_window": session_state.turn_index <= self.config.guarded_lenient_early_turn_index,
             "guarded_high_risk_respiratory_answer": high_risk_respiratory_answer,
@@ -388,6 +407,8 @@ class StopRuleEngine:
 
     # 选择一个最主要的 guarded block reason，保持可解释且便于统计。
     def _select_guarded_block_reason(self, guard_features: dict) -> str:
+        # block reason 有明确优先级：
+        # 先看硬反证，再看关键支持缺失，再看强备选和稳定性问题。
         if bool(guard_features.get("guarded_has_hard_negative_key_evidence", False)):
             return "hard_negative_key_evidence"
 
@@ -675,6 +696,8 @@ class StopRuleEngine:
         ) > 0
         is_answer_scoped = evidence_scope in {"answer_scoped", "unscoped"}
 
+        # “当前答案自己的定义性证据被明确否定”才算 hard negative；
+        # 其余共享证据、模糊证据都按 soft 处理，要求更多稳定性但不直接一票否决。
         if is_confident_absence and is_definition_like and is_answer_scoped:
             return {
                 "negative_evidence_tier": "hard",
@@ -738,6 +761,8 @@ class StopRuleEngine:
         return bool(self._evaluate_pcp_combo(evidence_families).get("satisfied", False))
 
     def _evaluate_pcp_combo(self, evidence_families: set[str]) -> dict:
+        # PCP 等高风险呼吸道答案不靠单一 family 放行，
+        # 而是要求若干关键 family 组合之一被满足。
         combo_variants = [
             ("imaging_immune_status_lab", [{"imaging"}, {"immune_status"}]),
             ("imaging_pathogen_or_pcp_specific", [{"imaging"}, {"pathogen", "pcp_specific"}]),
@@ -822,6 +847,7 @@ class StopRuleEngine:
         block_reason: str,
         guard_features: dict,
     ) -> dict:
+        # audit entry 只保留“为什么被挡下”的核心证据，不复制整个 session_state。
         return {
             "turn_index": session_state.turn_index,
             "block_reason": block_reason,
@@ -875,6 +901,8 @@ class StopRuleEngine:
         raw_tags = evidence.metadata.get("evidence_tags", [])
         tags: set[str] = set()
 
+        # 先复用 action_builder / service 已写入的 evidence_tags，
+        # 再从 node_id / name / label / relation_type 做一次文本侧 family 补推断。
         if isinstance(raw_tags, list):
             tags.update(str(tag).strip() for tag in raw_tags if len(str(tag).strip()) > 0)
 
@@ -903,6 +931,8 @@ class StopRuleEngine:
             if any(keyword in text for keyword in keywords):
                 tags.add(tag)
 
+        # 对少数高价值 anchor，再用 allowlist 强制提升到更稳定的 family，
+        # 同时清掉可能串线的旧 family 标签。
         anchor_families = self._anchor_families_from_text(text)
 
         if len(anchor_families) > 0:
@@ -966,6 +996,8 @@ class StopRuleEngine:
 
         normalized: list[dict] = []
 
+        # verifier 可能返回结构化 dict，也可能只给字符串；
+        # 这里统一收敛成 answer_id / answer_name / reason 结构。
         for item in payload:
             if isinstance(item, dict):
                 answer_id = str(item.get("answer_id") or item.get("node_id") or "").strip()
@@ -997,6 +1029,7 @@ class StopRuleEngine:
         reason = str(item.get("reason", "")).strip()
         normalized_reason = self._normalize_text(reason)
 
+        # 优先吃显式 strength 字段；只有字段缺失时才从 reason 里推断强弱。
         if raw_strength in {"strong", "high", "unresolved", "强", "高", "强竞争"}:
             return {
                 "strength": "strong",
@@ -1059,6 +1092,7 @@ class StopRuleEngine:
             }
 
         if len(normalized_reason) == 0:
+            # 没有 reason 时采取保守策略，宁可把它当未排除强竞争者。
             return {
                 "strength": "strong",
                 "is_unresolved_strong": True,

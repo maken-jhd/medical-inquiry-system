@@ -20,12 +20,12 @@ from simulator.graph_case_generator import (  # noqa: E402
 )
 
 
-DEFAULT_CASES_FILE = PROJECT_ROOT / "test_outputs" / "simulator_cases" / "graph_cases_20260421" / "cases.json"
+DEFAULT_CASES_FILE = PROJECT_ROOT / "test_outputs" / "simulator_cases" / "graph_cases_20260426_final" / "cases.json"
 DEFAULT_OUTPUT_FILE = (
-    PROJECT_ROOT / "test_outputs" / "simulator_cases" / "graph_cases_20260421" / "sampled_cases_4x5.json"
+    PROJECT_ROOT / "test_outputs" / "simulator_cases" / "graph_cases_20260426_final" / "sampled_cases_4x5.json"
 )
 DEFAULT_SUMMARY_FILE = (
-    PROJECT_ROOT / "test_outputs" / "simulator_cases" / "graph_cases_20260421" / "sampled_cases_4x5.md"
+    PROJECT_ROOT / "test_outputs" / "simulator_cases" / "graph_cases_20260426_final" / "sampled_cases_4x5.md"
 )
 
 

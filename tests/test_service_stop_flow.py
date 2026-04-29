@@ -378,6 +378,77 @@ def test_chief_complaint_pending_action_routes_next_reply_back_to_a1() -> None:
     assert state.metadata["last_answered_action"].action_type == "collect_chief_complaint"
 
 
+def test_process_turn_stops_after_repeated_chief_complaint_without_signal() -> None:
+    tracker = StateTracker()
+    tracker.create_session("s5_repeat")
+    brain = ConsultationBrain(
+        BrainDependencies(
+            state_tracker=tracker,
+            retriever=DummyRetriever(),
+            med_extractor=EmptyMedExtractor(),
+            entity_linker=EmptyEntityLinker(),
+            question_selector=QuestionSelector(),
+            stop_rule_engine=NonStoppingRuleEngine(),
+            report_builder=ReportBuilder(),
+            evidence_parser=EmptyEvidenceParser(),
+            hypothesis_manager=object(),
+            action_builder=ActionBuilder(),
+            router=MinimalRouter(),
+            mcts_engine=object(),
+            simulation_engine=object(),
+            trajectory_evaluator=EmptyTrajectoryEvaluator(),
+            llm_client=object(),
+        )
+    )
+
+    first_turn = brain.process_turn("s5_repeat", "你好，医生")
+    assert first_turn["pending_action"]["action_type"] == "collect_chief_complaint"
+
+    second_turn = brain.process_turn("s5_repeat", "这个我也说不上来")
+
+    assert second_turn["final_report"] is not None
+    assert second_turn["final_report"]["stop_reason"] == "repeated_chief_complaint_without_signal"
+    assert second_turn["pending_action"] is None
+    assert tracker.get_pending_action("s5_repeat") is None
+
+
+def test_service_skips_a2_refresh_during_regular_a3_followup() -> None:
+    tracker = StateTracker()
+    state = tracker.create_session("s5_a3")
+    state.candidate_hypotheses = [
+        HypothesisScore(node_id="d1", label="Disease", name="候选病A", score=0.9),
+        HypothesisScore(node_id="d2", label="Disease", name="候选病B", score=0.6),
+    ]
+    brain = ConsultationBrain(
+        BrainDependencies(
+            state_tracker=tracker,
+            retriever=DummyRetriever(),
+            med_extractor=EmptyMedExtractor(),
+            entity_linker=EmptyEntityLinker(),
+            question_selector=QuestionSelector(),
+            stop_rule_engine=NonStoppingRuleEngine(),
+            report_builder=ReportBuilder(),
+            evidence_parser=EmptyEvidenceParser(),
+            hypothesis_manager=object(),
+            action_builder=ActionBuilder(),
+            router=MinimalRouter(),
+            mcts_engine=object(),
+            simulation_engine=object(),
+            trajectory_evaluator=EmptyTrajectoryEvaluator(),
+            llm_client=object(),
+        )
+    )
+
+    should_refresh = brain._should_refresh_a2(
+        state,
+        effective_stage="A3",
+        should_run_a1=False,
+        a1_result=A1ExtractionResult(),
+    )
+
+    assert should_refresh is False
+
+
 def test_service_builds_a2_evidence_profiles_for_frontend() -> None:
     tracker = StateTracker()
     state = tracker.create_session("s6")

@@ -133,3 +133,45 @@ def test_trajectory_evaluator_marks_invalid_verifier_reject_reason_schema() -> N
     assert scores[0].metadata["verifier_reject_reason"] == "strong_alternative_not_ruled_out"
     assert scores[0].metadata["verifier_reject_reason_source"] == "fallback_inferred"
     assert scores[0].metadata["verifier_schema_valid"] is False
+
+
+# 验证在未达到可终止观察窗口前，llm verifier 会延后到后续轮次再调用。
+def test_trajectory_evaluator_defers_llm_verifier_before_accept_window() -> None:
+    class CountingVerifierClient(FakeVerifierClient):
+        def __init__(self) -> None:
+            self.called = False
+
+        def run_structured_prompt(self, prompt_name: str, variables: dict, schema: type) -> dict:
+            self.called = True
+            return super().run_structured_prompt(prompt_name, variables, schema)
+
+    client = CountingVerifierClient()
+    evaluator = TrajectoryEvaluator(
+        TrajectoryEvaluatorConfig(
+            agent_eval_mode="llm_verifier",
+            llm_verifier_min_turn_index=2,
+            llm_verifier_min_trajectory_count=2,
+        ),
+        llm_client=client,  # type: ignore[arg-type]
+    )
+    trajectories = [
+        ReasoningTrajectory(
+            trajectory_id="t1",
+            final_answer_id="d1",
+            final_answer_name="肺孢子菌肺炎",
+            steps=[{"action_name": "发热"}],
+            score=0.7,
+        )
+    ]
+
+    grouped = evaluator.group_by_answer(trajectories)
+    scores = evaluator.score_groups(
+        grouped,
+        patient_context=PatientContext(raw_text="发热"),
+        session_turn_index=1,
+    )
+
+    assert client.called is False
+    assert scores[0].metadata["verifier_mode"] == "llm_verifier_deferred"
+    assert scores[0].metadata["verifier_called"] is False
+    assert scores[0].metadata["verifier_deferred_reason"] == "turn_index_too_low"

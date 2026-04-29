@@ -30,6 +30,7 @@
 - [graph_case_generator.py](/Users/loki/Workspace/GraduationDesign/simulator/graph_case_generator.py)
   - 用于把疾病级图谱审计结果转换成图谱驱动的虚拟病人病例骨架。
   - 当前支持 `ordinary / low_cost / exam_driven / competitive` 四类病例。
+  - `competitive` 病例当前会主动过滤 `HIV感染 / HIV感染者 / 抗逆转录病毒治疗 / 免疫功能低下` 这类背景风险 opening，并优先回退到目标病自己的症状、具体检查结果或疾病名，避免把背景信息直接渲染成主诉。
   - 会同时输出 `cases.jsonl`、`cases.json`、`manifest.json` 和 `summary.md`。
 
 ### 2. 病人代理
@@ -46,6 +47,7 @@
   - 它的职责是串联“系统提问 -> 病人作答 -> 状态更新 -> 下一问”的离线闭环。
   - 当前首轮输入不再直接依赖 `chief_complaint`，而是优先由 `patient_agent.open_case(case)` 基于骨架生成 opening text。
   - 已支持批量运行多个病例、输出回放结果，并在结果里记录实际首轮 opening text。
+  - 当前耗时统计会先累计原始浮点耗时，再在落盘前统一 round，降低毫秒级病例里 `brain_turn_seconds_total` 被累计 round 放大的误导。
 
 - [benchmark.py](/Users/loki/Workspace/GraduationDesign/simulator/benchmark.py)
   - 负责汇总自动对战结果。
@@ -68,6 +70,7 @@
 - 已具备基于疾病审计结果的图谱驱动病例骨架生成器
 - 病人代理已支持骨架驱动开场和受约束回答
 - 自动回放和基础评测已经能批量跑通
+- 当前图谱驱动病例正式输出已固定落盘到 `test_outputs/simulator_cases/graph_cases_20260426_final/`，并补充了固定随机种子的四类各 5 条抽样结果，便于人工复核
 - 路径缓存仍然是后续待完成模块
 
 因此，这个目录当前更适合被理解为：
@@ -91,9 +94,24 @@
 - [run_batch_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_batch_replay.py)
   - 使用 seed cases 或指定病例文件批量运行回放，并输出评测摘要。
   - 当前支持读取 `JSONL` 或 `JSON` 数组病例文件。
+  - 当前支持病例级并发，默认 `--case-concurrency 4`；每个并发任务使用独立 brain 实例，避免共享会话状态。
+  - 当前支持 `--limit`，便于先做 10 例左右的小样本 smoke。
+  - 当前会自动读取 `configs/frontend.yaml` 与 `configs/frontend.local.yaml`，把 Neo4j / LLM / brain 配置桥接到 CLI 运行环境，避免 replay 入口和前端实时模式配置脱节。
+  - 当前会直接向终端设备输出运行信息；即使通过 `conda run` 启动，也会看到病例启动、病例完成和运行中心跳。
+  - 当前会在终端持续打印病例级进度条，并每 15 秒打印一次心跳，便于观察长时间运行任务的完成度和当前卡在哪个病例。
+  - 当前启动日志会直接写出 `llm_available=true/false`，便于区分“病人侧确实在调用 LLM”还是“当前已退回规则回答”。
+  - 当前会在每个病例完成后立即追加写入 `replay_results.jsonl`，并同步刷新 `benchmark_summary.json`、`status.json` 和 `run.log`。
+  - 当前默认支持断点续跑；如果输出目录里已有完成病例，会自动跳过这些病例，只继续未完成部分。若需要强制重跑，可使用 `--no-resume`。
+  - 当前会记录病例级耗时拆分：`opening_seconds`、`initial_brain_seconds`、逐轮 `patient_answer_seconds / brain_turn_seconds`、`finalize_seconds` 与 `total_seconds`，并把聚合摘要写入 `benchmark_summary.json` / `status.json`；运行日志对亚秒级耗时会保留更高精度。
+  - 当前续跑读取历史 `replay_results.jsonl` 时也会保留逐轮 `patient_answer_seconds / brain_turn_seconds / total_seconds`，便于后续继续做 turn 级复盘。
+  - 当前在 `Ctrl+C` 或 `SIGTERM` 时会先写出中断状态，再强制结束进程，避免并发线程池在后台继续占用内存。
+  - 当前会自动轻量化 `final_report.metadata`，不再把原始 `search_tree` 和 `last_search_result` 运行态对象直接写进 replay 结果，便于控制批量运行的内存占用。
 
 - [generate_graph_virtual_patients.py](/Users/loki/Workspace/GraduationDesign/scripts/generate_graph_virtual_patients.py)
   - 使用疾病级图谱审计输出生成图谱驱动虚拟病人病例。
+
+- [sample_graph_virtual_patients.py](/Users/loki/Workspace/GraduationDesign/scripts/sample_graph_virtual_patients.py)
+  - 从 `cases.json` 或 `cases.jsonl` 中按病例类型固定抽样，输出 `sampled_cases_4x5.json` 和 `sampled_cases_4x5.md`，用于人工检查 opening 与 positive slots 质量。
 
 ## 详细方案文档
 

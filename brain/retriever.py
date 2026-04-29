@@ -93,6 +93,9 @@ class GraphRetriever:
     # 在冷启动阶段返回全局优先级较高的首问候选节点。
     def get_cold_start_questions(self, top_k: int | None = None) -> List[QuestionCandidate]:
         limit = top_k or self.config.cold_start_limit
+
+        # 冷启动只从“患者可以直接回答、且全局区分度较高”的节点中挑首问，
+        # 排序会优先风险因素/人群因素，其次才是一般症状。
         rows = self.client.run_query(
             """
             MATCH (n)
@@ -132,6 +135,8 @@ class GraphRetriever:
                 "allowed_labels": list(self.config.cold_start_labels),
             },
         )
+
+        # Query 结果在这里统一转成 QuestionCandidate，方便后续 question_selector 和 fallback 复用。
         return [
             QuestionCandidate(
                 node_id=row["node_id"],
@@ -156,6 +161,10 @@ class GraphRetriever:
         session_state: SessionState | None = None,
         top_k: int | None = None,
     ) -> List[HypothesisCandidate]:
+        # R1 的入口特征来自三个来源：
+        # - A1/MedExtractor 抽到的阳性特征
+        # - entity linker 的 canonical_name / mention
+        # - 当前 session 已写入的阳性槽位
         feature_names = self._collect_positive_feature_names(linked_features, patient_context, session_state)
         limit = top_k or self.config.r1_limit
         link_similarity_map = self._build_link_similarity_map(linked_features)
@@ -163,9 +172,12 @@ class GraphRetriever:
         if len(feature_names) == 0:
             return []
 
+        # 如果实体链接整体都低于可信阈值，可以直接禁用 KG 检索，避免错误链接把 R1 排序带偏。
         if self.config.disable_kg_below_threshold and self._all_link_confidence_low(linked_features):
             return []
 
+        # 查询同时覆盖 feature->candidate 和 candidate->feature 两个方向，
+        # 但反向命中会给更低的 direction_confidence。
         rows = self.client.run_query(
             """
             CALL () {
@@ -224,6 +236,8 @@ class GraphRetriever:
         total_feature_count = max(len(feature_names), 1)
 
         for row in rows:
+            # 每个候选会融合：
+            # 覆盖了多少输入特征、关系类型是否更定义性、实体链接相似度是否可信等多维信号。
             evidence_names = row.get("evidence_names", [])
             link_similarity = self._estimate_link_similarity(evidence_names, link_similarity_map)
             direction_confidence = float(row.get("direction_confidence", 1.0))
@@ -241,6 +255,7 @@ class GraphRetriever:
             if semantic_score < self.config.r1_min_semantic_score:
                 continue
 
+            # 只有通过 semantic_score 下限的候选才真正进入 A2，避免单一泛化证据形成噪声候选。
             candidates.append(
                 HypothesisCandidate(
                     node_id=row["node_id"],
@@ -279,6 +294,7 @@ class GraphRetriever:
         known_slot_ids = list(session_state.slots.keys())
         hypothesis_id = hypothesis.node_id
 
+        # R2 只取“当前假设最值得继续验证、且还没问过/还没写入槽位”的证据节点。
         rows = self.client.run_query(
             """
             CALL () {
@@ -365,6 +381,9 @@ class GraphRetriever:
         top_k: int | None = None,
     ) -> list[dict]:
         limit = top_k or self.config.evidence_profile_limit
+
+        # 证据画像是解释用途，不像 R2 那样过滤 asked/known 节点；
+        # 它需要尽可能完整地展示“这个诊断常见依赖哪些证据簇”。
         rows = self.client.run_query(
             """
             CALL () {
@@ -434,6 +453,8 @@ class GraphRetriever:
         enriched: list[dict] = []
 
         for row in deduped[:limit]:
+            # 前端展示还需要叠加“当前已经命中 / 已否定 / 待验证”的状态视图，
+            # 以及 symptom/lab/imaging/pathogen 这类分组信息。
             status_payload = self._resolve_evidence_profile_status(row, session_state)
             group_key = self._profile_group_key(row)
             enriched.append(
@@ -597,6 +618,7 @@ class GraphRetriever:
         name = str(row.get("name") or "").strip()
         matched_keys = {item for item in (node_id, name) if len(item) > 0}
 
+        # evidence_state 优先级最高，因为它保留了 A4 后的存在性/确定性判断。
         evidence_state = session_state.evidence_states.get(node_id)
 
         if evidence_state is not None:
@@ -616,6 +638,8 @@ class GraphRetriever:
                     "evidence_text": evidence_state.reasoning,
                 }
 
+        # 若 evidence_state 里没有，再退回到 slot 匹配：
+        # 兼容早期 A1/A4 写槽位但还没形成完整 evidence_state 的情况。
         for slot in session_state.slots.values():
             slot_keys = {
                 slot.node_id,
@@ -767,6 +791,10 @@ class GraphRetriever:
         link_similarity: float,
         relation_types: Sequence[str],
     ) -> tuple[float, dict]:
+        # R1 语义分数主要想回答三个问题：
+        # 1. 它覆盖了多少输入特征？
+        # 2. 这些关系是否足够“定义性”？
+        # 3. 它是不是只靠一条很泛的弱证据勉强命中？
         feature_coverage = min(matched_feature_count / total_feature_count, 1.0)
         candidate_weight = min(float(row.get("candidate_weight", 0.0)), 1.0)
         relation_count = min(float(row.get("relation_count", 0.0)) / max(total_feature_count, 1), 1.0)
@@ -791,6 +819,7 @@ class GraphRetriever:
         )
         score = max(score, 0.0)
 
+        # breakdown 会写回 metadata，便于 A2 解释“为什么这个候选排得更高”。
         return score, {
             "feature_coverage": feature_coverage,
             "relation_count_ratio": relation_count,

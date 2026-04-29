@@ -16,6 +16,8 @@ path_evaluation:
   diversity_weight: 0.4
   agent_eval_weight: 0.3
   agent_eval_mode: llm_verifier
+  llm_verifier_min_turn_index: 2
+  llm_verifier_min_trajectory_count: 2
 
 a1:
   use_llm_extractor: true

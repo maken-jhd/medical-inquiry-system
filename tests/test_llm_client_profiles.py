@@ -43,3 +43,46 @@ def test_llm_client_timeout_has_safe_minimum(monkeypatch) -> None:
     client = LlmClient(api_key="")
 
     assert client.timeout_seconds == 5.0
+
+
+def test_llm_client_reads_enable_thinking_from_environment(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_ENABLE_THINKING", "false")
+    client = LlmClient(api_key="")
+
+    assert client.enable_thinking is False
+
+
+def test_llm_client_passes_enable_thinking_to_extra_body() -> None:
+    captured: dict = {}
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return type(
+                "FakeResponse",
+                (),
+                {
+                    "choices": [
+                        type(
+                            "FakeChoice",
+                            (),
+                            {"message": type("FakeMessage", (), {"content": "{}"})()},
+                        )()
+                    ]
+                },
+            )()
+
+    class FakeChat:
+        def __init__(self) -> None:
+            self.completions = FakeCompletions()
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.chat = FakeChat()
+
+    client = LlmClient(api_key="", enable_thinking=False)
+    client._client = FakeClient()  # type: ignore[assignment]
+
+    client.run_structured_prompt("med_extractor", {"patient_text": "发热"}, dict)
+
+    assert captured["extra_body"] == {"enable_thinking": False}

@@ -46,9 +46,32 @@ class StateTracker:
     def get_session_copy(self, session_id: str) -> SessionState:
         return deepcopy(self.get_session(session_id))
 
+    # 返回 rollout / reroot 专用的轻量状态快照，避免把 search_tree 等运行时大对象一并 deepcopy。
+    def get_rollout_session_copy(self, session_id: str) -> SessionState:
+        return self.build_rollout_session_snapshot(self.get_session(session_id))
+
     # 克隆当前会话状态，供 rollout 或分支推演时使用。
     def clone_session_state(self, session_id: str) -> SessionState:
         return self.get_session_copy(session_id)
+
+    # 只保留推演所需字段，切断 search_tree / last_search_result / trajectories 等重量级引用。
+    @staticmethod
+    def build_rollout_session_snapshot(state: SessionState) -> SessionState:
+        return SessionState(
+            session_id=state.session_id,
+            turn_index=state.turn_index,
+            active_topics=list(state.active_topics),
+            slots=deepcopy(state.slots),
+            evidence_states=deepcopy(state.evidence_states),
+            exam_context=deepcopy(state.exam_context),
+            candidate_hypotheses=deepcopy(state.candidate_hypotheses),
+            asked_node_ids=list(state.asked_node_ids),
+            action_stats={},
+            state_visit_stats={},
+            trajectories=[],
+            fail_count=state.fail_count,
+            metadata={},
+        )
 
     # 确保指定槽位存在；若不存在则自动创建默认槽位。
     def ensure_slot(self, session_id: str, node_id: str) -> SlotState:
@@ -127,9 +150,11 @@ class StateTracker:
     ) -> ExamContextState:
         context = self.ensure_exam_context(session_id, exam_kind)
 
+        # availability 是该类检查当前最核心的状态位，存在新结论时直接覆盖。
         if availability is not None:
             context.availability = availability
 
+        # 检查名称按去重追加，保留患者跨轮次陆续补充的“做过哪些检查”信息。
         for name in mentioned_exam_names or []:
             cleaned_name = str(name).strip()
 
@@ -138,6 +163,8 @@ class StateTracker:
 
             context.mentioned_exam_names.append(cleaned_name)
 
+        # 结果去重键同时看 test_name + raw_text，
+        # 避免同一轮或多轮回答把同一句结果反复累计进去。
         existing_result_keys = {
             (item.test_name, item.raw_text)
             for item in context.mentioned_exam_results
@@ -152,9 +179,11 @@ class StateTracker:
             context.mentioned_exam_results.append(result)
             existing_result_keys.add(key)
 
+        # source_turns 记录这类检查信息是在哪些轮次被患者提到的，便于前端和 replay 追溯。
         if turn_index is not None and turn_index not in context.source_turns:
             context.source_turns.append(turn_index)
 
+        # metadata 只做增量更新，保留上一次 followup / reasoning 等辅助解释信息。
         if metadata is not None:
             context.metadata.update(metadata)
 

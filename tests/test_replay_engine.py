@@ -1,7 +1,10 @@
 """测试自动回放引擎是否能驱动问诊闭环。"""
 
+from collections import deque
+
 from simulator.case_schema import SlotTruth, VirtualPatientCase
 from simulator.patient_agent import VirtualPatientAgent
+from simulator import replay_engine
 from simulator.replay_engine import ReplayEngine
 
 
@@ -73,6 +76,12 @@ def test_replay_engine_runs_case_to_completion() -> None:
     assert len(result.turns) == 1
     assert result.turns[0].question_node_id == "发热"
     assert result.turns[0].answer_text == "有。"
+    assert result.turns[0].patient_answer_seconds >= 0.0
+    assert result.turns[0].brain_turn_seconds >= 0.0
+    assert result.timing["opening_seconds"] >= 0.0
+    assert result.timing["initial_brain_seconds"] >= 0.0
+    assert result.timing["total_seconds"] >= 0.0
+    assert result.timing["turn_count"] == 1
     assert result.final_report["summary"] == "测试完成"
 
 
@@ -96,3 +105,86 @@ def test_replay_engine_runs_cases_in_batch() -> None:
 
     assert len(results) == 2
     assert all(item.status == "completed" for item in results)
+
+
+# 验证 timing 累计使用原始浮点值，不会因逐轮 round 让 brain 总耗时大于 total。
+def test_replay_engine_timing_totals_do_not_exceed_case_total(monkeypatch) -> None:
+    class LoopBrain:
+        def start_session(self, session_id: str) -> None:
+            self.session_id = session_id
+
+        def process_turn(self, session_id: str, patient_text: str) -> dict:
+            _ = session_id, patient_text
+            return {
+                "next_question": "近期是否有发热？",
+                "pending_action": {
+                    "target_node_id": "发热",
+                },
+                "final_report": None,
+            }
+
+        def finalize(self, session_id: str) -> dict:
+            return {
+                "session_id": session_id,
+                "summary": "到达最大轮次",
+            }
+
+    perf_values = deque(
+        [
+            0.0,
+            0.0,
+            0.0,
+            0.00001,
+            0.00006,
+            0.00006,
+            0.00006,
+            0.00006,
+            0.00012,
+            0.00012,
+            0.00012,
+            0.00012,
+            0.00018,
+            0.00018,
+            0.00018,
+            0.00018,
+            0.00024,
+            0.00024,
+            0.00024,
+            0.00024,
+            0.00030,
+            0.00030,
+            0.00030,
+            0.00030,
+            0.00036,
+            0.00036,
+            0.00036,
+            0.00036,
+            0.00042,
+            0.00042,
+            0.00042,
+            0.00042,
+            0.00048,
+            0.00048,
+            0.00048,
+            0.00048,
+            0.00054,
+            0.00054,
+            0.00055,
+            0.00056,
+        ]
+    )
+
+    monkeypatch.setattr(replay_engine, "perf_counter", lambda: perf_values.popleft())
+
+    engine = ReplayEngine(LoopBrain(), VirtualPatientAgent(), replay_engine.ReplayConfig(max_turns=8))
+    case = VirtualPatientCase(
+        case_id="timing_case",
+        title="timing",
+        slot_truth_map={"发热": SlotTruth(node_id="发热", value=True, aliases=["发热"], reveal_only_if_asked=False)},
+    )
+
+    result = engine.run_case(case)
+
+    assert result.status == "max_turn_reached"
+    assert result.timing["brain_turn_seconds_total"] <= result.timing["total_seconds"]
+    assert result.timing["initial_brain_seconds"] <= result.timing["total_seconds"]

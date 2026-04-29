@@ -119,6 +119,7 @@ NEO4J_PASSWORD=admin123456
 NEO4J_DATABASE=neo4j
 OPENAI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 OPENAI_MODEL=qwen3-max
+OPENAI_ENABLE_THINKING=false
 BRAIN_ACCEPTANCE_PROFILE=guarded_lenient
 TRAJECTORY_VERIFIER_ACCEPTANCE_PROFILE=guarded_lenient
 BRAIN_AGENT_EVAL_MODE=llm_verifier
@@ -135,6 +136,7 @@ cp configs/frontend.local.example.yaml configs/frontend.local.yaml
 ```yaml
 llm:
   api_key: "你的 DashScope API Key"
+  enable_thinking: false
 ```
 
 `configs/frontend.local.yaml` 已被 `.gitignore` 忽略，不会提交。

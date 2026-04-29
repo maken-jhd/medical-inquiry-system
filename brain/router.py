@@ -60,11 +60,14 @@ class ReasoningRouter:
         action: Optional[MctsAction],
         session_state: SessionState,
     ) -> DeductiveDecision:
+        # action 里携带的是“当前到底在验证哪个 hypothesis/feature/topic”，
+        # 先抽出来放进 metadata，后续路由和 audit 都会继续使用。
         hypothesis_id = action.hypothesis_id if action is not None else None
         topic_id = action.topic_id if action is not None else None
         contradicted_feature = action.target_node_id if action is not None else None
         contradicted_feature_name = action.target_node_name if action is not None else None
 
+        # 明确阳性：支持当前主假设；若 hypothesis margin 已足够大，可以给出 STOP 倾向。
         if deductive_result.existence == "exist" and deductive_result.certainty == "confident":
             next_stage = "STOP" if self._hypothesis_margin_is_sufficient(session_state) else "A3"
             return DeductiveDecision(
@@ -84,6 +87,7 @@ class ReasoningRouter:
                 },
             )
 
+        # 明确阴性：当前验证点与主假设直接矛盾，优先切回 A2 重整候选。
         if deductive_result.existence == "non_exist" and deductive_result.certainty == "confident":
             return DeductiveDecision(
                 existence=deductive_result.existence,
@@ -104,6 +108,7 @@ class ReasoningRouter:
                 },
             )
 
+        # 模糊阳性：倾向继续 A3 复核，而不是过早切回 A2。
         if deductive_result.existence == "exist" and deductive_result.certainty == "doubt":
             return DeductiveDecision(
                 existence=deductive_result.existence,
@@ -121,6 +126,7 @@ class ReasoningRouter:
                 },
             )
 
+        # 模糊阴性：先保留矛盾分析空间，避免把轻症/表达模糊误当成强反证。
         if deductive_result.existence == "non_exist" and deductive_result.certainty == "doubt":
             return DeductiveDecision(
                 existence=deductive_result.existence,
@@ -144,6 +150,7 @@ class ReasoningRouter:
                 },
             )
 
+        # 其余情况统一视作“当前证据不足以维持原路径”，回上游重新整理。
         return DeductiveDecision(
             existence=deductive_result.existence,
             certainty=deductive_result.certainty,

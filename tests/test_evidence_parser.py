@@ -1,7 +1,27 @@
 """测试证据解析器在 A1 / A4 下的关键判断逻辑。"""
 
 from brain.evidence_parser import EvidenceParser
-from brain.types import MctsAction
+from brain.types import MctsAction, PatientContext
+
+
+def test_a1_falls_back_to_rules_when_llm_returns_no_key_features() -> None:
+    class FakeLlmClient:
+        def is_available(self) -> bool:
+            return True
+
+        def run_structured_prompt(self, prompt_name: str, variables: dict, schema):
+            _ = prompt_name, variables, schema
+            return {
+                "key_features": [],
+                "reasoning_summary": "LLM 未提取到核心线索。",
+            }
+
+    parser = EvidenceParser(llm_client=FakeLlmClient())
+    result = parser.run_a1_key_symptom_extraction(PatientContext(raw_text="最近主要是畏光，还伴有视力下降。"))
+
+    feature_names = {item.normalized_name for item in result.key_features}
+    assert "畏光" in feature_names
+    assert "视力下降" in feature_names
 
 
 # 验证“没有特别注意到”不会被误判为阳性。
@@ -71,6 +91,46 @@ def test_a4_target_aware_parser_extracts_uncertain_span() -> None:
     assert result.existence == "exist"
     assert result.certainty == "doubt"
     assert "好像有点发热" in result.uncertain_span
+
+
+def test_a4_judge_uses_rule_path_for_short_direct_reply() -> None:
+    class FakeLlmClient:
+        def __init__(self) -> None:
+            self.called = False
+
+        def is_available(self) -> bool:
+            return True
+
+        def run_structured_prompt(self, prompt_name: str, variables: dict, schema):
+            _ = prompt_name, variables, schema
+            self.called = True
+            return {}
+
+    client = FakeLlmClient()
+    parser = EvidenceParser(llm_client=client)
+    action = MctsAction(
+        action_id="a5",
+        action_type="verify_evidence",
+        target_node_id="node_walk",
+        target_node_label="ClinicalFinding",
+        target_node_name="步态异常",
+        hypothesis_id="d1",
+        topic_id="Disease",
+    )
+    patient_context = PatientContext(raw_text="没有步态异常。")
+    interpretation = parser.interpret_answer_for_target("没有步态异常。", action)
+
+    decision = parser.judge_deductive_result(
+        patient_context,
+        action,
+        interpretation,
+        None,
+        [],
+    )
+
+    assert client.called is False
+    assert decision.metadata["judge_source"] == "rule"
+    assert decision.existence == "non_exist"
 
 
 # 验证检查上下文回答能一次性识别做过检查、检查名称和结果。

@@ -54,6 +54,7 @@
   - 负责维护会话中的槽位状态。
   - 支持三态记录（阳性 / 阴性 / 未知）以及“确信 / 存疑”的置信维度。
   - 当前也负责保存轨迹列表与绑定搜索树。
+  - 当前已为 rollout / reroot 提供轻量状态快照，避免把 `search_tree`、`last_search_result` 等重量级运行时对象一并 deepcopy。
 
 - [session_dag.py](/Users/loki/Workspace/GraduationDesign/brain/session_dag.py)
   - 负责维护单个患者会话的内存 DAG。
@@ -90,6 +91,7 @@
   - 第二阶段的总编排层。
   - 当前已经串联 `PatientContext -> A1 -> A2 -> R2/A3 -> rollout -> report` 的搜索闭环。
   - 当前也是读取 [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml) 并构造默认依赖的入口。
+  - `process_turn()` 当前已按“消化上一轮回答 -> 判断本轮阶段 -> search / verifier / repair -> 输出下一问或最终报告”的顺序补充分段中文注释，便于顺着源码阅读控制流。
 
 ### 3. 论文式 A1-A4 模块
 
@@ -139,6 +141,7 @@
   - 当前负责按最终答案聚类轨迹，并计算 `consistency / diversity / agent_evaluation`。
   - `diversity` 已从“唯一动作数”升级为基于轨迹相似度的组内平均差异。
   - `agent_evaluation` 当前支持 `fallback` 与可选 `llm_verifier` 两种模式。
+  - 当前 `llm_verifier` 会和 stop rule 的最早接受窗口对齐：如果 `turn_index` 或 `trajectory_count` 还未达到可接受最终答案的最低条件，就先延后 verifier，临时使用 fallback 评分，避免早期 A3 追问每轮都重复触发高成本 verifier。
 
 ### 5. 辅助文件
 
@@ -160,6 +163,11 @@
 
 也就是说，当前目录已经从“空脚手架”进入“可持续填充核心逻辑”的阶段。
 
+补充说明：
+
+- 当前 `brain/` 中较长或较复杂的函数，已经统一补充了函数内部关键步骤前的中文块级注释。
+- 这些注释重点解释“当前阶段在做什么、为什么这样分支、状态写回到哪里”，方便按调用链阅读 `service / retriever / evidence_parser / simulation_engine / stop_rules` 等核心模块。
+
 ## 与 Med-MCTS 论文的对齐状态
 
 | 组件 | 当前状态 | 说明 |
@@ -176,6 +184,9 @@
 | 完整论文复现 | 未完成 | 当前仍处于“结构对齐 + 轻量实现”阶段 |
 
 ## 与其他目录的关系
+
+- 详细运行链路说明：
+  - [brain_runtime_call_chain_guide.md](/Users/loki/Workspace/GraduationDesign/docs/brain_runtime_call_chain_guide.md)
 
 - 第一阶段知识图谱底座：
   - [knowledge_graph/README.md](/Users/loki/Workspace/GraduationDesign/knowledge_graph/README.md)
@@ -204,5 +215,6 @@
 - 每个文件顶部有中文文件说明
 - 每个类有中文说明
 - 每个函数上方都应有中文用途注释
+- 对较长或较复杂的函数，还应在函数内部关键步骤前补充中文块级注释，优先解释阶段切换、状态更新、排序依据、fallback 与 repair 分支。
 
 后续新增文件和函数时，也应继续遵守这一规范。

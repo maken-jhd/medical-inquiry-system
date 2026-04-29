@@ -39,6 +39,7 @@ from .types import (
     ExamContextResult,
     EvidenceState,
     FinalAnswerScore,
+    HypothesisCandidate,
     HypothesisScore,
     LinkedEntity,
     MctsAction,
@@ -175,9 +176,13 @@ class ConsultationBrain:
         tracker = self.deps.state_tracker
         pending_action = tracker.get_pending_action(session_id)
 
+        # 没有 pending_action 说明这句患者输入不是在回答上一轮问题，
+        # 而是新的自由描述；本轮前半段就不做 A4 消费。
         if pending_action is None:
             return None, None, None, []
 
+        # collect_chief_complaint 是一个纯 intake 动作：
+        # 这轮只需要清掉 pending，并把路由重新拉回 A1。
         if pending_action.action_type == "collect_chief_complaint":
             tracker.get_session(session_id).metadata["last_answered_action"] = pending_action
             tracker.clear_pending_action(session_id)
@@ -193,6 +198,7 @@ class ConsultationBrain:
             )
 
         if pending_action.action_type in {"collect_exam_context", "collect_general_exam_context"}:
+            # 检查上下文动作和普通 verify 动作的解析逻辑完全不同，单独走专门分支。
             return self._update_from_exam_context_action(
                 session_id,
                 pending_action,
@@ -200,6 +206,7 @@ class ConsultationBrain:
                 turn_index,
             )
 
+        # 普通 verify 动作先按 target-aware A4 解释回答，再把结果落成 slot update。
         a4_result = self.deps.evidence_parser.interpret_answer_for_target(patient_text, pending_action)
         a4_updates = self.deps.evidence_parser.build_slot_updates_from_a4(
             pending_action,
@@ -209,6 +216,8 @@ class ConsultationBrain:
         )
         tracker.apply_slot_updates(session_id, a4_updates)
 
+        # 同一份 A4 结果还会同步转成 evidence_state，
+        # 因为 stop_rules / guarded gate / repair 更依赖 evidence_state 的存在性和 family 信息。
         evidence_tags = self._infer_action_evidence_tags(pending_action)
         confirmed_family_candidate = self._is_confirmed_family_candidate(
             pending_action,
@@ -243,11 +252,17 @@ class ConsultationBrain:
         )
         tracker.set_evidence_state(session_id, evidence_state)
         self._record_a4_evidence_audit(session_id, pending_action, evidence_state, a4_result, patient_text, turn_index)
+
+        # A4 证据一旦写入，就立即反馈到 hypothesis 排名和 action_stats，
+        # 这样本轮后续 search 会基于最新诊断竞争态继续推进。
         self._apply_hypothesis_feedback(session_id, pending_action, evidence_state)
         self._record_action_reward(session_id, pending_action, a4_result)
         tracker.get_session(session_id).metadata["last_answered_action"] = pending_action
         tracker.clear_pending_action(session_id)
         updated_state = tracker.get_session(session_id)
+
+        # 最后再基于“已更新后的 hypothesis 排名”做 deductive judge 和 route，
+        # 避免路由还停留在旧的诊断排序上。
         current_hypothesis = self._find_hypothesis_by_id(
             updated_state.candidate_hypotheses,
             pending_action.hypothesis_id,
@@ -276,6 +291,9 @@ class ConsultationBrain:
         turn_index: int,
     ) -> tuple[A4DeductiveResult | None, object | None, object | None, list[SlotUpdate]]:
         tracker = self.deps.state_tracker
+
+        # exam_context 解析会一次性提取：
+        # 是否做过、做了哪些检查、是否说出了结果、是否还需要 follow-up。
         exam_result = self.deps.evidence_parser.interpret_exam_context_answer(patient_text, pending_action)
         exam_updates = self.deps.evidence_parser.build_slot_updates_from_exam_context(
             pending_action,
@@ -283,6 +301,9 @@ class ConsultationBrain:
             patient_text,
             turn_index=turn_index,
         )
+
+        # 无论是否命中具体证据节点，都先把“检查上下文”写回 session，
+        # 因为后续高成本动作是否可继续展开要依赖这份状态。
         tracker.update_exam_context(
             session_id,
             exam_result.exam_kind,
@@ -297,16 +318,19 @@ class ConsultationBrain:
         )
         self._sync_general_exam_context_to_specific_kinds(session_id, exam_result, turn_index)
 
+        # 如果这句回答已经给出了具体检查结果，就进一步把它映射成 slot/evidence/hypothesis feedback。
         if len(exam_updates) > 0:
             tracker.apply_slot_updates(session_id, exam_updates)
             self._apply_exam_context_evidence_feedback(session_id, pending_action, exam_result, exam_updates, turn_index)
 
+        # 做过检查但没说清结果时，挂一个专门 follow-up action，下一轮优先追问结果本身。
         if exam_result.needs_followup and exam_result.availability == "done":
             tracker.get_session(session_id).metadata["exam_context_followup_action"] = self._build_exam_context_followup_action(
                 pending_action,
                 exam_result,
             )
 
+        # exam_context 也会构造一个轻量 A4 result，便于后续统一复盘“这一轮发生了什么”。
         a4_result = self._build_a4_result_from_exam_context(pending_action, exam_result)
         tracker.get_session(session_id).metadata["last_exam_context_result"] = asdict(exam_result)
         tracker.get_session(session_id).metadata["last_answered_action"] = pending_action
@@ -737,6 +761,51 @@ class ConsultationBrain:
         )
         return a2_result
 
+    # A3 常规追问轮次优先复用上一轮的 hypothesis 排名，只有需要重建假设时才重新执行 A2。
+    def _should_refresh_a2(
+        self,
+        state: SessionState,
+        *,
+        effective_stage: str | None,
+        should_run_a1: bool,
+        a1_result: A1ExtractionResult,
+    ) -> bool:
+        if len(state.candidate_hypotheses) == 0:
+            return True
+
+        if effective_stage == "A2":
+            return True
+
+        return should_run_a1 and len(a1_result.key_features) > 0
+
+    # 当本轮跳过 A2 重算时，回填当前 hypothesis 排名，避免上层把 a2 结果展示为空。
+    def _build_cached_a2_result(self, state: SessionState) -> A2HypothesisResult:
+        if len(state.candidate_hypotheses) == 0:
+            return A2HypothesisResult()
+
+        ranked = sorted(state.candidate_hypotheses, key=lambda item: (-item.score, item.name))
+        primary = self._score_to_candidate(ranked[0])
+        alternatives = [
+            self._score_to_candidate(item)
+            for item in ranked[1 : self.deps.hypothesis_manager.config.expand_top_k_hypotheses]
+        ]
+        return A2HypothesisResult(
+            primary_hypothesis=primary,
+            alternatives=alternatives,
+            reasoning="沿用上一轮已生成的候选假设排序，当前轮次不重复执行 A2。",
+            metadata={"source": "cached"},
+        )
+
+    # 将内部 hypothesis score 转成 A2 展示使用的候选对象。
+    def _score_to_candidate(self, hypothesis: HypothesisScore) -> HypothesisCandidate:
+        return HypothesisCandidate(
+            node_id=hypothesis.node_id,
+            name=hypothesis.name,
+            label=hypothesis.label,
+            score=hypothesis.score,
+            metadata=dict(hypothesis.metadata),
+        )
+
     # 构建 A2 展示专用的候选诊断证据画像，帮助前端解释排序依据。
     def _build_a2_evidence_profiles(self, session_id: str, limit: int = 5) -> list[dict]:
         state = self.deps.state_tracker.get_session(session_id)
@@ -886,18 +955,48 @@ class ConsultationBrain:
         patient_context: PatientContext,
     ) -> SearchResult:
         tracker = self.deps.state_tracker
+
+        # 先拿到当前会话状态；这份 state 是“真实会话态”，后续 rollout 使用的则是从它派生出来的轻量分支快照。
         state = tracker.get_session(session_id)
+
+        # 搜索树按 session 复用：
+        # - 若状态签名和当前 top hypothesis 没变，则继续沿用旧树
+        # - 若 verifier repair 或 hypothesis 排名发生明显变化，则在 _ensure_search_tree() 内部 reroot / 重建
         tree = self._ensure_search_tree(session_id, state)
+
+        # `trajectories` 收集本轮 search 里所有 rollout 产出的路径；
+        # 它们既用于 root action 选择后的解释，也用于最终答案分组评分。
         trajectories: list[ReasoningTrajectory] = []
+
+        # 不是每次 for-loop 都一定成功展开：
+        # - 有可能 select_leaf 拿不到可扩展叶子
+        # - 也可能叶子没有可扩展动作
+        # 所以单独统计真正完成了 expand + rollout 的次数。
         rollout_executed = 0
 
+        # MCTS 外层 rollout 循环：每一轮都尝试“选一个叶子 -> 为它扩动作 -> 从每个子节点做前瞻推演”。
         for rollout_idx in range(self.deps.mcts_engine.config.num_rollouts):
+            # tree policy 负责从当前树里挑出最值得继续扩展的叶子；
+            # 它已经综合了 visit_count、average_value、prior_score 和 exploration bonus。
             leaf = self.deps.mcts_engine.select_leaf(tree)
 
             if leaf is None:
+                # 没有叶子可扩通常意味着：
+                # - 树为空
+                # - 当前 root/children 都已 terminal
+                # - 或 all children terminal 后 tree policy 主动停下
+                # 这时整轮 search 直接结束，不再硬凑 rollout。
                 break
 
+            # 叶子节点里保存的是某条搜索分支的轻量 rollout_state；
+            # 这里把它恢复成“当前分支上下文”，包括：
+            # - 当前假设
+            # - competing hypotheses
+            # - 这条分支下已经累计的 slots/evidence/exam_context
             rollout_context = self._build_rollout_context_from_leaf(session_id, leaf)
+
+            # 记录状态签名访问次数，后续 UCT 的 parent visit 统计和调试信息都依赖这里。
+            # metadata 里额外带上本次叶子和 hypothesis，便于 replay/排障时追踪“第几个 rollout 访问了哪个分支”。
             tracker.increment_state_visit(
                 session_id,
                 leaf.state_signature,
@@ -907,21 +1006,36 @@ class ConsultationBrain:
                     "rollout_idx": rollout_idx,
                 },
             )
+
+            # 扩展动作的入口在 R2：
+            # 当前分支的主假设会反向取回一批“最值得继续验证的证据节点”，
+            # 再由 ActionBuilder 转成真正可执行的动作（verify_evidence / collect_exam_context 等）。
             actions = self._expand_actions_for_leaf(leaf, rollout_context)
 
             if len(actions) == 0:
+                # 如果这个叶子已经没有可扩展动作，就把它标成 terminal；
+                # 这样后续 select_leaf() 不会再反复回到这个死分支。
                 tree.mark_terminal(leaf.node_id, {"terminal_reason": "no_expandable_actions"})
                 continue
 
+            # expand_node 只负责把候选动作挂成树上的 child node；
+            # 真正的收益估计和路径前瞻发生在下面的 rollout_from_tree_node()。
             child_nodes = self.deps.mcts_engine.expand_node(tree, leaf.node_id, actions)
 
             if len(child_nodes) == 0:
+                # 理论上很少发生，但如果 expand 失败，也要把叶子标 terminal，避免后续空转。
                 tree.mark_terminal(leaf.node_id, {"terminal_reason": "expand_failed"})
                 continue
 
+            # 能走到这里说明这轮 rollout 至少成功完成了“选叶 + 扩动作”。
             rollout_executed += 1
 
+            # 一个叶子可能扩出多个 child；这里不是只挑一个 child 推演，
+            # 而是对每个 child 都做一次独立 rollout，尽量多收集候选路径。
             for child in child_nodes:
+                # rollout_from_tree_node 会模拟：
+                # A3 动作 -> A4 假想回答分支 -> route -> 下一步动作 ...
+                # 直到达到 max_depth、路径停止，或没有后续动作。
                 trajectory = self.deps.simulation_engine.rollout_from_tree_node(
                     child,
                     rollout_context["state"],
@@ -934,32 +1048,73 @@ class ConsultationBrain:
                     current_hypothesis=rollout_context["current_hypothesis"],
                     competing_hypotheses=rollout_context["alternatives"],
                 )
+
+                # rollout 内部会临时把更新后的分支状态塞在 metadata["_rollout_state"] 里返回；
+                # 这里取出来后再裁剪成轻量 snapshot，作为 child 的“继续向下扩展起点”缓存起来。
                 rollout_state = trajectory.metadata.pop("_rollout_state", None)
                 if isinstance(rollout_state, SessionState):
-                    child.metadata["rollout_state"] = rollout_state
+                    child.metadata["rollout_state"] = tracker.build_rollout_session_snapshot(rollout_state)
+
+                # 下面这些 metadata 是后续 reroot、repair、调试和 search_report 解释最常用的几个摘要字段。
                 child.metadata["rollout_depth"] = trajectory.metadata.get("rollout_depth", 0)
                 child.metadata["last_stage"] = trajectory.metadata.get("last_stage")
                 child.metadata["final_answer_id"] = trajectory.final_answer_id
                 child.metadata["final_answer_name"] = trajectory.final_answer_name
 
                 if bool(trajectory.metadata.get("path_terminal", False)):
+                    # 如果 rollout 已经在这条 child 路径上走到 STOP，
+                    # 就把 child 直接视作 terminal，后续不用再从它继续展开。
                     tree.mark_terminal(
                         child.node_id,
                         {"terminal_reason": "rollout_stop", "final_answer_id": trajectory.final_answer_id},
                     )
 
+                # trajectory 会同时写到：
+                # - 本轮局部列表 `trajectories`
+                # - session 的长期轨迹缓存 `state.trajectories`
+                # 前者服务当前 search 聚合，后者服务最终报告与 replay 复盘。
                 trajectories.append(trajectory)
                 tracker.save_trajectory(session_id, trajectory)
+
+                # backpropagate 会把这条轨迹得分沿 child -> parent -> root 逐层回传，
+                # 让后续 select_leaf / select_root_action 感知到这条路径的历史价值。
                 self.deps.mcts_engine.backpropagate(tree, child.node_id, trajectory.score)
 
+        # rollout 全部完成后，下一步不再看“单条轨迹”，而是按最终答案把轨迹分组。
         grouped = self.deps.trajectory_evaluator.group_by_answer(trajectories)
+
+        # verifier 不能只看“最新一句患者回复”，否则会忽略历史上已确认的关键证据；
+        # 因此这里会把累计 slots / evidence_states / candidate_hypotheses 整理进 verifier 上下文。
         verifier_patient_context = self._build_verifier_patient_context(session_id, patient_context)
-        final_scores = self.deps.trajectory_evaluator.score_groups(grouped, patient_context=verifier_patient_context)
+
+        # score_groups 会给每个答案组打出：
+        # - consistency
+        # - diversity
+        # - agent_evaluation（可能是 fallback，也可能是 llm_verifier）
+        # 最终得到 final_answer_scores，供 accept/repair 使用。
+        final_scores = self.deps.trajectory_evaluator.score_groups(
+            grouped,
+            patient_context=verifier_patient_context,
+            session_turn_index=state.turn_index,
+        )
+
+        # best_answer 代表“从答案聚合视角看，当前最优的最终诊断候选是谁”。
         best_answer = self.deps.trajectory_evaluator.select_best_answer(final_scores)
+
+        # 但 search 还需要一个“下一问动作”。
+        # 这里回到 root 层，从 root 的 child 里选出当前最值得真正发问的一条 action。
+        # 同时排除已经问过的 target_node_id，避免重复追问同一节点。
         selected_action = self.deps.mcts_engine.select_root_action(
             tree,
             excluded_target_node_ids=state.asked_node_ids,
         )
+
+        # SearchResult 是 process_turn() 后半段 stop/verifier/repair 的输入；
+        # 它同时保留：
+        # - root 级下一问
+        # - 所有 rollout 轨迹
+        # - 最终答案分组评分
+        # - 本轮搜索规模统计
         search_result = SearchResult(
             selected_action=selected_action,
             root_best_action=selected_action,
@@ -974,6 +1129,9 @@ class ConsultationBrain:
                 "tree_refresh": dict(state.metadata.get("last_tree_refresh", {})),
             },
         )
+
+        # 把最近一次 search 结果挂回真实 session metadata；
+        # 后续 finalize()、前端 search_report、以及调试复盘都会读取这里。
         state.metadata["last_search_result"] = search_result
         return search_result
 
@@ -1050,59 +1208,113 @@ class ConsultationBrain:
     # 处理单轮患者输入，并输出当前下一问或最终报告。
     def process_turn(self, session_id: str, patient_text: str) -> dict:
         tracker = self.deps.state_tracker
+        # 单轮入口先推进轮次，再把患者原话结构化；随后优先消费“上一轮待验证动作”的回答。
+        # 这决定了本轮不是“从零开始推理”，而是“先更新上一问的结果，再决定下一步”。
         turn_index = tracker.increment_turn(session_id)
         patient_context = self.ingest_patient_turn(session_id, patient_text)
+
+        # 如果上一轮已经发出问题，这里会先把本轮回答解释成：
+        # - A4 证据判断
+        # - exam context 更新
+        # - slot / evidence state 更新
+        # - route 决策
+        # 也就是说，真正的状态刷新发生在 A1/A2/A3 之前。
         a4_result, deductive_decision, route_after_a4, a4_updates = self.update_from_pending_action(
             session_id,
             patient_context,
             patient_text,
             turn_index,
         )
+
+        # A4 即使给出局部 STOP 倾向，也要先降级成继续搜索，由 verifier + guarded gate 再做一次全局确认。
         route_after_a4 = self._gate_route_after_a4(route_after_a4)
+
+        # `applied_updates` 用来累计本轮所有真正写入状态的更新，最终统一返回给前端 / replay 结果。
+        # 这里先放入 A4/exam-context 已经产生的更新，后面如果 A1 再抽出新线索，会继续 append 进去。
         applied_updates: list[SlotUpdate] = list(a4_updates)
+
+        # 读取一次已经过 A4 刷新的最新会话状态；后续阶段判断都基于这个状态而不是旧状态。
         state = tracker.get_session(session_id)
         stage_after_a4 = getattr(route_after_a4, "stage", None)
 
+        # 下面这些对象是本轮统一返回结构的占位结果；无论走哪条分支，都尽量返回同一套字段。
         a1_result = A1ExtractionResult()
         linked_entities: list[LinkedEntity] = []
         a2_result = A2HypothesisResult()
         search_result = SearchResult()
         selected_action: MctsAction | None = None
+
+        # 如果上一轮只是确认“检查做过没”，但没说清结果，这里会优先拿出 follow-up 动作继续追问具体结果。
         exam_followup_action = self._pop_exam_context_followup_action(session_id)
+
+        # `default_search_action` 保存 search 原本选中的动作；
+        # 若 verifier 后续没有触发 repair，就直接使用这条动作继续提问。
         default_search_action: MctsAction | None = None
+
+        # 某些特殊停止（例如主诉反复澄清后仍完全无信号）不依赖 search 结果，
+        # 会先构造成强制 stop，稍后覆盖常规 stop decision。
+        forced_stop_decision: StopDecision | None = None
+
+        # 这是基于“当前 session_state 里有没有槽位 / hypothesis”得到的朴素阶段判断，
+        # 后面还会与 A4 的 route 决策合并，形成真正的 `effective_stage`。
         route_after_slot_update = self.deps.router.route_after_slot_update(state)
 
+        # 首轮主诉，或 A4/路由显式要求回到 A1 时，重新做关键线索抽取。
         should_run_a1 = tracker.get_session(session_id).turn_index == 1 or stage_after_a4 == "A1"
 
         if should_run_a1:
+            # A1 的职责是从当前这句自然语言里找显式医学线索；
+            # `known_feature_names` 用来告诉 extractor：这些特征之前已经见过，当前轮别轻易重复抽成“新线索”。
             a1_result = self.deps.evidence_parser.run_a1_key_symptom_extraction(
                 patient_context,
                 known_feature_names=self._collect_known_feature_names(session_id),
             )
+
+            # A1 本身只负责抽取，真正写回会话状态仍然通过 SlotUpdate -> StateTracker 完成。
             a1_updates = self.deps.evidence_parser.build_slot_updates_from_a1(a1_result, turn_index=turn_index)
 
             if len(a1_updates) > 0:
+                # 只有当 A1 真的抽到了有效 key features，才写入 slots，并记录到本轮 updates 列表里。
                 tracker.apply_slot_updates(session_id, a1_updates)
                 applied_updates.extend(a1_updates)
 
+            # 无论 A1 是否抽到很多特征，这一轮都会做实体链接，为后续 R1 提供图谱入口。
             linked_entities = self.deps.entity_linker.link_clinical_features(patient_context.clinical_features)
         else:
+            # 普通 A3 追问轮次通常不重跑 A1，但仍要保留实体链接能力，
+            # 因为患者回答里可能含有额外的新症状词，后续 A2 refresh 时仍可能用到。
             linked_entities = self.deps.entity_linker.link_clinical_features(patient_context.clinical_features)
 
+        # A4 写回状态后，再根据最新槽位与 hypothesis 重新判断本轮主阶段。
         route_after_slot_update = self.deps.router.route_after_slot_update(tracker.get_session(session_id))
+
+        # `effective_stage` 的优先级是：
+        # - 若 A4 没给出更强约束，沿用基于 state 的 route_after_slot_update
+        # - 若 A4 明确要求转去 A2/A3/FALLBACK，则优先听从 A4 的路由结果
+        # - 只有 A4=None 或 A4->A1 时，才允许 route_after_slot_update 接管
         effective_stage = route_after_slot_update.stage if stage_after_a4 in {None, "A1"} else stage_after_a4
 
+        # 先处理无需正式 search 的快捷分支：检查 follow-up、主诉澄清、重复 intake 停止、fallback。
         if exam_followup_action is not None:
+            # 患者已经明确说“做过检查”，但还没给结果时，优先把这条链追完，
+            # 避免 search 立刻跳去问别的证据，导致检查结果信息丢失。
             selected_action = exam_followup_action
             search_result.selected_action = selected_action
             search_result.root_best_action = selected_action
             search_result.metadata["fallback_reason"] = "exam_context_needs_followup"
+        elif self._should_stop_after_repeated_chief_complaint(session_id, patient_context, a1_result, a4_result):
+            # 连续两轮主诉澄清仍然没有任何临床信号时，不再机械重复 intake，直接阶段性停止。
+            forced_stop_decision = self._build_repeated_chief_complaint_stop_decision(session_id)
+            search_result.metadata["fallback_reason"] = "repeated_chief_complaint_without_signal"
         elif self._should_collect_chief_complaint(patient_context, a1_result, a4_result):
+            # 当前输入几乎没有可推理的症状/病史/检查信息，先回到“请描述主诉”的 intake 动作。
             selected_action = self._build_chief_complaint_intake_action(patient_text)
             search_result.selected_action = selected_action
             search_result.root_best_action = selected_action
             search_result.metadata["fallback_reason"] = "no_clinical_information_in_patient_text"
         elif effective_stage == "FALLBACK":
+            # fail_count 或 route 已要求降级时，不再依赖 hypothesis/search，
+            # 直接用全局冷启动问题做一轮兜底探测。
             fallback_candidate = self.deps.question_selector.select_next_question(
                 self.deps.retriever.get_cold_start_questions(),
                 tracker.get_session(session_id),
@@ -1113,21 +1325,45 @@ class ConsultationBrain:
                 else None
             )
         else:
-            should_run_a2 = effective_stage in {"A2", "A3"} or len(tracker.get_session(session_id).candidate_hypotheses) == 0
+            # 常规主路径：需要时刷新 A2；若已有候选诊断，则进入 A3 的局部树搜索。
+            should_run_a2 = self._should_refresh_a2(
+                tracker.get_session(session_id),
+                effective_stage=effective_stage,
+                should_run_a1=should_run_a1,
+                a1_result=a1_result,
+            )
 
             if should_run_a2:
+                # 只有在 hypothesis 尚未建立、A4 明确要求回 A2、或 A1 抽出了新线索时，才重跑 R1 + A2。
                 a2_result = self._run_a2(session_id, patient_context, a1_result, linked_entities)
+            else:
+                # 大多数常规 A3 追问轮次会复用上一轮的 hypothesis 排名，避免每轮重复重算 A2。
+                a2_result = self._build_cached_a2_result(tracker.get_session(session_id))
 
             if effective_stage in {"A2", "A3"} and len(tracker.get_session(session_id).candidate_hypotheses) > 0:
+                # 只有已经形成候选诊断时，A3 才有意义；
+                # `run_reasoning_search()` 会完成 R2 检索、树扩展、rollout、trajectory 聚合与 root action 选择。
                 search_result = self.run_reasoning_search(session_id, patient_context)
                 default_search_action = self.choose_next_question_from_search(session_id, search_result)
 
+        # search 结束后不直接发问，先经过 stop rule、trajectory 聚合、verifier 与 repair。
+        # `check_sufficiency()` 更像传统启发式 stop：只看 hypothesis 分数和 margin，成本低但不够严格。
         stop_decision = self.deps.stop_rule_engine.check_sufficiency(
             tracker.get_session(session_id),
             tracker.get_session(session_id).candidate_hypotheses,
         )
+        if forced_stop_decision is not None:
+            # 特殊 stop（如 repeated chief complaint）优先级更高，显式覆盖常规 sufficiency stop。
+            stop_decision = forced_stop_decision
+
+        # `best_answer_score` 来自 trajectory 分组聚合，是 search 路径层面的“当前最优答案”。
         best_answer_score = self.deps.trajectory_evaluator.select_best_answer(search_result.final_answer_scores)
+
+        # `should_accept_final_answer()` 才是真正的“全局能不能停”闸门；
+        # 它会综合 turn_index、trajectory_count、verifier、guarded gate 等条件。
         accept_decision = self.deps.stop_rule_engine.should_accept_final_answer(best_answer_score, tracker.get_session(session_id))
+
+        # 如果 verifier/guarded gate 认为“现在还不能停”，这里会提炼出 repair 原因与下一步补证据信号。
         repair_context = self._build_verifier_repair_context(
             session_id,
             search_result,
@@ -1136,16 +1372,22 @@ class ConsultationBrain:
         )
 
         if repair_context is not None:
+            # repair 的本质不是推翻 search，而是把“为什么不能停”写回 hypothesis 排名与 tree refresh 理由，
+            # 然后专门选一条更能补关键缺口的下一问。
             self._apply_verifier_repair_strategy(session_id, repair_context)
             if bool(self.deps.repair_policy.enable_best_repair_action):
                 selected_action = self._choose_repair_action(session_id, search_result, repair_context)
                 search_result.repair_selected_action = selected_action
             else:
+                # ablation 关闭 repair action 时，仍退回 search 原本给出的 root action。
                 selected_action = default_search_action
         elif default_search_action is not None:
+            # verifier 没有拦截时，沿用 search 默认动作即可。
             selected_action = default_search_action
 
+        # 若 search 没选出动作，再尝试阶段性停止；仍不能停时，最后退回冷启动探针问题。
         if selected_action is None and not accept_decision.should_stop:
+            # 这一层主要处理“高成本检查没做，但当前也没有可继续追问的低成本证据”。
             stage_stop_decision = self._build_exam_limited_stage_stop_decision(session_id)
 
             if stage_stop_decision is not None:
@@ -1153,14 +1395,17 @@ class ConsultationBrain:
                 search_result.metadata["fallback_reason"] = "no_exam_and_no_low_cost_questions"
 
         if selected_action is None and not accept_decision.should_stop and not stop_decision.should_stop:
+            # 连 search + repair 都给不出动作时，最后再退回一次冷启动探针，避免会话空转。
             selected_action = self._choose_cold_start_probe_action(session_id)
 
             if selected_action is not None and not self._has_search_signal(search_result):
+                # 如果前面根本没有形成有效 search 结果，就把这条冷启动问题当作本轮的显式 selected action。
                 search_result.selected_action = selected_action
                 search_result.root_best_action = selected_action
                 search_result.metadata["fallback_reason"] = "no_a2_a3_action_available"
 
         if self._has_search_signal(search_result):
+            # 这里把 repair 前后的动作、reroot 情况和 reject reason 整理成便于前端/复盘读取的观测结构。
             search_result.selected_action = selected_action
             search_result.verifier_repair_context = self._build_observable_repair_context(
                 search_result,
@@ -1168,16 +1413,21 @@ class ConsultationBrain:
                 selected_action,
             )
 
+        # 无论最终是否继续提问，都尽量补出当前 top hypotheses 的证据画像，方便 UI 解释“为什么是这些候选”。
         a2_evidence_profiles = self._build_a2_evidence_profiles(session_id)
 
+        # 本轮真正结束时返回 final_report；否则继续登记下一问，让外层在下一轮把回答送回来。
         if self._should_emit_final_report(search_result, selected_action, stop_decision, accept_decision):
             if stop_decision.reason in {
                 "no_exam_and_no_low_cost_questions",
                 "exam_not_done_and_no_low_cost_questions",
                 "insufficient_observable_evidence",
             }:
+                # 这类停止更像“当前可观察证据已经到头”，直接返回阶段性报告，不强行包装成最终 reasoning answer。
                 final_report = self.deps.report_builder.build_final_report(tracker.get_session(session_id), stop_decision)
             else:
+                # 正常接受停止时，优先用 search + trajectory + verifier 的完整 reasoning report；
+                # 若本轮几乎没有 search 信号，才退回普通 final report。
                 final_report = (
                     self.finalize_from_search(session_id, search_result)
                     if self._has_search_signal(search_result)
@@ -1209,6 +1459,7 @@ class ConsultationBrain:
                 "final_report": final_report,
             }
 
+        # 走到这里说明本轮还要继续问；A3 result 负责把 selected_action 渲染成面向患者的自然语言问题。
         a3_rationale = (
             "当前输入尚未包含明确症状、风险因素或检查结果，系统先进行主诉澄清。"
             if selected_action is not None and selected_action.action_type == "collect_chief_complaint"
@@ -1217,11 +1468,14 @@ class ConsultationBrain:
         a3_result = self.deps.action_builder.build_a3_verification_result(selected_action, rationale=a3_rationale)
 
         if selected_action is not None:
+            # pending_action 是多轮闭环的关键：下一轮系统要靠它判断患者这句话在回答什么。
+            # 同时还要记录“已经问过这个节点”，避免后续 R2/search 再次把同一问题当作高优先级动作选出来。
             tracker.mark_question_asked(session_id, selected_action.target_node_id)
             tracker.get_session(session_id).metadata["last_selected_action"] = selected_action
             tracker.set_pending_action(session_id, selected_action)
 
             if selected_action.topic_id is not None:
+                # topic 只在继续追问时激活，用于表示当前问诊仍围绕哪个 hypothesis / 主题展开。
                 tracker.activate_topic(session_id, selected_action.topic_id)
 
         return {
@@ -1481,6 +1735,8 @@ class ConsultationBrain:
         rerooted = False
         reroot_reason = ""
 
+        # 若已有树，优先判断这棵树是否还能复用：
+        # 只有状态签名和当前 top hypothesis 都一致时，才直接沿用旧树。
         if tree is not None and tree.root_id is not None:
             root = tree.get_node(tree.root_id)
             root_top_hypothesis_id = str(root.metadata.get("top_hypothesis_id") or "") or None
@@ -1494,6 +1750,7 @@ class ConsultationBrain:
                 }
                 return tree
 
+            # repair 或 hypothesis 排名变化后若禁用了 reroot，则保留旧树但显式记录原因。
             if not enable_tree_reroot:
                 state.metadata["last_tree_refresh"] = {
                     "rerooted": False,
@@ -1503,6 +1760,7 @@ class ConsultationBrain:
                 }
                 return tree
 
+        # 只要强制 refresh、状态签名变化或 top hypothesis 改了，就重建 root。
         if force_tree_refresh:
             rerooted = True
             reroot_reason = state.metadata.get("tree_refresh_reason", "forced_refresh")
@@ -1512,6 +1770,8 @@ class ConsultationBrain:
             reroot_reason = state.metadata.get("tree_refresh_reason", "state_signature_changed")
             state.metadata["tree_refresh_reason"] = reroot_reason
 
+        # 新 root 会缓存一份 rollout_session_copy，
+        # 后续每个叶子展开都从它的轻量快照恢复分支上下文。
         tree = SearchTree()
         tree.add_node(
             TreeNode(
@@ -1523,7 +1783,7 @@ class ConsultationBrain:
                 depth=0,
                 metadata={
                     "session_id": session_id,
-                    "rollout_state": deepcopy(state),
+                    "rollout_state": tracker.get_rollout_session_copy(session_id),
                     "top_hypothesis_id": top_hypothesis_id,
                 },
             )
@@ -1553,7 +1813,7 @@ class ConsultationBrain:
         if isinstance(base_state, SessionState):
             rollout_state = deepcopy(base_state)
         else:
-            rollout_state = tracker.get_session_copy(session_id)
+            rollout_state = tracker.get_rollout_session_copy(session_id)
 
         hypothesis_id = str(leaf.metadata.get("final_answer_id") or leaf.metadata.get("hypothesis_id") or "")
         current_hypothesis = self._find_hypothesis_by_id(rollout_state.candidate_hypotheses, hypothesis_id)
@@ -1636,12 +1896,14 @@ class ConsultationBrain:
         best_answer_score: FinalAnswerScore | None,
         accept_decision: StopDecision,
     ) -> dict | None:
+        # 已经允许停止，或压根没有 best answer 时，就不需要 repair。
         if best_answer_score is None or accept_decision.should_stop:
             return None
 
         metadata = dict(best_answer_score.metadata)
         guarded_blocked = accept_decision.reason == "guarded_acceptance_rejected"
 
+        # 只有 llm_verifier 明确拒停，或 guarded gate 挡下 verifier 的“可停”建议时，才进入 repair。
         if metadata.get("verifier_mode") != "llm_verifier":
             return None
 
@@ -1674,6 +1936,8 @@ class ConsultationBrain:
             current_answer_name=best_answer_score.answer_name,
         )
 
+        # 当前 hypothesis 自己可能已经带有 recommended_next_evidence；
+        # 这里和 verifier 推荐缺口合并，避免 repair 丢掉任何一侧信号。
         if current_hypothesis is not None:
             recommended_next_evidence = self._merge_unique_strings(
                 recommended_next_evidence,
@@ -1685,9 +1949,12 @@ class ConsultationBrain:
             guarded_features.get("guarded_strong_alternative_candidates", [])
         )
 
+        # guarded gate 若明确指出是强备选未排除，就优先用 guarded 解析出的强竞争者覆盖普通 alternatives。
         if guarded_block_reason == "strong_unresolved_alternative_candidates" and len(guarded_strong_alternatives) > 0:
             alternative_candidates = guarded_strong_alternatives
 
+        # 若 verifier 没给出具体 alternatives，但拒停理由就是 strong alternative，
+        # 则从当前 hypothesis 排名里兜底构造几个强备选，保证 repair 仍有目标可追。
         if reject_reason == "strong_alternative_not_ruled_out" and len(alternative_candidates) == 0:
             alternative_candidates = [
                 {
@@ -1701,6 +1968,7 @@ class ConsultationBrain:
         if reject_reason == "missing_key_support" and len(recommended_next_evidence) == 0:
             recommended_next_evidence = self._normalize_string_list(metadata.get("verifier_missing_evidence", []))[:3]
 
+        # guarded gate 给出的 family 缺口优先级很高，必要时把它们前置合并进推荐证据。
         if guarded_block_reason in {"pcp_combo_insufficient", "missing_confirmed_key_evidence"}:
             recommended_next_evidence = self._merge_unique_strings(
                 guarded_family_recommendations,
@@ -1767,9 +2035,12 @@ class ConsultationBrain:
         reject_reason = str(repair_context.get("reject_reason", "missing_key_support"))
         current_hypothesis = self._select_current_repair_hypothesis(state, repair_context)
 
+        # 如果连当前 repair hypothesis 都选不出来，就退回 search 原本的 root action。
         if current_hypothesis is None:
             return self.choose_next_question_from_search(session_id, search_result)
 
+        # repair 有时只围绕 current answer 补证据，
+        # 有时要把 verifier 指出的强 alternatives 也纳入候选动作池。
         repair_hypotheses = self._select_repair_hypotheses(
             state,
             current_hypothesis=current_hypothesis,
@@ -1787,6 +2058,8 @@ class ConsultationBrain:
             ][: self.deps.hypothesis_manager.config.expand_top_k_hypotheses]
             rows = self.deps.retriever.retrieve_r2_expected_evidence(action_hypothesis, state)
 
+            # 每个 hypothesis 都重新跑一轮 R2 + action_builder，
+            # 这样 repair 得到的动作仍然遵守正常搜索链路的排序与 exam_context 门控。
             for action in self.deps.action_builder.build_verification_actions(
                 rows,
                 hypothesis_id=action_hypothesis.node_id,
@@ -1803,6 +2076,7 @@ class ConsultationBrain:
                 seen_action_keys.add(action_key)
                 actions.append(action)
 
+        # repair 只看尚未真正问过的节点，避免 verifier 一直把会话推回同一个问题。
         available_actions = [
             item
             for item in actions
@@ -1949,6 +2223,11 @@ class ConsultationBrain:
         recent_evidence_tags: list[str],
     ) -> float:
         reject_reason = str(repair_context.get("reject_reason", "missing_key_support"))
+
+        # repair score 会同时读取：
+        # - action_builder 已算好的区分度/新颖度/推荐命中度
+        # - guarded gate 给出的 family 缺口
+        # - 最近几轮提问类型和证据 family，避免 repair 自己陷入重复追问
         discriminative_gain = float(action.metadata.get("discriminative_gain", 0.0))
         novelty_score = float(action.metadata.get("novelty_score", 0.0))
         recommended_bonus = float(action.metadata.get("recommended_evidence_bonus", 0.0))
@@ -1990,6 +2269,7 @@ class ConsultationBrain:
         ) > 0
         is_resp_or_oxygen_action = len(semantic_evidence_tags & {"respiratory", "oxygenation"}) > 0
 
+        # 对 PCP combo / missing family 这类 guarded 缺口，优先把真正能补核心 family 的动作大幅前推。
         if guarded_block_reason == "pcp_combo_insufficient" and guarded_family_match:
             pcp_combo_priority_bonus = 3.0
 
@@ -2016,6 +2296,10 @@ class ConsultationBrain:
         family_diversity_bonus = 0.35 if len(recent_semantic_evidence_tags) > 0 and not shared_evidence_family else 0.0
         family_repeat_penalty = 0.3 if shared_evidence_family else 0.0
 
+        # 三类 reject_reason 分别有不同偏好：
+        # - missing_key_support：优先补 verifier / hypothesis 推荐缺口
+        # - strong_alternative_not_ruled_out：优先找能拉开竞争差异的动作
+        # - trajectory_insufficient：优先选新颖、少重复的动作稳定路径
         if reject_reason == "missing_key_support":
             recommended_gap_score = max(
                 recommended_match_score,
@@ -2568,6 +2852,40 @@ class ConsultationBrain:
 
         return True
 
+    # 如果已经追问过一次主诉，但本轮仍无任何有效线索，则停止重复 intake，避免空转。
+    def _should_stop_after_repeated_chief_complaint(
+        self,
+        session_id: str,
+        patient_context: PatientContext,
+        a1_result: A1ExtractionResult,
+        a4_result: A4DeductiveResult | None,
+    ) -> bool:
+        if not self._should_collect_chief_complaint(patient_context, a1_result, a4_result):
+            return False
+
+        state = self.deps.state_tracker.get_session(session_id)
+        last_answered_action = state.metadata.get("last_answered_action")
+
+        if not isinstance(last_answered_action, MctsAction):
+            return False
+
+        return last_answered_action.action_type == "collect_chief_complaint"
+
+    # 构造“主诉已追问但仍无有效线索”的停止决策，避免重复问同一句。
+    def _build_repeated_chief_complaint_stop_decision(self, session_id: str) -> StopDecision:
+        state = self.deps.state_tracker.get_session(session_id)
+
+        return StopDecision(
+            True,
+            "repeated_chief_complaint_without_signal",
+            0.0,
+            {
+                "stage_end_reason": "insufficient_chief_complaint_signal",
+                "message": "已经进行过一次主诉澄清，但患者回答仍未提供任何可用于诊断推理的症状、病史或检查线索，停止重复 intake。",
+                "asked_node_ids": list(state.asked_node_ids),
+            },
+        )
+
     # 构造主诉采集动作；优先用 LLM 生成自然回应，失败时回退固定话术。
     def _build_chief_complaint_intake_action(self, patient_text: str) -> MctsAction:
         payload = self._build_chief_complaint_prompt_payload(patient_text)
@@ -2766,6 +3084,18 @@ def build_default_brain(client: Neo4jClient, config_overrides: dict | None = Non
                 diversity_weight=float(path_eval_config.get("diversity_weight", 0.4)),
                 agent_eval_weight=float(path_eval_config.get("agent_eval_weight", 0.3)),
                 agent_eval_mode=str(path_eval_config.get("agent_eval_mode", "fallback")),
+                llm_verifier_min_turn_index=int(
+                    path_eval_config.get(
+                        "llm_verifier_min_turn_index",
+                        stop_config.get("min_turn_index_before_final_answer", 2),
+                    )
+                ),
+                llm_verifier_min_trajectory_count=int(
+                    path_eval_config.get(
+                        "llm_verifier_min_trajectory_count",
+                        stop_config.get("min_trajectory_count_before_accept", 2),
+                    )
+                ),
             ),
             llm_client=llm_client,
         ),
