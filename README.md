@@ -14,7 +14,7 @@
 一句话概括当前状态：
 
 - 第一阶段：当前活跃版本已切换为服务 `R1 / R2 / A3 / A4` 的搜索专用图谱；旧版治疗、推荐、证据链图谱已移至 `knowledge_graph_bak/`
-- 第二阶段：已经进入“select -> expand -> simulate -> backpropagate 多次 rollout 可跑”的阶段，并已具备 A4 路由控制、配置驱动构造和真实 smoke 入口
+- 第二阶段：已经进入“select -> expand -> simulate -> backpropagate 多次 rollout 可跑”的阶段，并已切换到 `LLM-first + 显式错误传播 + 集中 normalization` 的抽取 / 解释链路
 - 前端演示：已支持中文 Streamlit 页面，可展示多轮问诊、A1/A2/A3/A4、候选诊断、下一问、搜索摘要与安全机制
 
 更详细的局部说明可分别查看：
@@ -285,10 +285,10 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 当前第二阶段不是完整论文复现，但已经完成了“结构对齐后的更贴近论文实现”：
 
 - `MedExtractor`：已补
-- `A1`：已支持 LLM 主通道与规则回退
+- `A1`：当前已切换为 LLM-first 抽取，长文本不再静默回退规则词典
 - `A2`：已支持患者上下文 + R1 候选排序，并可保留 `recommended_next_evidence`
 - `A3`：已支持 R2 检索、动作构造、区分性 gain 与问句生成
-- `A4`：已支持目标感知解释、可选 LLM deductive judge 与显式路由
+- `A4`：已支持目标感知 LLM 解释、LLM deductive judge 与显式路由
 - `SearchTree + UCT + rollout`：已支持多次 rollout 的 `select -> expand -> simulate -> backpropagate`
 - `TrajectoryEvaluator`：已支持路径聚类、相似度驱动 diversity 和可选 LLM verifier 模式
 - `llm_verifier`：当前会对齐 stop rule 的最早接受窗口；在 `turn_index` 或 `trajectory_count` 尚未达到可停止条件前，会先延后 verifier 调用并退回轻量 fallback 评分，避免 competitive replay 在早期追问轮次反复支付高成本评审
@@ -332,8 +332,9 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 - `run_batch_replay.py` 当前会直接向终端设备输出运行信息；即使通过 `conda run` 启动，也会在病例启动、病例完成和长时间运行期间持续输出可见日志
 - `run_batch_replay.py` 当前会在终端持续输出病例级进度条，并每 15 秒输出一次心跳，例如“已完成病例：2 / 10，活动病例：2，当前最久：case_xxx（已运行 12:30）”
 - `run_batch_replay.py` 当前会像前端实时模式一样自动读取 `configs/frontend.yaml` 与 `configs/frontend.local.yaml`，把 Neo4j / LLM / brain 配置桥接到当前 CLI 进程环境
-- `run_batch_replay.py` 当前启动时会直接记录 `llm_available=true/false`；如果你看到病人回答耗时几乎为 0，先看这里是否其实没有启用 LLM
+- `run_batch_replay.py` 当前启动时会直接记录 `llm_available=true/false`；如果为 `false`，批量回放会尽早失败，不再退回旧规则链路
 - `run_batch_replay.py` 当前会在每个病例完成后立即追加写入 `replay_results.jsonl`、`run.log`，并刷新 `benchmark_summary.json` 与 `status.json`
+- `run_batch_replay.py` 当前已支持单病例 `failed` 语义：若 `brain` 抛出 LLM 领域错误，该病例会带 `error.code / error.stage / error.message / error.attempts` 落盘，其他病例继续运行
 - `run_batch_replay.py` 默认支持断点续跑：若输出目录里已经有 `replay_results.jsonl`，会自动跳过已完成病例；如需强制重跑，可加 `--no-resume`
 - `run_batch_replay.py` 当前会记录病例级耗时信息：每个病例的 opening、初始 brain、逐轮 patient/brain、finalize 和总耗时会写入 `replay_results.jsonl`，并在 `benchmark_summary.json` / `status.json` 中聚合 `timing_summary`；运行日志对亚秒级耗时会保留更高精度，避免全部显示成 `0.00`
 - `simulator/replay_engine.py` 当前会先累计原始浮点耗时，再在落盘前统一 round；这能减少毫秒级病例里 `brain_turn_seconds_total` 被逐轮 round 放大的误导
@@ -437,7 +438,7 @@ streamlit run frontend/app.py --server.port 8514
 
 - Neo4j 需要已导入知识图谱，并能通过 `configs/frontend.yaml` 或 `configs/frontend.local.yaml` 连接
 - LLM 默认使用 DashScope compatible OpenAI 接口与 `qwen3-max`
-- 如果实时模式连接失败，页面仍可切换到回放模式完成完整展示
+- 如果实时模式连接失败，页面仍可切换到回放模式完成完整展示；对于 LLM 领域错误，页面会直接显示结构化中文提示，而不是再伪装成“规则降级成功”
 - 如果患者第一句只是“你好，医生”等无症状问候，系统会主动询问主诉
 - 如果患者只提供“我正在发热”等单一线索，系统会通过冷启动追问补充关键症状或风险因素
 

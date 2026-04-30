@@ -12,6 +12,7 @@ import yaml
 from .action_builder import ActionBuilder, ActionBuilderConfig
 from .entity_linker import EntityLinker, EntityLinkerConfig
 from .evidence_parser import EvidenceParser, EvidenceParserConfig
+from .errors import LlmUnavailableError
 from .hypothesis_manager import HypothesisManager, HypothesisManagerConfig
 from .llm_client import LlmClient
 from .mcts_engine import MctsConfig, MctsEngine
@@ -1468,6 +1469,11 @@ class ConsultationBrain:
         a3_result = self.deps.action_builder.build_a3_verification_result(selected_action, rationale=a3_rationale)
 
         if selected_action is not None:
+            if len(a3_result.question_text.strip()) > 0:
+                selected_action.metadata = {
+                    **dict(selected_action.metadata),
+                    "question_text": str(selected_action.metadata.get("question_text") or a3_result.question_text),
+                }
             # pending_action 是多轮闭环的关键：下一轮系统要靠它判断患者这句话在回答什么。
             # 同时还要记录“已经问过这个节点”，避免后续 R2/search 再次把同一问题当作高优先级动作选出来。
             tracker.mark_question_asked(session_id, selected_action.target_node_id)
@@ -2999,13 +3005,22 @@ def build_default_brain(client: Neo4jClient, config_overrides: dict | None = Non
     search_config = dict(config.get("search", {}))
     kg_config = dict(config.get("kg", {}))
     path_eval_config = dict(config.get("path_evaluation", {}))
+    llm_config = dict(config.get("llm", {}))
     a1_config = dict(config.get("a1", {}))
     a2_config = dict(config.get("a2", {}))
     a4_config = dict(config.get("a4", {}))
     fallback_config = dict(config.get("fallback", {}))
     stop_config = dict(config.get("stop", {}))
     repair_config = dict(config.get("repair", {}))
-    llm_client = LlmClient()
+    llm_client = LlmClient(
+        structured_retry_count=int(llm_config.get("structured_retry_count", 1)),
+    )
+    if not llm_client.is_available():
+        raise LlmUnavailableError(
+            stage="brain_startup",
+            prompt_name="brain_startup",
+            message="当前配置要求走 LLM-first 主链路，但未检测到可用的大模型客户端。",
+        )
     deps = BrainDependencies(
         state_tracker=StateTracker(),
         retriever=GraphRetriever(
@@ -3046,7 +3061,6 @@ def build_default_brain(client: Neo4jClient, config_overrides: dict | None = Non
             llm_client,
             EvidenceParserConfig(
                 use_llm_extractor=bool(a1_config.get("use_llm_extractor", True)),
-                fallback_to_rules=bool(a1_config.get("fallback_to_rules", True)),
                 use_llm_deductive_judge=bool(a4_config.get("use_llm_deductive_judge", True)),
             ),
         ),

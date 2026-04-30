@@ -2,6 +2,7 @@
 
 from collections import deque
 
+from brain.errors import LlmOutputInvalidError
 from simulator.case_schema import SlotTruth, VirtualPatientCase
 from simulator.patient_agent import VirtualPatientAgent
 from simulator import replay_engine
@@ -188,3 +189,38 @@ def test_replay_engine_timing_totals_do_not_exceed_case_total(monkeypatch) -> No
     assert result.status == "max_turn_reached"
     assert result.timing["brain_turn_seconds_total"] <= result.timing["total_seconds"]
     assert result.timing["initial_brain_seconds"] <= result.timing["total_seconds"]
+
+
+# 验证 LLM 主链路抛出领域错误时，单病例会标记 failed 并保留结构化错误。
+def test_replay_engine_marks_case_failed_on_domain_error() -> None:
+    class FailingBrain:
+        def start_session(self, session_id: str) -> None:
+            self.session_id = session_id
+
+        def process_turn(self, session_id: str, patient_text: str) -> dict:
+            _ = session_id, patient_text
+            raise LlmOutputInvalidError(
+                stage="a1_key_symptom_extraction",
+                prompt_name="a1_key_symptom_extraction",
+                attempts=2,
+                message="结构化输出缺少 key_features。",
+            )
+
+        def finalize(self, session_id: str) -> dict:
+            _ = session_id
+            raise AssertionError("failed 病例不应再进入 finalize")
+
+    engine = ReplayEngine(FailingBrain(), VirtualPatientAgent())
+    case = VirtualPatientCase(
+        case_id="failed_case",
+        title="failed",
+        slot_truth_map={"发热": SlotTruth(node_id="发热", value=True, aliases=["发热"], reveal_only_if_asked=False)},
+    )
+
+    result = engine.run_case(case)
+
+    assert result.status == "failed"
+    assert result.final_report == {}
+    assert result.error["code"] == "llm_output_invalid"
+    assert result.error["stage"] == "a1_key_symptom_extraction"
+    assert result.error["attempts"] == 2

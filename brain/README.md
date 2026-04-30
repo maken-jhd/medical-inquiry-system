@@ -18,6 +18,14 @@
 - `process_turn()` 已按 `STOP / A3 / A2 / A1 / FALLBACK` 分支使用 A4 路由结果
 - 默认构造已真正消费 [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml)
 
+当前抽取与解释链路还有一个新的固定约定：
+
+- 长文本抽取与解释采用 `LLM-first`：`MedExtractor`、`A1`、`A4 verify_evidence`、`exam_context` 不再静默退回规则词典
+- 仅保留极薄的确定性层：`有 / 没有 / 不太清楚` 这类短答仍可直接短路，避免每轮都支付一次 LLM 成本
+- `LLM` 结构化调用统一由 [llm_client.py](/Users/loki/Workspace/GraduationDesign/brain/llm_client.py) 负责一次重试；仍失败时抛出结构化领域错误，而不是伪装成正常问诊结果
+- 名称归一化集中收口到 [normalization.py](/Users/loki/Workspace/GraduationDesign/brain/normalization.py)，位置固定在“LLM 输出之后、Neo4j / EntityLinker 之前”
+- 默认构造当前要求 `llm_available=true`；如果本机未配置可用 LLM，`build_default_brain_from_env()` 会尽早报错，而不是进入“半规则半模型”的模糊状态
+
 当前需要明确区分三种工作模式：
 
 - `interactive`：交互式问诊模式，围绕当前会话生成下一问
@@ -48,7 +56,16 @@
 
 - [llm_client.py](/Users/loki/Workspace/GraduationDesign/brain/llm_client.py)
   - 统一封装第二阶段大模型结构化调用。
-  - 当前供 `MedExtractor`、`A1` 抽取、`A2` 假设排序、`A4` deductive judge 和轨迹 verifier 复用。
+  - 当前供 `MedExtractor`、`A1` 抽取、`A2` 假设排序、`A4` 目标解释 / deductive judge、`exam_context` 解释和轨迹 verifier 复用。
+  - 当前会统一处理结构化 prompt 的单次重试，并把超时、输出非法、空抽取等情况转换为显式领域错误。
+
+- [errors.py](/Users/loki/Workspace/GraduationDesign/brain/errors.py)
+  - 定义 LLM-first 链路下统一对外暴露的领域错误。
+  - 当前包含 `llm_unavailable`、`llm_timeout`、`llm_output_invalid`、`llm_empty_extraction`、`llm_stage_failed`。
+
+- [normalization.py](/Users/loki/Workspace/GraduationDesign/brain/normalization.py)
+  - 集中维护 alias、canonical name 和常见口语映射。
+  - 当前供 `MedExtractor`、`A1`、`exam_context` 和 `EntityLinker` 共用，避免各模块各自维护一套零散词典。
 
 - [state_tracker.py](/Users/loki/Workspace/GraduationDesign/brain/state_tracker.py)
   - 负责维护会话中的槽位状态。
@@ -98,15 +115,18 @@
 - [med_extractor.py](/Users/loki/Workspace/GraduationDesign/brain/med_extractor.py)
   - 对齐论文中的 MedExtractor。
   - 负责把患者原话拆成一般信息 `P` 和临床特征 `C`。
+  - 当前长文本只接受 LLM 结构化抽取；短答仍允许走极薄的 direct reply 规则。
 
 - [evidence_parser.py](/Users/loki/Workspace/GraduationDesign/brain/evidence_parser.py)
   - 对应 `A1` 与答案解释层。
   - 负责从患者回答中提取关键医学线索，并解释目标验证点的回答结果。
-  - 当前会输出 `supporting_span / negation_span / uncertain_span`，并支持可选 LLM deductive judge。
+  - 当前会输出 `supporting_span / negation_span / uncertain_span`，并在长回答场景下优先使用 `a4_target_answer_interpretation`、`exam_context_interpretation` 和 `a4_deductive_judge` 三类结构化 prompt。
+  - 当前不再把长回答静默退回规则词典；LLM 失败会直接向上抛出领域错误。
 
 - [entity_linker.py](/Users/loki/Workspace/GraduationDesign/brain/entity_linker.py)
   - 对齐论文里的实体链接与阈值过滤。
   - 负责把 mention 对齐到图谱节点，并决定当前是否可信地启用 KG。
+  - 当前在入图前会先消费集中式 normalization 结果，减少 `艾滋病 -> HIV感染`、`咳嗽 -> 干咳` 这类名称不齐造成的漏连。
 
 - [hypothesis_manager.py](/Users/loki/Workspace/GraduationDesign/brain/hypothesis_manager.py)
   - 对应 `A2` 假设生成。
@@ -173,10 +193,10 @@
 | 组件 | 当前状态 | 说明 |
 |---|---|---|
 | MedExtractor | 基础版完成 | 已有 `patient_text -> (P, C)` |
-| A1 | 部分完成 | 已支持 LLM 主通道与规则回退 |
+| A1 | 部分完成 | 已切换为 LLM-first 抽取，短答保留极薄规则短路 |
 | A2 | 部分完成 | 已支持患者上下文 + R1 候选排序 |
 | A3 | 部分完成 | 已支持 R2 检索、动作构造、区分性 gain 与问题生成 |
-| A4 | 部分完成 | 已支持目标感知解释、可选 LLM judge 与显式路由 |
+| A4 | 部分完成 | 已支持目标感知 LLM 解释、LLM deductive judge 与显式路由 |
 | R1 / R2 | 基础版完成 | 已与真实 Neo4j 联调，R1 已增加方向语义 |
 | Search Tree | 基础版完成 | 已有显式树、tree policy 和回传统计 |
 | Rollout | 浅层版完成 | 已支持多次 rollout 与局部多步路径输出 |

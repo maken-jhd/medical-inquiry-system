@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import re
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Iterable, List, Optional, Sequence
 
+from .errors import LlmEmptyExtractionError, LlmOutputInvalidError, LlmUnavailableError
 from .llm_client import LlmClient
+from .normalization import NameNormalizer
 from .types import (
     A1ExtractionResult,
     A4DeductiveResult,
@@ -24,34 +26,9 @@ from .types import (
 
 @dataclass
 class EvidenceParserConfig:
-    """保存 A1 规则抽取阶段使用的基础词典。"""
+    """保存 A1 / A4 在 LLM-first 模式下的轻量配置。"""
 
-    feature_aliases: Dict[str, List[str]] = field(
-        default_factory=lambda: {
-            "发热": ["发热", "发烧", "体温高", "低热", "高热"],
-            "干咳": ["干咳", "咳嗽"],
-            "呼吸困难": ["呼吸困难", "气促", "喘不上气", "胸闷"],
-            "腹泻": ["腹泻", "拉肚子", "稀便"],
-            "皮疹": ["皮疹", "红疹", "起疹子"],
-            "体重下降": ["体重下降", "消瘦", "变瘦"],
-            "畏光": ["畏光", "怕光"],
-            "视力下降": ["视力下降", "视力模糊", "看东西模糊"],
-            "嗜睡": ["嗜睡", "老是想睡", "总想睡觉"],
-            "精神错乱": ["精神错乱", "意识混乱", "神志不清"],
-            "认知异常": ["认知异常", "记性差", "记忆力下降", "痴呆"],
-            "吞咽困难": ["吞咽困难", "吞东西困难"],
-            "胸痛": ["胸痛", "胸口痛"],
-            "咯血": ["咯血", "咳血"],
-            "步态异常": ["步态异常", "走路不稳"],
-            "言语异常": ["言语异常", "说话不清", "说话含糊"],
-            "HIV感染": ["HIV感染", "HIV感染者", "艾滋病", "艾滋病患者"],
-            "免疫功能低下": ["免疫功能低下", "免疫力低", "免疫力比较低"],
-            "高危性行为": ["高危性行为", "无保护性行为", "不安全性行为"],
-            "输血史": ["输血史", "输过血"],
-        }
-    )
     use_llm_extractor: bool = True
-    fallback_to_rules: bool = True
     use_llm_deductive_judge: bool = True
 
 
@@ -62,23 +39,18 @@ class EvidenceParser:
     def __init__(self, llm_client: LlmClient | None = None, config: EvidenceParserConfig | None = None) -> None:
         self.llm_client = llm_client
         self.config = config or EvidenceParserConfig()
+        self.normalizer = NameNormalizer()
 
-    # 对外提供 A1 阶段入口，优先走 LLM，失败后回退到规则版。
+    # 对外提供 A1 阶段入口；长文本只接受 LLM 结构化结果。
     def run_a1_key_symptom_extraction(
         self,
         patient_input: str | PatientContext,
         known_feature_names: Optional[Sequence[str]] = None,
     ) -> A1ExtractionResult:
-        if self.llm_client is not None and self.llm_client.is_available() and self.config.use_llm_extractor:
-            try:
-                llm_result = self._run_a1_with_llm(patient_input, known_feature_names)
-                if len(llm_result.key_features) > 0:
-                    return llm_result
-            except Exception:
-                if not self.config.fallback_to_rules:
-                    raise
+        if self.llm_client is None or not self.llm_client.is_available() or not self.config.use_llm_extractor:
+            raise LlmUnavailableError(stage="a1_key_symptom_extraction", prompt_name="a1_key_symptom_extraction")
 
-        return self._run_a1_with_rules(patient_input, known_feature_names)
+        return self._run_a1_with_llm(patient_input, known_feature_names)
 
     # 将 A4 阶段的目标问题回答解释成目标感知的证据状态。
     def interpret_answer_for_target(
@@ -86,64 +58,28 @@ class EvidenceParser:
         patient_text: str,
         action: MctsAction,
     ) -> A4DeductiveResult:
-        target_name = action.target_node_name
-
-        # 先把注意力聚焦到包含 target 的短分句，再识别直接短答、否定、模糊和支持性片段，
-        # 避免整句里其他无关描述污染当前目标证据判断。
-        focused_spans = self._collect_target_relevant_spans(patient_text, target_name)
         direct_reply = self._classify_direct_reply(patient_text)
-        negation_span = self._extract_target_span(
-            focused_spans or [patient_text],
-            [r"没有", r"并未", r"否认", r"无", r"不是", r"未见"],
-        )
-        uncertain_span = self._extract_target_span(
-            focused_spans or [patient_text],
-            [r"好像", r"可能", r"大概", r"有点", r"不太确定", r"说不上来", r"不清楚"],
-        )
-        supporting_span = self._extract_target_span(
-            focused_spans or [patient_text],
-            [r"有", r"是", r"会", r"存在", r"出现", r"明显", re.escape(target_name)],
-        )
-        existence, certainty = self._infer_target_aware_existence_and_certainty(
-            patient_text,
-            target_name,
-            focused_spans,
-            direct_reply,
-            negation_span,
-            uncertain_span,
-            supporting_span,
-        )
+        if direct_reply is not None:
+            return self._build_direct_reply_interpretation(patient_text, action, direct_reply)
 
-        # reasoning 只负责解释本次判断为什么是 exist / non_exist / unknown，
-        # 方便后续 evidence_state、audit 和前端复盘直接复用。
-        if existence == "non_exist":
-            reasoning = f"患者回答中出现了针对“{target_name}”的否定表达。"
-        elif existence == "exist" and certainty == "doubt":
-            reasoning = f"患者回答与“{target_name}”相关，但表述仍然模糊。"
-        elif existence == "exist":
-            reasoning = f"患者回答明确支持“{target_name}”存在。"
-        else:
-            reasoning = f"当前回答不足以对“{target_name}”形成明确判断。"
+        if self.llm_client is None or not self.llm_client.is_available():
+            raise LlmUnavailableError(
+                stage="a4_target_answer_interpretation",
+                prompt_name="a4_target_answer_interpretation",
+            )
 
-        # 若同一回答里同时出现支持与否定，先打上 contradiction 标记，供后续 judge/router 更保守处理。
-        contradiction_detected = bool(negation_span and supporting_span and negation_span != supporting_span)
-
-        return A4DeductiveResult(
-            existence=existence,
-            certainty=certainty,
-            reasoning=reasoning,
-            supporting_span=supporting_span,
-            negation_span=negation_span,
-            uncertain_span=uncertain_span,
-            metadata={
-                "action_id": action.action_id,
-                "target_node_id": action.target_node_id,
-                "target_node_name": target_name,
-                "focused_spans": focused_spans,
-                "direct_reply": direct_reply,
-                "has_contradiction": contradiction_detected,
+        payload = self.llm_client.run_structured_prompt(
+            "a4_target_answer_interpretation",
+            {
+                "question_text": str(action.metadata.get("question_text") or ""),
+                "target_node_name": action.target_node_name,
+                "target_aliases": self.normalizer.candidate_feature_aliases(action.target_node_name),
+                "question_type": str(action.metadata.get("question_type_hint") or action.action_type or ""),
+                "patient_answer": patient_text,
             },
+            dict,
         )
+        return self._coerce_target_answer_payload(payload, action, patient_text)
 
     # collect_exam_context 动作专用解析：一次回答里同时识别是否做过、检查名称和结果。
     def interpret_exam_context_answer(
@@ -156,40 +92,219 @@ class EvidenceParser:
         if exam_kind not in {"general", "lab", "imaging", "pathogen"}:
             exam_kind = "general"
 
-        availability = self._infer_exam_availability(patient_text, exam_kind)
-        mentioned_tests = self._extract_mentioned_tests(patient_text, exam_kind)
-        mentioned_results = self._extract_mentioned_exam_results(patient_text, mentioned_tests, exam_kind)
-        mentioned_exam_kinds = self._infer_exam_kinds_from_mentions(mentioned_tests, mentioned_results)
-
-        # 一旦患者明确说出了检查名称或结果，即便没说“做过”，也可合理推断为 done。
-        if availability == "unknown" and (len(mentioned_tests) > 0 or len(mentioned_results) > 0):
-            availability = "done"
-
-        needs_followup = False
-        followup_reason = ""
-
-        # exam_context 的 follow-up 触发条件分两类：
-        # - 知道做过，但还没说清具体结果
-        # - 连是否做过都说不清，需要先澄清 availability
-        if availability == "done" and len(mentioned_results) == 0:
-            needs_followup = True
-            followup_reason = (
-                "mentioned_tests_without_results"
-                if len(mentioned_tests) > 0
-                else "done_without_test_name_or_result"
+        direct_reply = self._classify_direct_reply(patient_text)
+        if direct_reply in {"positive", "negative", "uncertain"}:
+            return self._build_direct_reply_exam_context_result(
+                patient_text=patient_text,
+                action=action,
+                exam_kind=exam_kind,
+                direct_reply=direct_reply,
             )
-        elif availability == "unknown":
+
+        if self.llm_client is None or not self.llm_client.is_available():
+            raise LlmUnavailableError(
+                stage="exam_context_interpretation",
+                prompt_name="exam_context_interpretation",
+            )
+
+        payload = self.llm_client.run_structured_prompt(
+            "exam_context_interpretation",
+            {
+                "exam_kind": exam_kind,
+                "question_text": str(action.metadata.get("question_text") or ""),
+                "patient_answer": patient_text,
+                "candidate_evidence_names": [
+                    str(item.get("name", ""))
+                    for item in action.metadata.get("exam_candidate_evidence", [])
+                    if isinstance(item, dict)
+                ][:8],
+            },
+            dict,
+        )
+        return self._coerce_exam_context_payload(payload, action, patient_text, exam_kind)
+
+    # 对 verify_evidence 的短答使用确定性解释，避免每轮都为“有/没有/不清楚”支付一次 LLM 成本。
+    def _build_direct_reply_interpretation(
+        self,
+        patient_text: str,
+        action: MctsAction,
+        direct_reply: str,
+    ) -> A4DeductiveResult:
+        if direct_reply == "positive":
+            existence, certainty = "exist", "confident"
+            reasoning = f"患者对“{action.target_node_name}”给出了直接肯定回答。"
+        elif direct_reply == "negative":
+            existence, certainty = "non_exist", "confident"
+            reasoning = f"患者对“{action.target_node_name}”给出了直接否定回答。"
+        else:
+            existence, certainty = "unknown", "doubt"
+            reasoning = f"患者对“{action.target_node_name}”给出了不确定回答。"
+
+        return A4DeductiveResult(
+            existence=existence,  # type: ignore[arg-type]
+            certainty=certainty,  # type: ignore[arg-type]
+            reasoning=reasoning,
+            supporting_span=patient_text if direct_reply == "positive" else "",
+            negation_span=patient_text if direct_reply == "negative" else "",
+            uncertain_span=patient_text if direct_reply == "uncertain" else "",
+            metadata={
+                "action_id": action.action_id,
+                "target_node_id": action.target_node_id,
+                "target_node_name": action.target_node_name,
+                "focused_spans": [patient_text.strip()] if len(patient_text.strip()) > 0 else [],
+                "direct_reply": direct_reply,
+                "has_contradiction": False,
+                "interpretation_source": "direct_reply_rule",
+            },
+        )
+
+    def _coerce_target_answer_payload(
+        self,
+        payload: dict,
+        action: MctsAction,
+        patient_text: str,
+    ) -> A4DeductiveResult:
+        if not isinstance(payload, dict):
+            raise LlmOutputInvalidError(
+                stage="a4_target_answer_interpretation",
+                prompt_name="a4_target_answer_interpretation",
+                attempts=1,
+                message="A4 target answer interpretation 收到的 payload 不是 JSON object。",
+            )
+
+        existence = str(payload.get("existence", "")).strip()
+        certainty = str(payload.get("certainty", "")).strip()
+        if existence not in {"exist", "non_exist", "unknown"}:
+            raise LlmOutputInvalidError(
+                stage="a4_target_answer_interpretation",
+                prompt_name="a4_target_answer_interpretation",
+                attempts=1,
+                message=f"A4 target answer interpretation 返回了非法 existence：{existence or '空'}",
+            )
+        if certainty not in {"confident", "doubt", "unknown"}:
+            raise LlmOutputInvalidError(
+                stage="a4_target_answer_interpretation",
+                prompt_name="a4_target_answer_interpretation",
+                attempts=1,
+                message=f"A4 target answer interpretation 返回了非法 certainty：{certainty or '空'}",
+            )
+
+        supporting_span = str(payload.get("supporting_span", "") or "")
+        negation_span = str(payload.get("negation_span", "") or "")
+        uncertain_span = str(payload.get("uncertain_span", "") or "")
+        contradiction_detected = bool(
+            len(negation_span) > 0 and len(supporting_span) > 0 and negation_span != supporting_span
+        )
+
+        return A4DeductiveResult(
+            existence=existence,  # type: ignore[arg-type]
+            certainty=certainty,  # type: ignore[arg-type]
+            reasoning=str(payload.get("reasoning", "") or "已由 LLM 完成目标回答解释。"),
+            supporting_span=supporting_span,
+            negation_span=negation_span,
+            uncertain_span=uncertain_span,
+            metadata={
+                "action_id": action.action_id,
+                "target_node_id": action.target_node_id,
+                "target_node_name": action.target_node_name,
+                "focused_spans": [patient_text.strip()] if len(patient_text.strip()) > 0 else [],
+                "direct_reply": None,
+                "has_contradiction": contradiction_detected,
+                "interpretation_source": "llm",
+            },
+        )
+
+    def _build_direct_reply_exam_context_result(
+        self,
+        *,
+        patient_text: str,
+        action: MctsAction,
+        exam_kind: str,
+        direct_reply: str,
+    ) -> ExamContextResult:
+        if direct_reply == "positive":
+            availability = "done"
+            needs_followup = True
+            followup_reason = "done_without_test_name_or_result"
+            reasoning = "患者直接表示做过相关检查，但尚未提供检查名称或结果。"
+        elif direct_reply == "negative":
+            availability = "not_done"
+            needs_followup = False
+            followup_reason = ""
+            reasoning = "患者直接表示近期没有做过该类检查。"
+        else:
+            availability = "unknown"
             needs_followup = True
             followup_reason = "availability_unclear"
+            reasoning = "患者对是否做过该类检查仍不确定，需要先澄清 availability。"
 
-        if availability == "not_done":
-            reasoning = "患者表示近期没有做过该类检查，暂时不继续追问该类具体结果。"
-        elif availability == "done" and len(mentioned_results) > 0:
-            reasoning = "患者表示做过相关检查，并提供了可解析的检查结果线索。"
-        elif availability == "done":
-            reasoning = "患者表示做过相关检查，但尚未说清具体结果。"
-        else:
-            reasoning = "患者回答尚不足以判断是否做过该类检查，需要一次澄清。"
+        return ExamContextResult(
+            exam_kind=exam_kind,  # type: ignore[arg-type]
+            availability=availability,  # type: ignore[arg-type]
+            mentioned_tests=[],
+            mentioned_results=[],
+            needs_followup=needs_followup,
+            followup_reason=followup_reason,
+            reasoning=reasoning,
+            metadata={
+                "action_id": action.action_id,
+                "raw_text": patient_text,
+                "candidate_evidence_count": len(action.metadata.get("exam_candidate_evidence", [])),
+                "mentioned_exam_kinds": [],
+                "interpretation_source": "direct_reply_rule",
+            },
+        )
+
+    def _coerce_exam_context_payload(
+        self,
+        payload: dict,
+        action: MctsAction,
+        patient_text: str,
+        exam_kind: str,
+    ) -> ExamContextResult:
+        if not isinstance(payload, dict):
+            raise LlmOutputInvalidError(
+                stage="exam_context_interpretation",
+                prompt_name="exam_context_interpretation",
+                attempts=1,
+                message="Exam context interpretation 收到的 payload 不是 JSON object。",
+            )
+
+        availability = str(payload.get("availability", "")).strip()
+        if availability not in {"unknown", "done", "not_done"}:
+            raise LlmOutputInvalidError(
+                stage="exam_context_interpretation",
+                prompt_name="exam_context_interpretation",
+                attempts=1,
+                message=f"Exam context interpretation 返回了非法 availability：{availability or '空'}",
+            )
+
+        mentioned_tests = [
+            self.normalizer.normalize_exam_name(str(item))
+            for item in payload.get("mentioned_tests", [])
+            if len(str(item).strip()) > 0
+        ]
+        mentioned_results: list[ExamMentionedResult] = []
+        for item in payload.get("mentioned_results", []):
+            if not isinstance(item, dict):
+                continue
+            normalized_result = str(item.get("normalized_result", "unknown") or "unknown").strip()
+            if normalized_result not in {"positive", "negative", "high", "low", "unknown"}:
+                normalized_result = "unknown"
+            test_name = self.normalizer.normalize_exam_name(str(item.get("test_name", "")))
+            mentioned_results.append(
+                ExamMentionedResult(
+                    test_name=test_name,
+                    raw_text=str(item.get("raw_text", "") or ""),
+                    normalized_result=normalized_result,
+                    metadata=dict(item.get("metadata", {})),
+                )
+            )
+
+        needs_followup = bool(payload.get("needs_followup", False))
+        followup_reason = str(payload.get("followup_reason", "") or "")
+        reasoning = str(payload.get("reasoning", "") or "已由 LLM 解析检查上下文回答。")
+        mentioned_exam_kinds = self._infer_exam_kinds_from_mentions(mentioned_tests, mentioned_results)
 
         return ExamContextResult(
             exam_kind=exam_kind,  # type: ignore[arg-type]
@@ -204,6 +319,7 @@ class EvidenceParser:
                 "raw_text": patient_text,
                 "candidate_evidence_count": len(action.metadata.get("exam_candidate_evidence", [])),
                 "mentioned_exam_kinds": sorted(mentioned_exam_kinds),
+                "interpretation_source": "llm",
             },
         )
 
@@ -287,29 +403,21 @@ class EvidenceParser:
                 alternatives,
             )
 
-        if self.llm_client is not None and self.llm_client.is_available() and self.config.use_llm_deductive_judge:
-            try:
-                payload = self.llm_client.run_structured_prompt(
-                    "a4_deductive_judge",
-                    {
-                        "patient_context": patient_context,
-                        "action": action,
-                        "answer_interpretation": answer_interpretation,
-                        "current_hypothesis": current_hypothesis,
-                        "alternatives": alternatives[:3],
-                    },
-                    dict,
-                )
-                return self._coerce_judge_payload(payload, action, answer_interpretation)
-            except Exception:
-                pass
+        if self.llm_client is None or not self.llm_client.is_available() or not self.config.use_llm_deductive_judge:
+            raise LlmUnavailableError(stage="a4_deductive_judge", prompt_name="a4_deductive_judge")
 
-        return self._build_rule_based_deductive_decision(
-            action,
-            answer_interpretation,
-            current_hypothesis,
-            alternatives,
+        payload = self.llm_client.run_structured_prompt(
+            "a4_deductive_judge",
+            {
+                "patient_context": patient_context,
+                "action": action,
+                "answer_interpretation": answer_interpretation,
+                "current_hypothesis": current_hypothesis,
+                "alternatives": alternatives[:3],
+            },
+            dict,
         )
+        return self._coerce_judge_payload(payload, action, answer_interpretation)
 
     # 明确短答的 targeted verification 通常不需要再走一次 LLM judge，规则决策即可支撑后续路由。
     def _should_skip_llm_deductive_judge(
@@ -328,14 +436,7 @@ class EvidenceParser:
         if direct_reply in {"positive", "negative", "uncertain"}:
             return True
 
-        normalized_text = patient_context.raw_text.strip()
-        if len(normalized_text) > 18:
-            return False
-
-        return (
-            answer_interpretation.existence in {"exist", "non_exist", "unknown"}
-            and answer_interpretation.certainty in {"confident", "doubt"}
-        )
+        return False
 
     # 将 A4 演绎分析结果转换为可写入状态机的槽位更新。
     def build_slot_updates_from_a4(
@@ -427,7 +528,7 @@ class EvidenceParser:
         known_feature_names: Optional[Sequence[str]] = None,
     ) -> A1ExtractionResult:
         if self.llm_client is None:
-            raise RuntimeError("当前未配置可用的 LLM 客户端。")
+            raise LlmUnavailableError(stage="a1_key_symptom_extraction", prompt_name="a1_key_symptom_extraction")
 
         patient_context = self._ensure_patient_context(patient_input)
         payload = self.llm_client.run_structured_prompt(
@@ -438,106 +539,66 @@ class EvidenceParser:
             },
             dict,
         )
+        if not isinstance(payload, dict):
+            raise LlmOutputInvalidError(
+                stage="a1_key_symptom_extraction",
+                prompt_name="a1_key_symptom_extraction",
+                attempts=1,
+                message="A1 key symptom extraction 收到的 payload 不是 JSON object。",
+            )
         key_features: List[KeyFeature] = []
+        normalized_names: set[str] = set()
+        known_names = set(known_feature_names or [])
 
         for item in payload.get("key_features", []):
+            if not isinstance(item, dict):
+                continue
+            normalized_name = self.normalizer.normalize_feature_name(
+                str(item.get("normalized_name", item.get("name", "")) or item.get("name", ""))
+            )
+            if len(normalized_name) == 0 or normalized_name in normalized_names:
+                continue
             key_features.append(
                 KeyFeature(
-                    name=item.get("name", ""),
-                    normalized_name=item.get("normalized_name", item.get("name", "")),
-                    status=item.get("status", "exist"),
-                    certainty=item.get("certainty", "doubt"),
-                    reasoning=item.get("reasoning", "由 LLM 提取。"),
+                    name=str(item.get("name", normalized_name) or normalized_name),
+                    normalized_name=normalized_name,
+                    status=str(item.get("status", "exist") or "exist"),
+                    certainty=str(item.get("certainty", "doubt") or "doubt"),
+                    reasoning=str(item.get("reasoning", "由 LLM 提取。") or "由 LLM 提取。"),
                     metadata=dict(item.get("metadata", {})),
                 )
             )
+            normalized_names.add(normalized_name)
 
-        return A1ExtractionResult(
-            key_features=key_features,
-            reasoning=payload.get("reasoning_summary", "已由 LLM 提取核心线索。"),
-            metadata={"source": "llm"},
-        )
-
-    # 使用规则兜底执行 A1 抽取。
-    def _run_a1_with_rules(
-        self,
-        patient_input: str | PatientContext,
-        known_feature_names: Optional[Sequence[str]] = None,
-    ) -> A1ExtractionResult:
-        patient_context = self._ensure_patient_context(patient_input)
-        patient_text = patient_context.raw_text
-        key_features: List[KeyFeature] = []
-        normalized_names: set[str] = set()
-        candidate_names = set(known_feature_names or [])
-
-        # 优先消费 MedExtractor 已经结构化的临床特征。
-        for feature in patient_context.clinical_features:
-            if feature.normalized_name in normalized_names:
-                continue
-
-            if feature.status == "unknown":
-                continue
-
-            key_features.append(
-                KeyFeature(
-                    name=feature.name,
-                    normalized_name=feature.normalized_name,
-                    status=feature.status,  # type: ignore[arg-type]
-                    certainty=feature.certainty,  # type: ignore[arg-type]
-                    reasoning=f"MedExtractor 已识别出“{feature.normalized_name}”。",
-                    metadata={"category": feature.category},
-                )
-            )
-            normalized_names.add(feature.normalized_name)
-
-        # 再用手工词典从患者原话中补漏，主要覆盖高频症状、风险因素和宿主信息。
-        for normalized_name, aliases in self.config.feature_aliases.items():
-            for alias in aliases:
-                if alias in patient_text:
-                    if normalized_name in normalized_names:
-                        break
-
-                    status, certainty = self._infer_existence_and_certainty(patient_text, alias)
+        if len(key_features) == 0:
+            for feature_name in known_names:
+                normalized_name = self.normalizer.normalize_feature_name(feature_name)
+                if normalized_name in normalized_names:
+                    continue
+                if normalized_name and normalized_name in patient_context.raw_text:
                     key_features.append(
                         KeyFeature(
-                            name=alias,
+                            name=normalized_name,
                             normalized_name=normalized_name,
-                            status=status,
-                            certainty=certainty,
-                            reasoning=f"患者表述中命中了“{alias}”，归一为“{normalized_name}”。",
+                            status="exist",
+                            certainty="doubt",
+                            reasoning=f"患者原话直接复述了已知特征“{normalized_name}”。",
                         )
                     )
                     normalized_names.add(normalized_name)
-                    break
-
-        # 最后再扫一遍上游传入的 known_feature_names，
-        # 这样对“上一轮已经关注过的节点”会更敏感，不容易漏掉患者直接复述的原词。
-        for feature_name in candidate_names:
-            if feature_name in normalized_names:
-                continue
-
-            if feature_name in patient_text:
-                status, certainty = self._infer_existence_and_certainty(patient_text, feature_name)
-                key_features.append(
-                    KeyFeature(
-                        name=feature_name,
-                        normalized_name=feature_name,
-                        status=status,
-                        certainty=certainty,
-                        reasoning=f"患者原话直接出现了候选特征“{feature_name}”。",
-                    )
-                )
-                normalized_names.add(feature_name)
-
-        reasoning = "已根据规则词典从患者原话中提取核心线索。"
 
         if len(key_features) == 0:
-            reasoning = "未命中规则词典中的明显核心线索，建议进入更保守的澄清提问。"
+            raise LlmEmptyExtractionError(
+                stage="a1_key_symptom_extraction",
+                prompt_name="a1_key_symptom_extraction",
+                attempts=1,
+                message="A1 未从当前患者上下文中抽取出任何关键特征。",
+            )
 
         return A1ExtractionResult(
             key_features=key_features,
-            reasoning=reasoning,
-            metadata={"source_text": patient_text},
+            reasoning=str(payload.get("reasoning_summary", "已由 LLM 提取核心线索。") or "已由 LLM 提取核心线索。"),
+            metadata={"source": "llm"},
         )
 
     # 根据原话中的语气和否定词，粗略判断存在性和确定性。
@@ -991,20 +1052,7 @@ class EvidenceParser:
 
     # 检查上下文解析使用的统一归一化。
     def _normalize_exam_text(self, text: str) -> str:
-        return (
-            str(text)
-            .strip()
-            .lower()
-            .replace(" ", "")
-            .replace("（", "(")
-            .replace("）", ")")
-            .replace("，", ",")
-            .replace("。", "")
-            .replace("、", "")
-            .replace("-", "")
-            .replace("_", "")
-            .replace("/", "")
-        )
+        return self.normalizer.normalize_exam_text(text)
 
     # 将 LLM judge 的 JSON 负载转成 DeductiveDecision。
     def _coerce_judge_payload(
@@ -1167,27 +1215,8 @@ class EvidenceParser:
         if isinstance(patient_input, PatientContext):
             return patient_input
 
-        clinical_features: List[ClinicalFeatureItem] = []
-
-        for normalized_name, aliases in self.config.feature_aliases.items():
-            for alias in aliases:
-                if alias not in patient_input:
-                    continue
-
-                clinical_features.append(
-                    ClinicalFeatureItem(
-                        name=alias,
-                        normalized_name=normalized_name,
-                        category="risk_factor" if normalized_name in {"高危性行为", "输血史"} else "symptom",
-                        status="exist",
-                        certainty="confident",
-                        evidence_text=patient_input,
-                    )
-                )
-                break
-
         return PatientContext(
-            clinical_features=clinical_features,
+            clinical_features=[],
             raw_text=patient_input,
             metadata={"source": "raw_text"},
         )
@@ -1237,6 +1266,14 @@ class EvidenceParser:
 
         if any(phrase in stripped_text for phrase in {"没有特别注意到", "不太清楚", "说不上来", "不确定"}):
             return "uncertain"
+
+        if len(stripped_text) <= 20:
+            if stripped_text.startswith(("有", "是", "会")):
+                return "positive"
+            if stripped_text.startswith(("没有", "不是", "不会", "无")):
+                return "negative"
+            if stripped_text.startswith(("不确定", "不太清楚", "说不上来", "没注意")):
+                return "uncertain"
 
         return None
 

@@ -1,3 +1,6 @@
+llm:
+  structured_retry_count: 1
+
 search:
   num_rollouts: 8
   max_depth: 6
@@ -21,7 +24,6 @@ path_evaluation:
 
 a1:
   use_llm_extractor: true
-  fallback_to_rules: true
 
 a2:
   expand_top_k_hypotheses: 3

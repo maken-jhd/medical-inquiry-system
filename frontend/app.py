@@ -17,6 +17,7 @@ REPO_ROOT = CURRENT_DIR.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from brain.errors import BrainDomainError
 from frontend.config_loader import (
     apply_config_to_environment,
     build_brain_config_overrides,
@@ -1010,6 +1011,15 @@ def _get_or_build_live_brain() -> Any:
 
 def _format_live_error(exc: Exception) -> str:
     """把实时后端异常转成对老师友好的中文提示。"""
+
+    if isinstance(exc, BrainDomainError):
+        detail = exc.to_dict()
+        return (
+            "实时模式调用后端失败。"
+            f"错误代码：{detail.get('code', '')}；"
+            f"阶段：{detail.get('stage', '')}；"
+            f"说明：{detail.get('message', '')}"
+        )
 
     detail = "".join(traceback.format_exception_only(type(exc), exc)).strip()
     return (

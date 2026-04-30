@@ -9,6 +9,14 @@ from typing import Any, Type
 
 from openai import OpenAI
 
+from .errors import (
+    BrainDomainError,
+    LlmOutputInvalidError,
+    LlmStageFailedError,
+    LlmTimeoutError,
+    LlmUnavailableError,
+)
+
 
 class LlmClient:
     """负责执行统一的结构化 Prompt 调用。"""
@@ -21,12 +29,16 @@ class LlmClient:
         api_key: str | None = None,
         timeout_seconds: float | None = None,
         enable_thinking: bool | None = None,
+        structured_retry_count: int | None = None,
     ) -> None:
         self.model = model or os.getenv("OPENAI_MODEL", "qwen3-max")
         self.base_url = base_url or os.getenv("OPENAI_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
         self.api_key = api_key or os.getenv("DASHSCOPE_API_KEY") or os.getenv("OPENAI_API_KEY")
         self.timeout_seconds = timeout_seconds if timeout_seconds is not None else self._read_timeout_seconds()
         self.enable_thinking = enable_thinking if enable_thinking is not None else self._read_enable_thinking()
+        self.structured_retry_count = (
+            structured_retry_count if structured_retry_count is not None else self._read_structured_retry_count()
+        )
         self._client: OpenAI | None = None
 
         if self.api_key:
@@ -39,6 +51,17 @@ class LlmClient:
     # 判断当前是否具备可用的大模型调用条件。
     def is_available(self) -> bool:
         return self._client is not None
+
+    # 读取结构化调用失败后的重试次数；默认只重试一次。
+    def _read_structured_retry_count(self) -> int:
+        raw_value = os.getenv("OPENAI_STRUCTURED_RETRY_COUNT") or "1"
+
+        try:
+            retry_count = int(raw_value)
+        except ValueError:
+            retry_count = 1
+
+        return max(retry_count, 0)
 
     # 读取 LLM 请求超时时间，避免实时前端因网络或模型端阻塞而一直转圈。
     def _read_timeout_seconds(self) -> float:
@@ -63,30 +86,63 @@ class LlmClient:
     # 执行结构化 Prompt，并尝试将输出反序列化为指定 schema。
     def run_structured_prompt(self, prompt_name: str, variables: dict, schema: Type[Any]) -> Any:
         if self._client is None:
-            raise RuntimeError("当前未配置可用的大模型客户端。")
+            raise LlmUnavailableError(stage=prompt_name, prompt_name=prompt_name)
 
         # 所有结构化调用都走统一 prompt 构造和 JSON response_format，
         # 这样上游模块只关心 prompt_name 和变量，不需要重复拼 system/user message。
         prompt = self._build_prompt(prompt_name, variables)
-        response = self._client.chat.completions.create(
-            model=self.model,
-            temperature=0,
-            response_format={"type": "json_object"},
-            extra_body={"enable_thinking": self.enable_thinking},
-            messages=[
-                {
-                    "role": "system",
-                    "content": "你是医学结构化信息抽取助手。请严格输出 JSON，不要输出额外文本。",
-                },
-                {
-                    "role": "user",
-                    "content": prompt,
-                },
-            ],
-        )
-        content = response.choices[0].message.content or "{}"
-        payload = json.loads(content)
-        return self._coerce_schema(payload, schema)
+        total_attempts = self.structured_retry_count + 1
+        last_error: BrainDomainError | None = None
+
+        for attempt_index in range(1, total_attempts + 1):
+            try:
+                response = self._client.chat.completions.create(
+                    model=self.model,
+                    temperature=0,
+                    response_format={"type": "json_object"},
+                    extra_body={"enable_thinking": self.enable_thinking},
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "你是医学结构化信息抽取助手。请严格输出 JSON，不要输出额外文本。",
+                        },
+                        {
+                            "role": "user",
+                            "content": prompt,
+                        },
+                    ],
+                )
+                content = response.choices[0].message.content or "{}"
+                payload = json.loads(content)
+                if not isinstance(payload, dict):
+                    raise LlmOutputInvalidError(
+                        stage=prompt_name,
+                        prompt_name=prompt_name,
+                        attempts=attempt_index,
+                        message="大模型返回的结构化内容不是 JSON object。",
+                    )
+                return self._coerce_schema(payload, schema)
+            except BrainDomainError as exc:
+                last_error = exc
+            except json.JSONDecodeError as exc:
+                last_error = LlmOutputInvalidError(
+                    stage=prompt_name,
+                    prompt_name=prompt_name,
+                    attempts=attempt_index,
+                    message=f"大模型返回了无法解析的 JSON：{exc}",
+                )
+            except Exception as exc:
+                last_error = self._classify_runtime_error(prompt_name, attempt_index, exc)
+
+        if last_error is None:
+            raise LlmStageFailedError(
+                stage=prompt_name,
+                prompt_name=prompt_name,
+                attempts=total_attempts,
+                message="结构化大模型调用失败，但未捕获到具体错误。",
+            )
+
+        raise last_error
 
     # 根据 prompt 名称和变量构建统一的文本提示。
     def _build_prompt(self, prompt_name: str, variables: dict) -> str:
@@ -141,6 +197,15 @@ class LlmClient:
                 "diagnostic_rationale、contradiction_explanation、"
                 "should_terminate_current_path、should_spawn_alternative_hypotheses、reasoning。"
             ),
+            "a4_target_answer_interpretation": (
+                "请围绕当前目标验证点，解释患者本轮回答对该目标证据的支持情况。"
+                "输出字段必须包含 existence、certainty、supporting_span、negation_span、uncertain_span、reasoning。"
+            ),
+            "exam_context_interpretation": (
+                "请根据本轮患者回答，解析检查是否做过、提到过哪些检查名、有哪些结果、"
+                "是否还需要追问，以及追问原因。"
+                "输出字段必须包含 availability、mentioned_tests、mentioned_results、needs_followup、followup_reason、reasoning。"
+            ),
             "trajectory_agent_verifier": (
                 "请作为临床推理评审者，结合患者上下文、候选最终答案和最佳推理路径，"
                 "给出该答案的代理评审分数。"
@@ -166,6 +231,23 @@ class LlmClient:
         # 让实验脚本只改环境变量就能切换“更保守 / 更宽松”的验收口径。
         prefix = prompt_blocks.get(prompt_name, "请完成结构化医学推理，并输出 JSON。")
         return prefix + "\n\n" + json.dumps(variables, ensure_ascii=False, indent=2, default=self._json_default)
+
+    def _classify_runtime_error(self, prompt_name: str, attempt_index: int, exc: Exception) -> BrainDomainError:
+        lowered_message = f"{type(exc).__name__}: {exc}".lower()
+        if "timeout" in lowered_message or "timed out" in lowered_message:
+            return LlmTimeoutError(
+                stage=prompt_name,
+                prompt_name=prompt_name,
+                attempts=attempt_index,
+                message=f"结构化大模型调用超时：{type(exc).__name__}: {exc}",
+            )
+
+        return LlmStageFailedError(
+            stage=prompt_name,
+            prompt_name=prompt_name,
+            attempts=attempt_index,
+            message=f"结构化大模型调用失败：{type(exc).__name__}: {exc}",
+        )
 
     # 为 acceptance sweep 提供轻量可控的 verifier 接受倾向，不改变默认 baseline 行为。
     def _build_verifier_acceptance_profile_prompt(self, profile: str) -> str:
@@ -229,6 +311,8 @@ class LlmClient:
 
     # 将模型输出的 JSON 负载尽量转换为指定 schema 对象。
     def _coerce_schema(self, payload: Any, schema: Type[Any]) -> Any:
+        if schema is dict:
+            return payload
         try:
             return schema(**payload)
         except Exception:

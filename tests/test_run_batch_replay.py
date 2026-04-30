@@ -295,3 +295,39 @@ def test_main_forces_exit_on_keyboard_interrupt(monkeypatch, tmp_path: Path) -> 
     assert forced_exit_codes == [130]
     status_payload = __import__("json").loads((output_root / "status.json").read_text(encoding="utf-8"))
     assert status_payload["status"] == "interrupted"
+
+
+# 验证启动前若 llm_available=false，batch replay 会尽早失败并写出 failed 状态。
+def test_main_fails_fast_when_llm_unavailable(monkeypatch, tmp_path: Path) -> None:
+    output_root = tmp_path / "llm_unavailable_run"
+    output_root.mkdir(parents=True, exist_ok=True)
+    cases = [SimpleNamespace(case_id="case1")]
+
+    class FakeLlmClient:
+        def is_available(self) -> bool:
+            return False
+
+    monkeypatch.setattr(run_batch_replay, "load_frontend_config", lambda: {})
+    monkeypatch.setattr(run_batch_replay, "apply_config_to_environment", lambda config: None)
+    monkeypatch.setattr(run_batch_replay, "load_cases_jsonl", lambda path: cases)
+    monkeypatch.setattr(run_batch_replay, "LlmClient", FakeLlmClient)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_batch_replay.py",
+            "--cases-file",
+            "cases.jsonl",
+            "--output-root",
+            str(output_root),
+        ],
+    )
+
+    exit_code = run_batch_replay.main()
+
+    assert exit_code == 1
+    status_payload = __import__("json").loads((output_root / "status.json").read_text(encoding="utf-8"))
+    assert status_payload["status"] == "failed"
+    assert status_payload["completed_cases"] == 0
+    run_log = (output_root / "run.log").read_text(encoding="utf-8")
+    assert "llm_available=false" in run_log

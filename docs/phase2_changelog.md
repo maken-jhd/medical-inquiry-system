@@ -10,6 +10,47 @@
 - `phase2_execution_checklist.md` 更偏“路线设计与待办清单”
 - 本文更偏“已经发生过哪些阶段性变化、分别解决了什么问题”
 
+## 近期更新：2026-04-30 LLM-first 抽取与解释链路重构
+
+### 本次目标
+
+- 把 `MedExtractor / A1 / A4 verify_evidence / exam_context` 从“LLM 优先 + 规则 fallback”重构为“LLM 主链路 + 极薄 deterministic 层 + 薄 normalization 层 + 显式错误传播”
+- 明确 batch replay、实时前端和默认 brain 构造在 `LLM` 失败场景下的外部行为
+
+### 本次改动
+
+- 新增 [brain/errors.py](/Users/loki/Workspace/GraduationDesign/brain/errors.py)，统一承载 `llm_unavailable / llm_timeout / llm_output_invalid / llm_empty_extraction / llm_stage_failed`
+- 新增 [brain/normalization.py](/Users/loki/Workspace/GraduationDesign/brain/normalization.py)，集中收口 alias、canonical name 与常见口语映射；位置固定在 “LLM 输出之后、Neo4j / candidate mapping 之前”
+- [brain/llm_client.py](/Users/loki/Workspace/GraduationDesign/brain/llm_client.py) 新增结构化 prompt 的单次重试，并把超时、空抽取、非法 payload 统一转换为领域错误
+- [brain/med_extractor.py](/Users/loki/Workspace/GraduationDesign/brain/med_extractor.py) 改为长文本只接受 LLM 抽取；短答仍允许直接短路，但不再静默退回规则词典
+- [brain/evidence_parser.py](/Users/loki/Workspace/GraduationDesign/brain/evidence_parser.py) 将 `A1`、`a4_target_answer_interpretation`、`exam_context_interpretation` 与 `a4_deductive_judge` 接成 LLM-first 主链路；仅保留 `有 / 没有 / 不太清楚` 一类 direct reply 的确定性短路
+- [brain/entity_linker.py](/Users/loki/Workspace/GraduationDesign/brain/entity_linker.py) 改为先使用集中式 normalization，再做现有 lexical linking
+- [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py) 默认构造当前要求 `llm_available=true`；若未配置可用模型，会在启动时尽早失败
+- [simulator/replay_engine.py](/Users/loki/Workspace/GraduationDesign/simulator/replay_engine.py) 新增单病例 `failed` 语义；一旦 `brain` 抛出领域错误，会记录结构化 `error` 并继续整批运行
+- [scripts/run_batch_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_batch_replay.py) 启动前会检查 `llm_available`；若不可用，直接写出失败状态，不再进入半规则半模型模式
+- [frontend/app.py](/Users/loki/Workspace/GraduationDesign/frontend/app.py) 当前会把领域错误翻译成更明确的中文提示，不再把所有失败都笼统归因成“可能环境未配置”
+- 删除 `configs/brain.yaml` 中旧的 `a1.fallback_to_rules` 配置，改为新增 `llm.structured_retry_count: 1`
+
+### 解决的问题
+
+- 之前长文本链路存在“LLM 失败后偷偷退回规则”的隐式分支，导致 replay 结果表面正常，但真实诊断链路已经偏离预期
+- 规则 fallback 和分散 alias 词典让模块心智负担越来越重，也让定位“到底是 LLM 失败还是词典没覆盖”变得困难
+- batch replay 和实时前端过去都不够明确地区分“模型不可用”“模型输出非法”和“正常问诊结果为空”这几类场景
+
+### 影响范围
+
+- 影响 [brain](/Users/loki/Workspace/GraduationDesign/brain)、[simulator](/Users/loki/Workspace/GraduationDesign/simulator)、[scripts/run_batch_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_batch_replay.py)、[frontend/app.py](/Users/loki/Workspace/GraduationDesign/frontend/app.py) 以及对应测试
+- 外部行为变化是显式的：
+  - 默认 brain 构造要求有可用 LLM
+  - batch replay 启动前若 `llm_available=false` 会直接失败
+  - 单病例 LLM 领域错误会记为 `failed`
+  - 实时前端遇到 LLM 领域错误会直接提示并停止当前会话
+
+### 验证结果
+
+- 已执行 `conda run -n GraduationDesign python -m pytest -q`
+- 结果 `160 passed`
+
 ## 近期更新：2026-04-29 复杂函数可读性增强
 
 ### 本次目标

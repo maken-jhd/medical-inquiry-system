@@ -20,8 +20,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from brain.service import build_default_brain_from_env
 from brain.llm_client import LlmClient
+from brain.service import build_default_brain_from_env
 from frontend.config_loader import apply_config_to_environment, load_frontend_config
 from simulator.benchmark import summarize_benchmark
 from simulator.generate_cases import build_seed_cases, load_cases_jsonl, write_cases_jsonl
@@ -343,6 +343,7 @@ def _payload_to_replay_result(payload: dict[str, Any]) -> ReplayResult:
         initial_output=dict(payload.get("initial_output", {})),
         status=str(payload.get("status", "pending")),
         timing=dict(payload.get("timing", {})),
+        error=dict(payload.get("error", {})),
     )
 
 
@@ -574,6 +575,27 @@ def main() -> int:
     current_timing_summary = _build_timing_summary(results)
     llm_available = LlmClient().is_available()
 
+    if not llm_available:
+        _write_json(
+            status_file,
+            _build_status_payload(
+                run_status="failed",
+                total_cases=len(cases),
+                completed_cases=len(results),
+                skipped_completed_cases=skipped_completed_cases,
+                case_concurrency=args.case_concurrency,
+                case_file=args.cases_file.strip(),
+                case_limit=args.limit,
+                output_root=output_root,
+                start_time=start_time,
+                active_cases=[],
+                timing_summary=current_timing_summary,
+            ),
+        )
+        _append_run_log(run_log_file, "启动失败：当前配置要求走 LLM-first 主链路，但 llm_available=false。")
+        _emit_terminal_line("[batch_replay] 启动失败：llm_available=false，当前批量回放不会退回规则链路。")
+        return 1
+
     initial_summary = _build_summary_payload(
         results,
         case_concurrency=args.case_concurrency,
@@ -663,6 +685,13 @@ def main() -> int:
         finalize_seconds = float(result.timing.get("finalize_seconds", 0.0) or 0.0)
         slowest_turn_index = int(result.timing.get("slowest_turn_index", 0) or 0)
         slowest_turn_total_seconds = float(result.timing.get("slowest_turn_total_seconds", 0.0) or 0.0)
+        error_payload = dict(result.error or {})
+        error_suffix = ""
+        if result.status == "failed":
+            error_suffix = (
+                f"，error_code={str(error_payload.get('code', ''))}"
+                f"，error_stage={str(error_payload.get('stage', ''))}"
+            )
         _append_run_log(
             run_log_file,
             (
@@ -672,6 +701,7 @@ def main() -> int:
                 f"patient_answer_seconds_total={_format_duration_value(patient_total_seconds)}，brain_turn_seconds_total={_format_duration_value(brain_total_seconds)}，"
                 f"finalize_seconds={_format_duration_value(finalize_seconds)}，slowest_turn={slowest_turn_index}:{_format_duration_value(slowest_turn_total_seconds)}s，"
                 f"本轮完成 {completed}/{total}，累计完成 {len(results)}/{len(cases)}"
+                f"{error_suffix}"
             ),
         )
         _emit_terminal_line(
@@ -679,6 +709,7 @@ def main() -> int:
                 f"[batch_replay] 病例完成 {len(results)}/{len(cases)}："
                 f"case_id={result.case_id}，status={result.status}，"
                 f"total_seconds={_format_duration_value(total_seconds)}，turns={len(result.turns)}"
+                f"{error_suffix}"
             )
         )
 

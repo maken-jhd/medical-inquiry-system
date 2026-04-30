@@ -30,7 +30,26 @@ class ExamFlowRetriever:
         return []
 
 
-def _build_brain(tracker: StateTracker, rows: list[dict] | None = None) -> ConsultationBrain:
+class FakeExamContextLlmClient:
+    """按测试场景返回固定 exam_context 结构化结果。"""
+
+    def __init__(self, payload: dict) -> None:
+        self.payload = payload
+
+    def is_available(self) -> bool:
+        return True
+
+    def run_structured_prompt(self, prompt_name: str, variables: dict, schema):
+        _ = variables, schema
+        assert prompt_name == "exam_context_interpretation"
+        return dict(self.payload)
+
+
+def _build_brain(
+    tracker: StateTracker,
+    rows: list[dict] | None = None,
+    llm_client: object | None = None,
+) -> ConsultationBrain:
     return ConsultationBrain(
         BrainDependencies(
             state_tracker=tracker,
@@ -40,7 +59,7 @@ def _build_brain(tracker: StateTracker, rows: list[dict] | None = None) -> Consu
             question_selector=object(),
             stop_rule_engine=object(),
             report_builder=ReportBuilder(),
-            evidence_parser=EvidenceParser(),
+            evidence_parser=EvidenceParser(llm_client=llm_client),
             hypothesis_manager=HypothesisManager(),
             action_builder=ActionBuilder(),
             router=object(),
@@ -119,7 +138,25 @@ def test_service_exam_context_done_with_result_updates_slot_and_state() -> None:
     state = tracker.create_session("s_exam_result")
     state.candidate_hypotheses = [HypothesisScore(node_id="pcp", label="Disease", name="PCP", score=1.0)]
     tracker.set_pending_action("s_exam_result", _collect_lab_action())
-    brain = _build_brain(tracker)
+    brain = _build_brain(
+        tracker,
+        llm_client=FakeExamContextLlmClient(
+            {
+                "availability": "done",
+                "mentioned_tests": ["CD4"],
+                "mentioned_results": [
+                    {
+                        "test_name": "CD4",
+                        "raw_text": "CD4 150",
+                        "normalized_result": "low",
+                    }
+                ],
+                "needs_followup": False,
+                "followup_reason": "",
+                "reasoning": "患者说做过 CD4，且数值提示偏低。",
+            }
+        ),
+    )
 
     a4_result, _, route_after_a4, updates = brain.update_from_pending_action(
         "s_exam_result",
@@ -145,7 +182,19 @@ def test_service_exam_context_with_test_name_builds_specific_result_followup() -
     state = tracker.create_session("s_exam_followup")
     state.candidate_hypotheses = [HypothesisScore(node_id="pcp", label="Disease", name="PCP", score=1.0)]
     tracker.set_pending_action("s_exam_followup", _collect_lab_action())
-    brain = _build_brain(tracker)
+    brain = _build_brain(
+        tracker,
+        llm_client=FakeExamContextLlmClient(
+            {
+                "availability": "done",
+                "mentioned_tests": ["CD4"],
+                "mentioned_results": [],
+                "needs_followup": True,
+                "followup_reason": "患者只提到做过 CD4，但没有提供具体结果。",
+                "reasoning": "需要继续追问 CD4 的具体数值。",
+            }
+        ),
+    )
 
     brain.update_from_pending_action(
         "s_exam_followup",
@@ -168,7 +217,19 @@ def test_service_exam_context_not_done_records_state_without_followup() -> None:
     tracker = StateTracker()
     tracker.create_session("s_exam_not_done")
     tracker.set_pending_action("s_exam_not_done", _collect_lab_action())
-    brain = _build_brain(tracker)
+    brain = _build_brain(
+        tracker,
+        llm_client=FakeExamContextLlmClient(
+            {
+                "availability": "not_done",
+                "mentioned_tests": [],
+                "mentioned_results": [],
+                "needs_followup": False,
+                "followup_reason": "",
+                "reasoning": "患者明确表示最近没有做过相关检查。",
+            }
+        ),
+    )
 
     a4_result, _, _, updates = brain.update_from_pending_action(
         "s_exam_not_done",

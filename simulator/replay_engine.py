@@ -9,6 +9,7 @@ from pathlib import Path
 from time import perf_counter
 from typing import Iterable, List, Optional
 
+from brain.errors import BrainDomainError
 from brain.service import ConsultationBrain
 
 from .case_schema import VirtualPatientCase
@@ -45,6 +46,7 @@ class ReplayResult:
     initial_output: dict = field(default_factory=dict)
     status: str = "pending"
     timing: dict = field(default_factory=dict)
+    error: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -95,61 +97,15 @@ class ReplayEngine:
                 "slowest_turn_total_seconds": 0.0,
             },
         )
-        opening_started = perf_counter()
-        opening = self.patient_agent.open_case(case)
-        result.timing["opening_seconds"] = perf_counter() - opening_started
-        result.opening_text = opening.opening_text
-        initial_brain_started = perf_counter()
-        current_output = self.brain.process_turn(session_id, opening.opening_text)
-        result.timing["initial_brain_seconds"] = perf_counter() - initial_brain_started
-        result.initial_output = current_output
-
-        if current_output.get("final_report") is not None:
-            result.final_report = current_output["final_report"]
-            result.status = "completed"
-            self._finalize_timing(result, case_started)
-            return result
-
-        for turn_index in range(1, self.config.max_turns + 1):
-            question_text = str(current_output.get("next_question") or "")
-            pending_action = current_output.get("pending_action") or {}
-            question_node_id = str(pending_action.get("target_node_id") or "")
-
-            if len(question_text) == 0 or len(question_node_id) == 0:
-                break
-
-            answer_started = perf_counter()
-            reply = self.patient_agent.answer_question(question_node_id, question_text, case)
-            patient_answer_seconds = perf_counter() - answer_started
-            brain_turn_started = perf_counter()
-            current_output = self.brain.process_turn(session_id, reply.answer_text)
-            brain_turn_seconds = perf_counter() - brain_turn_started
-            turn_total_seconds = patient_answer_seconds + brain_turn_seconds
-            result.turns.append(
-                ReplayTurn(
-                    question_node_id=question_node_id,
-                    question_text=question_text,
-                    answer_text=reply.answer_text,
-                    turn_index=turn_index,
-                    revealed_slot_id=reply.revealed_slot_id,
-                    patient_answer_seconds=round(patient_answer_seconds, 4),
-                    brain_turn_seconds=round(brain_turn_seconds, 4),
-                    total_seconds=round(turn_total_seconds, 4),
-                )
-            )
-            result.timing["patient_answer_seconds_total"] = (
-                float(result.timing["patient_answer_seconds_total"]) + patient_answer_seconds
-            )
-            result.timing["brain_turn_seconds_total"] = (
-                float(result.timing["brain_turn_seconds_total"]) + brain_turn_seconds
-            )
-            if patient_answer_seconds > float(result.timing["max_patient_answer_seconds"]):
-                result.timing["max_patient_answer_seconds"] = patient_answer_seconds
-            if brain_turn_seconds > float(result.timing["max_brain_turn_seconds"]):
-                result.timing["max_brain_turn_seconds"] = brain_turn_seconds
-            if turn_total_seconds > float(result.timing["slowest_turn_total_seconds"]):
-                result.timing["slowest_turn_total_seconds"] = turn_total_seconds
-                result.timing["slowest_turn_index"] = turn_index
+        try:
+            opening_started = perf_counter()
+            opening = self.patient_agent.open_case(case)
+            result.timing["opening_seconds"] = perf_counter() - opening_started
+            result.opening_text = opening.opening_text
+            initial_brain_started = perf_counter()
+            current_output = self.brain.process_turn(session_id, opening.opening_text)
+            result.timing["initial_brain_seconds"] = perf_counter() - initial_brain_started
+            result.initial_output = current_output
 
             if current_output.get("final_report") is not None:
                 result.final_report = current_output["final_report"]
@@ -157,10 +113,61 @@ class ReplayEngine:
                 self._finalize_timing(result, case_started)
                 return result
 
-        finalize_started = perf_counter()
-        result.final_report = self.brain.finalize(session_id)
-        result.timing["finalize_seconds"] = perf_counter() - finalize_started
-        result.status = "max_turn_reached"
+            for turn_index in range(1, self.config.max_turns + 1):
+                question_text = str(current_output.get("next_question") or "")
+                pending_action = current_output.get("pending_action") or {}
+                question_node_id = str(pending_action.get("target_node_id") or "")
+
+                if len(question_text) == 0 or len(question_node_id) == 0:
+                    break
+
+                answer_started = perf_counter()
+                reply = self.patient_agent.answer_question(question_node_id, question_text, case)
+                patient_answer_seconds = perf_counter() - answer_started
+                brain_turn_started = perf_counter()
+                current_output = self.brain.process_turn(session_id, reply.answer_text)
+                brain_turn_seconds = perf_counter() - brain_turn_started
+                turn_total_seconds = patient_answer_seconds + brain_turn_seconds
+                result.turns.append(
+                    ReplayTurn(
+                        question_node_id=question_node_id,
+                        question_text=question_text,
+                        answer_text=reply.answer_text,
+                        turn_index=turn_index,
+                        revealed_slot_id=reply.revealed_slot_id,
+                        patient_answer_seconds=round(patient_answer_seconds, 4),
+                        brain_turn_seconds=round(brain_turn_seconds, 4),
+                        total_seconds=round(turn_total_seconds, 4),
+                    )
+                )
+                result.timing["patient_answer_seconds_total"] = (
+                    float(result.timing["patient_answer_seconds_total"]) + patient_answer_seconds
+                )
+                result.timing["brain_turn_seconds_total"] = (
+                    float(result.timing["brain_turn_seconds_total"]) + brain_turn_seconds
+                )
+                if patient_answer_seconds > float(result.timing["max_patient_answer_seconds"]):
+                    result.timing["max_patient_answer_seconds"] = patient_answer_seconds
+                if brain_turn_seconds > float(result.timing["max_brain_turn_seconds"]):
+                    result.timing["max_brain_turn_seconds"] = brain_turn_seconds
+                if turn_total_seconds > float(result.timing["slowest_turn_total_seconds"]):
+                    result.timing["slowest_turn_total_seconds"] = turn_total_seconds
+                    result.timing["slowest_turn_index"] = turn_index
+
+                if current_output.get("final_report") is not None:
+                    result.final_report = current_output["final_report"]
+                    result.status = "completed"
+                    self._finalize_timing(result, case_started)
+                    return result
+
+            finalize_started = perf_counter()
+            result.final_report = self.brain.finalize(session_id)
+            result.timing["finalize_seconds"] = perf_counter() - finalize_started
+            result.status = "max_turn_reached"
+        except BrainDomainError as exc:
+            result.status = "failed"
+            result.error = exc.to_dict()
+            result.final_report = {}
         self._finalize_timing(result, case_started)
         return result
 
