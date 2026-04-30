@@ -39,8 +39,8 @@ from frontend.ui_adapter import (
     load_demo_replay,
     normalize_backend_turn,
     score_to_progress,
-    translate_certainty,
     translate_existence,
+    translate_resolution,
 )
 
 
@@ -540,8 +540,7 @@ def _render_a1_card(a1: dict[str, Any]) -> None:
             [
                 {
                     "关键线索": item.get("name", ""),
-                    "状态": item.get("status", ""),
-                    "置信度": item.get("certainty", ""),
+                    "类别": item.get("category", ""),
                     "说明": item.get("reasoning", ""),
                 }
                 for item in features
@@ -675,7 +674,7 @@ def _render_a4_card(a4: dict[str, Any]) -> None:
         st.caption("系统把上一轮患者回答解释成存在 / 不存在 / 不确定，并决定下一步路由。")
         col_a, col_b, col_c = st.columns(3)
         col_a.metric("证据状态", a4.get("existence_label") or translate_existence(a4.get("existence")))
-        col_b.metric("判断置信度", a4.get("certainty_label") or translate_certainty(a4.get("certainty")))
+        col_b.metric("回答清晰度", a4.get("resolution_label") or translate_resolution(a4.get("resolution")))
         col_c.metric("路由结果", a4.get("route_label", "暂无"))
         st.markdown(f"**解释：** {a4.get('reasoning', '暂无 A4 解释')}")
 

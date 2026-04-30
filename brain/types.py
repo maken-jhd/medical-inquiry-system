@@ -6,13 +6,14 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, Optional
 
 
+MentionState = Literal["present", "absent", "unclear"]
 SlotTruthValue = Literal["true", "false", "unknown"]
-SlotCertainty = Literal["certain", "uncertain", "unknown"]
+Resolution = Literal["clear", "hedged", "unknown"]
 EvidenceExistence = Literal["exist", "non_exist", "unknown"]
-EvidenceCertainty = Literal["confident", "doubt", "unknown"]
 ReasoningStage = Literal["A1", "A2", "A3", "A4", "STOP", "FALLBACK"]
 ExamKind = Literal["general", "lab", "imaging", "pathogen"]
 ExamAvailability = Literal["unknown", "done", "not_done"]
+A1SelectionDecision = Literal["selected", "none_salient"]
 
 
 def default_exam_context() -> Dict[str, "ExamContextState"]:
@@ -39,13 +40,12 @@ class PatientGeneralInfo:
 
 @dataclass
 class ClinicalFeatureItem:
-    """表示 MedExtractor 输出的临床结构化特征 C。"""
+    """表示 MedExtractor 输出的一条患者提及项。"""
 
     name: str
     normalized_name: str
     category: str
-    status: str = "unknown"
-    certainty: str = "unknown"
+    mention_state: MentionState = "present"
     evidence_text: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -79,7 +79,7 @@ class SlotState:
 
     node_id: str
     status: SlotTruthValue = "unknown"
-    certainty: SlotCertainty = "unknown"
+    resolution: Resolution = "unknown"
     value: Optional[Any] = None
     evidence: List[str] = field(default_factory=list)
     source_turns: List[int] = field(default_factory=list)
@@ -92,7 +92,7 @@ class EvidenceState:
 
     node_id: str
     existence: EvidenceExistence = "unknown"
-    certainty: EvidenceCertainty = "unknown"
+    resolution: Resolution = "unknown"
     reasoning: str = ""
     source_turns: List[int] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -168,12 +168,11 @@ class StateVisitStats:
 
 @dataclass
 class KeyFeature:
-    """表示 A1 阶段提取出的核心线索。"""
+    """表示 A1 阶段选出的首轮检索核心线索。"""
 
     name: str
     normalized_name: str
-    status: EvidenceExistence = "exist"
-    certainty: EvidenceCertainty = "doubt"
+    category: str = "symptom"
     reasoning: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -183,6 +182,7 @@ class A1ExtractionResult:
     """表示 A1 核心症状提取阶段的输出。"""
 
     key_features: List[KeyFeature] = field(default_factory=list)
+    selection_decision: A1SelectionDecision = "selected"
     reasoning: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -330,7 +330,7 @@ class SlotUpdate:
 
     node_id: str
     status: SlotTruthValue
-    certainty: SlotCertainty = "certain"
+    resolution: Resolution = "unknown"
     value: Optional[Any] = None
     evidence: Optional[str] = None
     turn_index: Optional[int] = None
@@ -342,7 +342,7 @@ class A4DeductiveResult:
     """表示 A4 演绎分析阶段的结构化判断结果。"""
 
     existence: EvidenceExistence = "unknown"
-    certainty: EvidenceCertainty = "unknown"
+    resolution: Resolution = "unknown"
     reasoning: str = ""
     supporting_span: str = ""
     negation_span: str = ""
@@ -355,7 +355,7 @@ class DeductiveDecision:
     """表示 A4 后用于驱动代码路由的诊断决策。"""
 
     existence: EvidenceExistence = "unknown"
-    certainty: EvidenceCertainty = "unknown"
+    resolution: Resolution = "unknown"
     decision_type: Literal[
         "confirm_hypothesis",
         "exclude_hypothesis",

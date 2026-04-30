@@ -13,12 +13,12 @@ from brain.action_builder import ActionBuilder
 from brain.types import MctsAction
 from frontend.ui_adapter import (
     normalize_backend_turn,
-    translate_certainty,
     translate_existence,
     translate_guarded_block,
     translate_question_type,
     translate_reject_reason,
     translate_repair_mode,
+    translate_resolution,
     translate_stage,
 )
 
@@ -350,7 +350,7 @@ def _replay_result_turn_to_ui(turn: dict[str, Any], record: dict[str, Any], is_l
         "a4": {
             "has_result": bool(turn.get("answer_text")),
             "existence_label": "见患者回答",
-            "certainty_label": "未结构化保存",
+            "resolution_label": "未结构化保存",
             "reasoning": turn.get("answer_text", ""),
             "route_label": translate_stage(turn.get("stage")),
         },
@@ -400,7 +400,7 @@ def _case_summary_to_ui_turn(record: dict[str, Any]) -> dict[str, Any]:
         "a4": {
             "has_result": False,
             "existence_label": "未保存",
-            "certainty_label": "未保存",
+            "resolution_label": "未保存",
             "reasoning": "该记录未保存 A4 逐轮解释。",
             "route_label": "未保存",
         },
@@ -432,7 +432,7 @@ def _a4_from_audit(audit: dict[str, Any], route_stage: Any) -> dict[str, Any]:
         return {
             "has_result": False,
             "existence_label": "未保存",
-            "certainty_label": "未保存",
+            "resolution_label": "未保存",
             "reasoning": "该轮摘要未记录 A4 evidence audit。",
             "route_label": translate_stage(route_stage),
         }
@@ -440,8 +440,8 @@ def _a4_from_audit(audit: dict[str, Any], route_stage: Any) -> dict[str, Any]:
         "has_result": True,
         "existence": audit.get("existence"),
         "existence_label": translate_existence(audit.get("existence")),
-        "certainty": audit.get("certainty"),
-        "certainty_label": translate_certainty(audit.get("certainty")),
+        "resolution": audit.get("resolution", audit.get("certainty")),
+        "resolution_label": translate_resolution(audit.get("resolution", audit.get("certainty"))),
         "reasoning": audit.get("reasoning", ""),
         "supporting_span": audit.get("supporting_span", ""),
         "negation_span": audit.get("negation_span", ""),

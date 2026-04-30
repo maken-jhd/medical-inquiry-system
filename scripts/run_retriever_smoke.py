@@ -44,8 +44,7 @@ def build_key_features(raw_features: str) -> list[KeyFeature]:
             KeyFeature(
                 name=feature,
                 normalized_name=feature,
-                status="exist",
-                certainty="confident",
+                category="symptom",
             )
         )
 

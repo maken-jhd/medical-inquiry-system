@@ -14,7 +14,7 @@
 一句话概括当前状态：
 
 - 第一阶段：当前活跃版本已切换为服务 `R1 / R2 / A3 / A4` 的搜索专用图谱；旧版治疗、推荐、证据链图谱已移至 `knowledge_graph_bak/`
-- 第二阶段：已经进入“select -> expand -> simulate -> backpropagate 多次 rollout 可跑”的阶段，并已切换到 `LLM-first + 显式错误传播 + 集中 normalization` 的抽取 / 解释链路
+- 第二阶段：已经进入“select -> expand -> simulate -> backpropagate 多次 rollout 可跑”的阶段，并已切换到 `LLM-first + 显式错误传播 + 集中 normalization` 的抽取 / 解释链路；当前 intake / A4 统一使用 `mention_state + resolution` 语义，不再把自述症状表述成“医学 certainty”
 - 前端演示：已支持中文 Streamlit 页面，可展示多轮问诊、A1/A2/A3/A4、候选诊断、下一问、搜索摘要与安全机制
 
 更详细的局部说明可分别查看：
@@ -267,7 +267,7 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 - [brain/state_tracker.py](/Users/loki/Workspace/GraduationDesign/brain/state_tracker.py)：会话状态追踪器
 - [brain/session_dag.py](/Users/loki/Workspace/GraduationDesign/brain/session_dag.py)：会话内存 DAG / DFS 追问骨架
 - [brain/neo4j_client.py](/Users/loki/Workspace/GraduationDesign/brain/neo4j_client.py)：Neo4j 查询封装
-- [brain/retriever.py](/Users/loki/Workspace/GraduationDesign/brain/retriever.py)：冷启动、正向假设、反向验证检索，当前已支持 `R1 / R2` 方向置信度与实体链接相似度融合
+- [brain/retriever.py](/Users/loki/Workspace/GraduationDesign/brain/retriever.py)：冷启动、正向假设、反向验证检索，当前已支持 `R1 / R2` 方向语义权重与实体链接相似度融合
 - [scripts/run_retriever_smoke.py](/Users/loki/Workspace/GraduationDesign/scripts/run_retriever_smoke.py)：真实 Neo4j 图谱联调脚本
 - [brain/question_selector.py](/Users/loki/Workspace/GraduationDesign/brain/question_selector.py)：下一问打分与选择器
 - [brain/mcts_engine.py](/Users/loki/Workspace/GraduationDesign/brain/mcts_engine.py)：基于 UCT 的动作与树节点选择器
@@ -458,9 +458,11 @@ streamlit run frontend/app.py --server.port 8514
 - [tests/test_graph_case_generator.py](/Users/loki/Workspace/GraduationDesign/tests/test_graph_case_generator.py)
 - [tests/test_benchmark.py](/Users/loki/Workspace/GraduationDesign/tests/test_benchmark.py)
 - [phase2_execution_checklist.md](/Users/loki/Workspace/GraduationDesign/docs/phase2_execution_checklist.md)：第二阶段与虚拟病人开发清单
+- [diagnosis_system_todolist.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_system_todolist.md)：当前诊断系统待完善点与后续迭代顺序
 - [phase2_changelog.md](/Users/loki/Workspace/GraduationDesign/docs/phase2_changelog.md)：第二阶段实现历程、问题改进与论文写作素材整理
 - [virtual_patient_generation_scheme.md](/Users/loki/Workspace/GraduationDesign/docs/virtual_patient_generation_scheme.md)：图谱驱动虚拟病人详细方案、病例类型规则、骨架字段与论文写作素材整理
 - [scripts/run_brain_demo.py](/Users/loki/Workspace/GraduationDesign/scripts/run_brain_demo.py)：最小命令行问诊演示入口
+- [scripts/diagnose_smoke10_failures.py](/Users/loki/Workspace/GraduationDesign/scripts/diagnose_smoke10_failures.py)：对指定 replay 输出目录做 `med_extractor / A1` payload 审计，并生成 JSON / Markdown 诊断报告
 - [scripts/run_streamlit_realtime.sh](/Users/loki/Workspace/GraduationDesign/scripts/run_streamlit_realtime.sh)：Streamlit 前端启动入口
 - [.streamlit/config.toml](/Users/loki/Workspace/GraduationDesign/.streamlit/config.toml)：关闭 Streamlit 首次启动邮箱提示，提升演示稳定性
 
@@ -485,6 +487,7 @@ streamlit run frontend/app.py --server.port 8514
 - [frontend/README.md](/Users/loki/Workspace/GraduationDesign/frontend/README.md) 说明 Streamlit 前端启动、回放模式、实时模式与配置方式
 - [tests/README.md](/Users/loki/Workspace/GraduationDesign/tests/README.md) 说明第二阶段测试组织方式与当前覆盖范围
 - [phase2_changelog.md](/Users/loki/Workspace/GraduationDesign/docs/phase2_changelog.md) 重点记录第二阶段各轮改进分别解决了什么问题，适合作为论文写作材料
+- [diagnosis_system_todolist.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_system_todolist.md) 记录当前诊断系统仍待完善的点，适合作为后续实现顺序与回归目标清单
 
 ## 当前环境
 

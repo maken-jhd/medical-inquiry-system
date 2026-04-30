@@ -19,17 +19,17 @@ from .types import (
 class HypothesisManagerConfig:
     """保存假设分数调整阶段的基础参数。"""
 
-    positive_confident_bonus: float = 1.0
-    positive_uncertain_bonus: float = 0.4
-    negative_confident_penalty: float = 1.0
-    negative_uncertain_penalty: float = 0.4
+    positive_clear_bonus: float = 1.0
+    positive_hedged_bonus: float = 0.4
+    negative_clear_penalty: float = 1.0
+    negative_hedged_penalty: float = 0.4
     expand_top_k_hypotheses: int = 3
     unique_evidence_bonus: float = 0.18
     overlap_penalty: float = 0.10
     feature_coverage_bonus: float = 0.20
     semantic_score_bonus: float = 0.22
     verifier_alt_bonus: float = 0.35
-    verifier_uncertainty_penalty: float = 0.25
+    verifier_hedged_penalty: float = 0.25
     verifier_missing_support_penalty: float = 0.12
     verifier_trajectory_penalty: float = 0.08
 
@@ -171,7 +171,7 @@ class HypothesisManager:
             # 当前被 verifier 拒停的答案会按 reject_reason 受到不同幅度的下调。
             if current_answer_id and hypothesis.node_id == current_answer_id:
                 if reject_reason == "strong_alternative_not_ruled_out":
-                    score_delta -= self.config.verifier_uncertainty_penalty
+                    score_delta -= self.config.verifier_hedged_penalty
                 elif reject_reason == "missing_key_support":
                     score_delta -= self.config.verifier_missing_support_penalty
                 elif reject_reason == "trajectory_insufficient":
@@ -214,22 +214,22 @@ class HypothesisManager:
 
         return sorted(ranked, key=lambda item: (-item.score, item.name))
 
-    # 根据证据存在性和确定性计算对假设分数的调整值。
+    # 根据证据存在性和回答清晰度计算对假设分数的调整值。
     def _score_delta_from_evidence(self, evidence_state: EvidenceState) -> float:
         relation_type = str(evidence_state.metadata.get("relation_type", ""))
         relation_multiplier = self._relation_multiplier(relation_type)
 
-        if evidence_state.existence == "exist" and evidence_state.certainty == "confident":
-            return self.config.positive_confident_bonus * relation_multiplier
+        if evidence_state.existence == "exist" and evidence_state.resolution == "clear":
+            return self.config.positive_clear_bonus * relation_multiplier
 
-        if evidence_state.existence == "exist" and evidence_state.certainty == "doubt":
-            return self.config.positive_uncertain_bonus * relation_multiplier
+        if evidence_state.existence == "exist" and evidence_state.resolution == "hedged":
+            return self.config.positive_hedged_bonus * relation_multiplier
 
-        if evidence_state.existence == "non_exist" and evidence_state.certainty == "confident":
-            return -self.config.negative_confident_penalty * relation_multiplier
+        if evidence_state.existence == "non_exist" and evidence_state.resolution == "clear":
+            return -self.config.negative_clear_penalty * relation_multiplier
 
-        if evidence_state.existence == "non_exist" and evidence_state.certainty == "doubt":
-            return -self.config.negative_uncertain_penalty * relation_multiplier
+        if evidence_state.existence == "non_exist" and evidence_state.resolution == "hedged":
+            return -self.config.negative_hedged_penalty * relation_multiplier
 
         return 0.0
 

@@ -122,7 +122,7 @@ class StopRuleEngine:
             return StopDecision(False, "no_hypothesis")
 
         if len(ranked) == 1 and ranked[0].score >= self.config.min_top1_score:
-            return StopDecision(True, "single_hypothesis_confident", ranked[0].score)
+            return StopDecision(True, "single_hypothesis_clear", ranked[0].score)
 
         if len(ranked) >= 2:
             margin = ranked[0].score - ranked[1].score
@@ -311,8 +311,8 @@ class StopRuleEngine:
         session_state: SessionState,
     ) -> dict:
         # 先拆出三类关键证据：
-        # - confirmed：exist + confident 的关键支持
-        # - provisional：exist + doubt 的高价值 anchor
+        # - confirmed：exist + clear 的关键支持
+        # - provisional：exist + hedged 的高价值 anchor
         # - negative/doubtful：会削弱当前答案的反向证据
         confirmed_key_evidence = self._collect_confirmed_key_evidence(answer_score, session_state)
         provisional_key_evidence = self._collect_provisional_key_evidence(answer_score, session_state)
@@ -553,7 +553,7 @@ class StopRuleEngine:
             if int(item.get("turn_index", 0)) < session_state.turn_index
         )
 
-    # 收集当前答案下已经被 A4 确认为 exist + confident 的定义性关键证据。
+    # 收集当前答案下已经被 A4 确认为 exist + clear 的定义性关键证据。
     def _collect_confirmed_key_evidence(
         self,
         answer_score: FinalAnswerScore,
@@ -570,14 +570,14 @@ class StopRuleEngine:
             ):
                 continue
 
-            if evidence.existence != "exist" or evidence.certainty != "confident":
+            if evidence.existence != "exist" or evidence.resolution != "clear":
                 continue
 
             values.append(self._compact_evidence(evidence, answer_score=answer_score))
 
         return values
 
-    # 收集高价值 anchor 的 exist + doubt 证据，作为 guarded 的 provisional family。
+    # 收集高价值 anchor 的 exist + hedged 证据，作为 guarded 的 provisional family。
     def _collect_provisional_key_evidence(
         self,
         answer_score: FinalAnswerScore,
@@ -586,14 +586,14 @@ class StopRuleEngine:
         values: list[dict] = []
 
         for evidence in self._iter_guarded_evidence(answer_score, session_state):
-            if evidence.existence != "exist" or evidence.certainty != "doubt":
+            if evidence.existence != "exist" or evidence.resolution != "hedged":
                 continue
 
             if not self._is_provisional_anchor_evidence(evidence):
                 continue
 
             compact = self._compact_evidence(evidence, answer_score=answer_score)
-            compact["provisional_reason"] = "exist_doubt_high_value_anchor"
+            compact["provisional_reason"] = "exist_hedged_high_value_anchor"
             values.append(compact)
 
         return values
@@ -615,8 +615,8 @@ class StopRuleEngine:
             ):
                 continue
 
-            if evidence.existence == "non_exist" or evidence.certainty == "doubt":
-                if evidence.existence == "exist" and evidence.certainty == "doubt" and self._is_provisional_anchor_evidence(evidence):
+            if evidence.existence == "non_exist" or evidence.resolution == "hedged":
+                if evidence.existence == "exist" and evidence.resolution == "hedged" and self._is_provisional_anchor_evidence(evidence):
                     continue
 
                 compact = self._compact_evidence(evidence, answer_score=answer_score)
@@ -671,7 +671,7 @@ class StopRuleEngine:
             "node_id": evidence.node_id,
             "name": str(evidence.metadata.get("target_node_name") or evidence.node_id),
             "existence": evidence.existence,
-            "certainty": evidence.certainty,
+            "resolution": evidence.resolution,
             "relation_type": str(evidence.metadata.get("relation_type") or ""),
             "evidence_tags": sorted(self._infer_evidence_tags(evidence)),
             "evidence_families": sorted(
@@ -690,7 +690,7 @@ class StopRuleEngine:
         }
         evidence_scope = str(compact.get("evidence_scope") or "")
         relation_type = str(compact.get("relation_type") or "")
-        is_confident_absence = evidence.existence == "non_exist" and evidence.certainty == "confident"
+        is_clear_absence = evidence.existence == "non_exist" and evidence.resolution == "clear"
         is_definition_like = relation_type in GUARDED_DEFINITION_RELATION_TYPES or len(
             evidence_families & GUARDED_HARD_NEGATIVE_EVIDENCE_TAGS
         ) > 0
@@ -698,10 +698,10 @@ class StopRuleEngine:
 
         # “当前答案自己的定义性证据被明确否定”才算 hard negative；
         # 其余共享证据、模糊证据都按 soft 处理，要求更多稳定性但不直接一票否决。
-        if is_confident_absence and is_definition_like and is_answer_scoped:
+        if is_clear_absence and is_definition_like and is_answer_scoped:
             return {
                 "negative_evidence_tier": "hard",
-                "negative_evidence_reason": "confident_absence_of_answer_scoped_definition_evidence",
+                "negative_evidence_reason": "clear_absence_of_answer_scoped_definition_evidence",
             }
 
         return {

@@ -51,6 +51,172 @@
 - 已执行 `conda run -n GraduationDesign python -m pytest -q`
 - 结果 `160 passed`
 
+## 近期更新：2026-04-30 诊断链路语义简化与 `resolution` 收口
+
+### 本次目标
+
+- 把“自述症状被写成 `doubt certainty`，进而在 `A1` 被丢进 `uncertain_features`”的旧链路收掉
+- 重构为：
+  - `MedExtractor` 只做“提到了什么”
+  - `A1` 只做“哪些提及值得进入首轮检索”
+  - `A4` 才做“当前回答是否给出了清晰结论”
+- 统一全链路只表达“回答清晰度 / 结论清晰度”，不再表达“医学 certainty”
+
+### 本次改动
+
+- [brain/types.py](/Users/loki/Workspace/GraduationDesign/brain/types.py)
+  - 新增统一语义：
+    - `MentionState = present / absent / unclear`
+    - `Resolution = clear / hedged / unknown`
+  - `ClinicalFeatureItem` 删除 `status / certainty`，新增 `mention_state`
+  - `KeyFeature` 删除 `status / certainty`
+  - `A1ExtractionResult` 新增 `selection_decision`
+  - `SlotState`、`EvidenceState`、`SlotUpdate`、`A4DeductiveResult`、`DeductiveDecision` 全部收口到 `resolution`
+- [brain/med_extractor.py](/Users/loki/Workspace/GraduationDesign/brain/med_extractor.py)
+  - 长文本抽取改为“提及项抽取”，不再把自述默认打成 `doubt`
+  - 增加对真实观测 payload 形态的兼容：
+    - `clinical_features: "头痛、偏瘫、抽搐"`
+    - `clinical_features: ["发热", "咳嗽"]`
+    - `clinical_features: {"C": "体重增加"}`
+    - `clinical_features: {"C": ["发烧"]}`
+    - `general_info` 允许 `dict` 或 `str`
+- [brain/evidence_parser.py](/Users/loki/Workspace/GraduationDesign/brain/evidence_parser.py)
+  - `A1` 改为只输出 `key_features + selection_decision + reasoning_summary`
+  - 对真实 A1 返回形态增加 coercion，支持对象列表、字符串列表以及布尔风格 `selection_decision`
+  - 若 opening 已有明显症状提及，但模型返回空 `key_features` 或 `none_salient`，会视为无效输出而不是“患者不确定”
+  - `A4` 的回答解释语义统一从 `certainty` 切到 `resolution`
+- [brain/retriever.py](/Users/loki/Workspace/GraduationDesign/brain/retriever.py)、[brain/router.py](/Users/loki/Workspace/GraduationDesign/brain/router.py)、[brain/hypothesis_manager.py](/Users/loki/Workspace/GraduationDesign/brain/hypothesis_manager.py)、[brain/stop_rules.py](/Users/loki/Workspace/GraduationDesign/brain/stop_rules.py)
+  - 全部改为消费 `resolution`
+  - 语义固定为：
+    - `exist + clear`：明确支持
+    - `non_exist + clear`：明确反证
+    - `exist + hedged`：弱支持，优先复核
+    - `non_exist + hedged`：弱否定，不直接排除
+- [frontend/ui_adapter.py](/Users/loki/Workspace/GraduationDesign/frontend/ui_adapter.py)、[frontend/app.py](/Users/loki/Workspace/GraduationDesign/frontend/app.py)、[frontend/output_browser.py](/Users/loki/Workspace/GraduationDesign/frontend/output_browser.py)
+  - 展示层统一优先使用 `resolution`
+  - 仍保留对旧 demo / 历史 replay 中 `certainty` 字段的兼容读取，避免旧实验记录失效
+- [scripts/diagnose_smoke10_failures.py](/Users/loki/Workspace/GraduationDesign/scripts/diagnose_smoke10_failures.py)
+  - 用于复现同一批 opening 的 `MedExtractor / A1` 真实 payload，并验证语义收口后是否仍有 intake 层空成功
+
+### 解决的问题
+
+- 之前“病人只是主动提到症状”会被系统误写成“医学上存疑”，语义边界混乱
+- `A1` 经常把明显症状塞进 `uncertain_features`，导致 `key_features=[]`，看起来像 LLM 没抽到，其实是上下游契约错位
+- `A4`、router、hypothesis scoring、stop rule 对 `certainty` 的消费也混入了“医学确定性”和“回答清晰度”两层含义
+
+### 影响范围
+
+- 影响 `brain` 主链路、replay 结果展示、诊断审计脚本和前端复盘视图
+- 外部可观察变化包括：
+  - intake 特征不再被当成“已验证且存疑的证据”
+  - `A1` 不再输出 `uncertain_features / noise_features`
+  - `A4` 与下游状态机统一使用 `resolution`
+  - 历史 replay / demo 仍可读，但新输出默认不再以 `certainty` 为主字段
+
+### 验证结果
+
+- 已执行 `conda run -n GraduationDesign python -m pytest -q`
+- 结果 `160 passed`
+- 已执行：
+  - `conda run -n GraduationDesign python scripts/diagnose_smoke10_failures.py --replay-dir test_outputs/simulator_replay/graph_cases_20260430_smoke10`
+- 最新审计摘要：
+  - `med_probe_status_counts = {"ok": 10}`
+  - `a1_probe_status_counts = {"ok": 10}`
+  - `med_raw_empty_like_count = 0`
+  - `a1_raw_empty_like_count = 0`
+- 结论：
+  - `MedExtractor / A1` 的旧语义错位已经修正
+  - 若小样本真实 replay 仍在 `turn 0` 失败，当前更像外部 `APIConnectionError` 或传输层问题，而不是 intake 语义问题
+
+## 近期更新：2026-04-30 新增诊断系统 Todo 文档
+
+### 本次目标
+
+- 把当前诊断系统仍待完善的点系统整理成一份可持续维护的待办清单
+- 让后续优化不再零散地散落在对话、日志和临时笔记里
+
+### 本次改动
+
+- 新增 [diagnosis_system_todolist.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_system_todolist.md)
+- 文档按 `P0 / P1 / P2` 拆分当前待完善点
+- 明确写入当前固定边界：
+  - `LLM-first`
+  - 极薄 deterministic 层
+  - normalization 在 `LLM -> Neo4j` 之间
+  - 暂不优先引入 embedding / cosine entity linking
+- 同步在 [README.md](/Users/loki/Workspace/GraduationDesign/README.md) 与 [brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md) 中补充入口链接
+
+### 解决的问题
+
+- 之前“接下来该先修什么”主要分散在 replay 日志、临时分析和多轮对话里，容易重复讨论
+- `LLM-first` 重构完成后，系统已经进入新的稳定边界，需要一份新的 todo 来约束后续工作顺序
+
+### 影响范围
+
+- 仅新增文档与索引，不改业务逻辑
+
+### 验证结果
+
+- 已检查文档链接路径与内容
+- 本次改动不涉及代码行为变更
+
+## 近期更新：2026-04-30 smoke10 failed opening 诊断闭环
+
+### 本次目标
+
+- 针对 `graph_cases_20260430_smoke10` 这批 `failed=10 / turns=0` 的 competitive replay，补一轮可复现的小诊断闭环
+- 不直接修改业务代码，先把失败点定位到 `med_extractor`、`A1`、prompt schema 还是业务层 coercion
+
+### 本次改动
+
+- 新增 [scripts/diagnose_smoke10_failures.py](/Users/loki/Workspace/GraduationDesign/scripts/diagnose_smoke10_failures.py)
+- 该脚本会：
+  - 读取指定 replay 目录下的 `replay_results.jsonl`
+  - 对每条 failed opening 单独调用 `med_extractor` prompt
+  - 若 `MedExtractor` 能成功构造 `PatientContext`，继续调用 `a1_key_symptom_extraction`
+  - 同步输出：
+    - `llm_payload_audit.json`
+    - `llm_payload_audit_summary.json`
+    - `llm_payload_audit_report.md`
+- 已在 [test_outputs/simulator_replay/graph_cases_20260430_smoke10](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_replay/graph_cases_20260430_smoke10) 下生成上述 3 份审计产物
+
+### 实验结果
+
+- replay 原始失败分布：
+  - `med_extractor = 4`
+  - `a1_key_symptom_extraction = 6`
+- live payload probe 结果：
+  - `med_probe_status_counts = {"ok": 10}`
+  - `a1_probe_status_counts = {"skipped": 5, "ok": 5}`
+  - `med_raw_empty_like_count = 0`
+  - `a1_raw_empty_like_count = 5`
+- 关键发现：
+  - `MedExtractor` 并不是“模型什么都没返回”，而是模型经常返回了字符串或对象形状不一致的 `clinical_features`
+  - 典型例子如：
+    - `["发热"]`
+    - `"发热、咳嗽、呼吸困难"`
+    - `{"C": "体重增加"}`
+  - `A1` 也不是“模型完全没理解 opening”，而是普遍把特征放进了 `uncertain_features`，同时把 `key_features` 留空
+  - 当前业务层只消费 `key_features`，因此最终被判成 `llm_empty_extraction`
+
+### 解决的问题
+
+- 之前只能从 `run.log` 看出“失败发生在 med_extractor 或 A1”
+- 现在已经能更具体地区分：
+  - 是模型真空抽取
+  - 还是 payload shape 与 parser 合同错位
+  - 还是模型把信号放进了 `uncertain_features` 但业务层未消费
+
+### 影响范围
+
+- 新增诊断脚本与实验产物，不改业务逻辑
+
+### 验证结果
+
+- 已执行 `python -m py_compile scripts/diagnose_smoke10_failures.py`
+- 已在真实配置下执行：
+  - `conda run -n GraduationDesign python scripts/diagnose_smoke10_failures.py --replay-dir test_outputs/simulator_replay/graph_cases_20260430_smoke10`
+
 ## 近期更新：2026-04-29 复杂函数可读性增强
 
 ### 本次目标

@@ -92,7 +92,7 @@ class StateTracker:
         slot = self.ensure_slot(session_id, update.node_id)
 
         slot.status = update.status
-        slot.certainty = update.certainty
+        slot.resolution = update.resolution
         slot.value = update.value
         slot.metadata.update(update.metadata)
 

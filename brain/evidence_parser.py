@@ -1,10 +1,10 @@
-"""负责 A1 核心症状提取、答案解释和 A4 结果转槽位更新。"""
+"""负责 A1 核心线索提取、答案解释和 A4 结果转槽位更新。"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import re
-from typing import Any, Iterable, List, Optional, Sequence
+from typing import Any, List, Optional, Sequence
 
 from .errors import LlmEmptyExtractionError, LlmOutputInvalidError, LlmUnavailableError
 from .llm_client import LlmClient
@@ -131,18 +131,18 @@ class EvidenceParser:
         direct_reply: str,
     ) -> A4DeductiveResult:
         if direct_reply == "positive":
-            existence, certainty = "exist", "confident"
+            existence, resolution = "exist", "clear"
             reasoning = f"患者对“{action.target_node_name}”给出了直接肯定回答。"
         elif direct_reply == "negative":
-            existence, certainty = "non_exist", "confident"
+            existence, resolution = "non_exist", "clear"
             reasoning = f"患者对“{action.target_node_name}”给出了直接否定回答。"
         else:
-            existence, certainty = "unknown", "doubt"
+            existence, resolution = "unknown", "hedged"
             reasoning = f"患者对“{action.target_node_name}”给出了不确定回答。"
 
         return A4DeductiveResult(
             existence=existence,  # type: ignore[arg-type]
-            certainty=certainty,  # type: ignore[arg-type]
+            resolution=resolution,  # type: ignore[arg-type]
             reasoning=reasoning,
             supporting_span=patient_text if direct_reply == "positive" else "",
             negation_span=patient_text if direct_reply == "negative" else "",
@@ -173,7 +173,7 @@ class EvidenceParser:
             )
 
         existence = str(payload.get("existence", "")).strip()
-        certainty = str(payload.get("certainty", "")).strip()
+        resolution = self._coerce_resolution_value(payload.get("resolution", payload.get("certainty", "")))
         if existence not in {"exist", "non_exist", "unknown"}:
             raise LlmOutputInvalidError(
                 stage="a4_target_answer_interpretation",
@@ -181,12 +181,12 @@ class EvidenceParser:
                 attempts=1,
                 message=f"A4 target answer interpretation 返回了非法 existence：{existence or '空'}",
             )
-        if certainty not in {"confident", "doubt", "unknown"}:
+        if resolution not in {"clear", "hedged", "unknown"}:
             raise LlmOutputInvalidError(
                 stage="a4_target_answer_interpretation",
                 prompt_name="a4_target_answer_interpretation",
                 attempts=1,
-                message=f"A4 target answer interpretation 返回了非法 certainty：{certainty or '空'}",
+                message=f"A4 target answer interpretation 返回了非法 resolution：{resolution or '空'}",
             )
 
         supporting_span = str(payload.get("supporting_span", "") or "")
@@ -198,7 +198,7 @@ class EvidenceParser:
 
         return A4DeductiveResult(
             existence=existence,  # type: ignore[arg-type]
-            certainty=certainty,  # type: ignore[arg-type]
+            resolution=resolution,  # type: ignore[arg-type]
             reasoning=str(payload.get("reasoning", "") or "已由 LLM 完成目标回答解释。"),
             supporting_span=supporting_span,
             negation_span=negation_span,
@@ -346,14 +346,14 @@ class EvidenceParser:
             if not isinstance(candidate, dict):
                 continue
 
-            # match 会把自由文本结果压成 true/false + certain/uncertain，
+            # match 会把自由文本结果压成 true/false + clear/hedged，
             # 让后续状态机能像普通 A4 一样消费它。
             match = self._match_exam_result_to_candidate(exam_result, candidate)
 
             if match is None:
                 continue
 
-            status, certainty, evidence_text = match
+            status, resolution, evidence_text = match
             node_id = str(candidate.get("node_id") or "").strip()
             name = str(candidate.get("name") or node_id).strip()
 
@@ -364,7 +364,7 @@ class EvidenceParser:
                 SlotUpdate(
                     node_id=node_id,
                     status=status,
-                    certainty=certainty,
+                    resolution=resolution,
                     value=evidence_text,
                     evidence=raw_evidence_text,
                     turn_index=turn_index,
@@ -447,23 +447,23 @@ class EvidenceParser:
         turn_index: Optional[int] = None,
     ) -> List[SlotUpdate]:
         status = "unknown"
-        certainty = "unknown"
+        resolution = "unknown"
 
         if deductive_result.existence == "exist":
             status = "true"
         elif deductive_result.existence == "non_exist":
             status = "false"
 
-        if deductive_result.certainty == "confident":
-            certainty = "certain"
-        elif deductive_result.certainty == "doubt":
-            certainty = "uncertain"
+        if deductive_result.resolution == "clear":
+            resolution = "clear"
+        elif deductive_result.resolution == "hedged":
+            resolution = "hedged"
 
         return [
             SlotUpdate(
                 node_id=action.target_node_id,
                 status=status,
-                certainty=certainty,
+                resolution=resolution,
                 evidence=raw_evidence_text,
                 turn_index=turn_index,
                 metadata={
@@ -483,30 +483,18 @@ class EvidenceParser:
         updates: List[SlotUpdate] = []
 
         for feature in extraction_result.key_features:
-            status = "unknown"
-            certainty = "unknown"
-
-            if feature.status == "exist":
-                status = "true"
-            elif feature.status == "non_exist":
-                status = "false"
-
-            if feature.certainty == "confident":
-                certainty = "certain"
-            elif feature.certainty == "doubt":
-                certainty = "uncertain"
-
             updates.append(
                 SlotUpdate(
                     node_id=feature.normalized_name,
-                    status=status,
-                    certainty=certainty,
+                    status="true",
+                    resolution="unknown",
                     evidence=feature.name,
                     turn_index=turn_index,
                     metadata={
                         "source_stage": "A1",
                         "reasoning": feature.reasoning,
                         "normalized_name": feature.normalized_name,
+                        "category": feature.category,
                     },
                 )
             )
@@ -548,46 +536,42 @@ class EvidenceParser:
             )
         key_features: List[KeyFeature] = []
         normalized_names: set[str] = set()
-        known_names = set(known_feature_names or [])
+        selection_decision = str(payload.get("selection_decision", "") or "").strip()
 
         for item in payload.get("key_features", []):
-            if not isinstance(item, dict):
+            if isinstance(item, str):
+                raw_name = item
+                raw_category = "symptom"
+                reasoning = "由 LLM 提取。"
+                metadata = {}
+            elif isinstance(item, dict):
+                raw_name = str(item.get("normalized_name", item.get("name", "")) or item.get("name", ""))
+                raw_category = str(item.get("category", "symptom") or "symptom")
+                reasoning = str(item.get("reasoning", "由 LLM 提取。") or "由 LLM 提取。")
+                metadata = dict(item.get("metadata", {}))
+            else:
                 continue
-            normalized_name = self.normalizer.normalize_feature_name(
-                str(item.get("normalized_name", item.get("name", "")) or item.get("name", ""))
-            )
+
+            normalized_name = self.normalizer.normalize_feature_name(raw_name)
             if len(normalized_name) == 0 or normalized_name in normalized_names:
                 continue
             key_features.append(
                 KeyFeature(
-                    name=str(item.get("name", normalized_name) or normalized_name),
+                    name=str(raw_name or normalized_name),
                     normalized_name=normalized_name,
-                    status=str(item.get("status", "exist") or "exist"),
-                    certainty=str(item.get("certainty", "doubt") or "doubt"),
-                    reasoning=str(item.get("reasoning", "由 LLM 提取。") or "由 LLM 提取。"),
-                    metadata=dict(item.get("metadata", {})),
+                    category=self.normalizer.normalize_feature_category(
+                        normalized_name,
+                        raw_category,
+                    ),
+                    reasoning=reasoning,
+                    metadata=metadata,
                 )
             )
             normalized_names.add(normalized_name)
 
-        if len(key_features) == 0:
-            for feature_name in known_names:
-                normalized_name = self.normalizer.normalize_feature_name(feature_name)
-                if normalized_name in normalized_names:
-                    continue
-                if normalized_name and normalized_name in patient_context.raw_text:
-                    key_features.append(
-                        KeyFeature(
-                            name=normalized_name,
-                            normalized_name=normalized_name,
-                            status="exist",
-                            certainty="doubt",
-                            reasoning=f"患者原话直接复述了已知特征“{normalized_name}”。",
-                        )
-                    )
-                    normalized_names.add(normalized_name)
+        selection_decision = self._coerce_selection_decision(selection_decision, has_key_features=len(key_features) > 0)
 
-        if len(key_features) == 0:
+        if len(key_features) == 0 and self._has_obvious_symptom_mentions(patient_context):
             raise LlmEmptyExtractionError(
                 stage="a1_key_symptom_extraction",
                 prompt_name="a1_key_symptom_extraction",
@@ -597,60 +581,10 @@ class EvidenceParser:
 
         return A1ExtractionResult(
             key_features=key_features,
+            selection_decision=selection_decision,  # type: ignore[arg-type]
             reasoning=str(payload.get("reasoning_summary", "已由 LLM 提取核心线索。") or "已由 LLM 提取核心线索。"),
             metadata={"source": "llm"},
         )
-
-    # 根据原话中的语气和否定词，粗略判断存在性和确定性。
-    def _infer_existence_and_certainty(self, patient_text: str, matched_text: str) -> tuple[str, str]:
-        negation_patterns = [r"没有", r"并未", r"否认", r"无"]
-        doubt_patterns = [r"好像", r"可能", r"大概", r"有点", r"不太确定", r"说不上来"]
-        positive_patterns = [r"有", r"是", r"会", r"存在", r"出现", r"明显"]
-        generic_unknown_phrases = [
-            "没有特别注意到",
-            "不太清楚",
-            "说不上来",
-            "感觉不太明显",
-            "不确定",
-        ]
-        generic_negative_phrases = [
-            "没有",
-            "没有的",
-            "不是",
-            "不会",
-            "无",
-        ]
-
-        stripped_text = patient_text.strip()
-
-        # 先处理几类非常短、语义高度稳定的回答，减少后续模式判断的歧义。
-        if stripped_text in {"有", "有的", "是的", "会", "存在"}:
-            return "exist", "confident"
-
-        if stripped_text in generic_negative_phrases:
-            return "non_exist", "confident"
-
-        if any(phrase in stripped_text for phrase in generic_unknown_phrases):
-            return "unknown", "doubt"
-
-        # 接着判断整句级否定，再判断命中词附近的局部否定/模糊语气，
-        # 尽量把“没有发热，但有点咳嗽”这类句子识别得更稳。
-        if any(re.search(pattern, stripped_text) is not None for pattern in negation_patterns):
-            return "non_exist", "confident"
-
-        if self._contains_nearby_pattern(patient_text, matched_text, negation_patterns):
-            return "non_exist", "confident"
-
-        if self._contains_nearby_pattern(patient_text, matched_text, doubt_patterns):
-            return "exist", "doubt"
-
-        if matched_text in patient_text or any(re.search(pattern, patient_text) is not None for pattern in positive_patterns):
-            return "exist", "confident"
-
-        if any(re.search(pattern, patient_text) is not None for pattern in doubt_patterns):
-            return "unknown", "doubt"
-
-        return "unknown", "unknown"
 
     # 识别患者是否做过某类检查。
     def _infer_exam_availability(self, patient_text: str, exam_kind: str) -> str:
@@ -975,12 +909,12 @@ class EvidenceParser:
                 continue
 
             if result_direction == "negative":
-                return "false", "certain", result.raw_text
+                return "false", "clear", result.raw_text
 
             if result_direction in {"positive", "low", "high"}:
-                return "true", "certain", result.raw_text
+                return "true", "clear", result.raw_text
 
-            return "true", "uncertain", result.raw_text
+            return "true", "hedged", result.raw_text
 
         return None
 
@@ -1081,7 +1015,9 @@ class EvidenceParser:
         # 这样 router、audit 和前端都能追溯本轮判断是基于哪段患者原话。
         return DeductiveDecision(
             existence=str(payload.get("existence", answer_interpretation.existence)),
-            certainty=str(payload.get("certainty", answer_interpretation.certainty)),
+            resolution=self._coerce_resolution_value(
+                payload.get("resolution", payload.get("certainty", answer_interpretation.resolution))
+            ),
             decision_type=decision_type,  # type: ignore[arg-type]
             contradiction_explanation=str(payload.get("contradiction_explanation", "")),
             diagnostic_rationale=str(payload.get("diagnostic_rationale", payload.get("reasoning", answer_interpretation.reasoning))),
@@ -1114,11 +1050,11 @@ class EvidenceParser:
             margin = current_hypothesis.score - max(item.score for item in alternatives)
 
         # 明确阳性：支持当前路径；若主假设优势足够明显，可给出 STOP 倾向。
-        if answer_interpretation.existence == "exist" and answer_interpretation.certainty == "confident":
+        if answer_interpretation.existence == "exist" and answer_interpretation.resolution == "clear":
             next_stage = "STOP" if current_hypothesis is not None and margin >= 1.0 else "A3"
             return DeductiveDecision(
                 existence="exist",
-                certainty="confident",
+                resolution="clear",
                 decision_type="confirm_hypothesis",
                 diagnostic_rationale="目标证据被明确确认，当前路径对主假设形成强支持。",
                 next_stage=next_stage,
@@ -1134,10 +1070,10 @@ class EvidenceParser:
             )
 
         # 明确阴性：当前关键证据被反驳，优先退回 A2 重整 hypothesis 排名。
-        if answer_interpretation.existence == "non_exist" and answer_interpretation.certainty == "confident":
+        if answer_interpretation.existence == "non_exist" and answer_interpretation.resolution == "clear":
             return DeductiveDecision(
                 existence="non_exist",
-                certainty="confident",
+                resolution="clear",
                 decision_type="exclude_hypothesis",
                 contradiction_explanation=f"关键证据“{action.target_node_name}”被明确否定，当前假设需要被下调或切换。",
                 diagnostic_rationale="当前回答对主假设形成稳定反证。",
@@ -1154,10 +1090,10 @@ class EvidenceParser:
             )
 
         # 模糊阳性：保留当前假设，但继续 A3 复核，不急着终止路径。
-        if answer_interpretation.existence == "exist" and answer_interpretation.certainty == "doubt":
+        if answer_interpretation.existence == "exist" and answer_interpretation.resolution == "hedged":
             return DeductiveDecision(
                 existence="exist",
-                certainty="doubt",
+                resolution="hedged",
                 decision_type="reverify_hypothesis",
                 diagnostic_rationale="回答对目标证据提供了模糊支持，建议继续 A3 做更细的验证。",
                 next_stage="A3",
@@ -1172,10 +1108,10 @@ class EvidenceParser:
             )
 
         # 模糊阴性：不直接排除，先把它当成“需要更多信息”的矛盾分析入口。
-        if answer_interpretation.existence == "non_exist" and answer_interpretation.certainty == "doubt":
+        if answer_interpretation.existence == "non_exist" and answer_interpretation.resolution == "hedged":
             return DeductiveDecision(
                 existence="non_exist",
-                certainty="doubt",
+                resolution="hedged",
                 decision_type="need_more_information",
                 contradiction_explanation=(
                     f"“{action.target_node_name}”目前只表现出弱否定。"
@@ -1197,7 +1133,7 @@ class EvidenceParser:
 
         return DeductiveDecision(
             existence=answer_interpretation.existence,
-            certainty=answer_interpretation.certainty,
+            resolution=answer_interpretation.resolution,
             decision_type="switch_hypothesis",
             diagnostic_rationale="当前回答无法稳定支持现有路径，建议回到 A1/A2 重新整理线索。",
             next_stage="A1" if current_hypothesis is None else "A2",
@@ -1221,35 +1157,38 @@ class EvidenceParser:
             metadata={"source": "raw_text"},
         )
 
-    # 在命中的线索附近查找否定词或模糊词，辅助判断证据状态。
-    def _contains_nearby_pattern(self, text: str, matched_text: str, patterns: Iterable[str]) -> bool:
-        match = re.search(re.escape(matched_text), text)
+    # A1 只要看到明显的自述症状提及，就不应接受“none_salient / 空 key_features”。
+    def _has_obvious_symptom_mentions(self, patient_context: PatientContext) -> bool:
+        present_items = [
+            feature
+            for feature in patient_context.clinical_features
+            if feature.mention_state == "present"
+        ]
 
-        if match is None:
+        non_risk_items = [item for item in present_items if item.category != "risk_factor"]
+        if len(non_risk_items) >= 2:
+            return True
+
+        symptom_families = {
+            canonical_name: aliases
+            for canonical_name, aliases in self.normalizer.feature_aliases().items()
+            if self.normalizer.normalize_feature_category(canonical_name) != "risk_factor"
+        }
+        symptom_like_aliases = {
+            alias
+            for canonical_name, aliases in symptom_families.items()
+            for alias in [canonical_name, *aliases]
+        }
+
+        if any(item.normalized_name in symptom_families for item in present_items):
+            return True
+
+        raw_text = patient_context.raw_text.strip()
+        if len(raw_text) == 0:
             return False
 
-        start = max(0, match.start() - 8)
-        end = min(len(text), match.end() + 8)
-        window = text[start:end]
-
-        return any(re.search(pattern, window) is not None for pattern in patterns)
-
-    # 聚焦包含目标词的分句，减少整句级否定对目标判断的污染。
-    def _collect_target_relevant_spans(self, patient_text: str, target_name: str) -> List[str]:
-        clauses = [
-            clause.strip()
-            for clause in re.split(r"[，。！？；;,.!\n]", patient_text)
-            if len(clause.strip()) > 0
-        ]
-        matched = [clause for clause in clauses if target_name in clause]
-
-        if len(matched) > 0:
-            return matched
-
-        if len(patient_text.strip()) <= 8:
-            return [patient_text.strip()]
-
-        return []
+        alias_hits = [alias for alias in symptom_like_aliases if alias and alias in raw_text]
+        return len(alias_hits) > 0
 
     # 抽取回答是否是直接的“有/没有/不确定”短答。
     def _classify_direct_reply(self, patient_text: str) -> str | None:
@@ -1277,49 +1216,23 @@ class EvidenceParser:
 
         return None
 
-    # 从聚焦分句中提取首个包含指定模式的 span。
-    def _extract_target_span(self, spans: Sequence[str], patterns: Sequence[str]) -> str:
-        for span in spans:
-            if any(re.search(pattern, span) is not None for pattern in patterns):
-                return span
+    def _coerce_resolution_value(self, value: object) -> str:
+        normalized = str(value or "").strip()
+        if normalized in {"clear", "hedged", "unknown"}:
+            return normalized
+        if normalized == "confident":
+            return "clear"
+        if normalized == "doubt":
+            return "hedged"
+        return "unknown"
 
-        return ""
+    def _coerce_selection_decision(self, value: object, *, has_key_features: bool) -> str:
+        if isinstance(value, bool):
+            return "selected" if value else "none_salient"
 
-    # 基于目标相关分句而不是整句做存在性与确定性判断。
-    def _infer_target_aware_existence_and_certainty(
-        self,
-        patient_text: str,
-        target_name: str,
-        focused_spans: Sequence[str],
-        direct_reply: str | None,
-        negation_span: str,
-        uncertain_span: str,
-        supporting_span: str,
-    ) -> tuple[str, str]:
-        if direct_reply == "positive":
-            return "exist", "confident"
-
-        if direct_reply == "negative":
-            return "non_exist", "confident"
-
-        if direct_reply == "uncertain":
-            return "unknown", "doubt"
-
-        focused_text = "；".join(focused_spans)
-
-        if len(focused_text) == 0:
-            return self._infer_existence_and_certainty(patient_text, target_name)
-
-        if len(uncertain_span) > 0 and len(negation_span) == 0:
-            return "exist", "doubt"
-
-        if len(negation_span) > 0 and len(uncertain_span) > 0:
-            return "non_exist", "doubt"
-
-        if len(negation_span) > 0:
-            return "non_exist", "confident"
-
-        if len(supporting_span) > 0:
-            return "exist", "confident"
-
-        return "unknown", "doubt"
+        normalized = str(value or "").strip().lower()
+        if normalized in {"selected", "include", "include_all", "both", "true"}:
+            return "selected"
+        if normalized in {"none_salient", "skip", "false", "none"}:
+            return "none_salient"
+        return "selected" if has_key_features else "none_salient"

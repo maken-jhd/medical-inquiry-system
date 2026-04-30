@@ -26,7 +26,7 @@ class ReportBuilder:
                 {
                     "node_id": slot.node_id,
                     "status": slot.status,
-                    "certainty": slot.certainty,
+                    "resolution": slot.resolution,
                     "value": slot.value,
                     "evidence": slot.evidence,
                 }

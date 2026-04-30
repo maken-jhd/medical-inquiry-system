@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from typing import Dict, List
 
@@ -121,8 +120,7 @@ class MedExtractor:
                 name=item.get("name", ""),
                 normalized_name=item.get("normalized_name", item.get("name", "")),
                 category=item.get("category", "symptom"),
-                status=item.get("status", "unknown"),
-                certainty=item.get("certainty", "unknown"),
+                mention_state=item.get("mention_state", "present"),
                 evidence_text=item.get("evidence_text", patient_text),
                 metadata=dict(item.get("metadata", {})),
             )
@@ -147,8 +145,19 @@ class MedExtractor:
         if isinstance(payload, list):
             feature_items: list[dict] = []
             for item in payload:
+                if isinstance(item, str):
+                    coerced = self._build_feature_from_name(
+                        raw_name=item,
+                        patient_text=patient_text,
+                        metadata={"source": "llm_list_string_payload"},
+                    )
+                    if coerced is not None:
+                        feature_items.append(coerced)
+                    continue
+
                 if not isinstance(item, dict):
                     continue
+
                 normalized_name = self.normalizer.normalize_feature_name(
                     str(item.get("normalized_name", item.get("name", "")) or item.get("name", ""))
                 )
@@ -162,8 +171,10 @@ class MedExtractor:
                             normalized_name,
                             str(item.get("category", "symptom") or "symptom"),
                         ),
-                        "status": str(item.get("status", "exist") or "exist"),
-                        "certainty": str(item.get("certainty", "doubt") or "doubt"),
+                        "mention_state": self._coerce_mention_state(
+                            item.get("mention_state"),
+                            legacy_status=item.get("status"),
+                        ),
                         "evidence_text": str(item.get("evidence_text", patient_text) or patient_text),
                         "metadata": dict(item.get("metadata", {})),
                     }
@@ -179,26 +190,67 @@ class MedExtractor:
             # 这里按常见中文分隔符拆开，并尽量补齐 normalized_name / category 等字段。
             feature_items: list[dict] = []
             for raw_name in self.normalizer.split_feature_string(normalized_payload):
-                cleaned_name = raw_name.strip()
-                if len(cleaned_name) == 0:
-                    continue
-
-                normalized_name = self.normalizer.normalize_feature_name(cleaned_name)
-                category = self.normalizer.normalize_feature_category(normalized_name)
-                feature_items.append(
-                    {
-                        "name": cleaned_name,
-                        "normalized_name": normalized_name,
-                        "category": category,
-                        "status": "exist",
-                        "certainty": "doubt",
-                        "evidence_text": patient_text,
-                        "metadata": {"source": "llm_string_payload"},
-                    }
+                coerced = self._build_feature_from_name(
+                    raw_name=raw_name,
+                    patient_text=patient_text,
+                    metadata={"source": "llm_string_payload"},
                 )
+                if coerced is not None:
+                    feature_items.append(coerced)
+            return feature_items
+
+        if isinstance(payload, dict):
+            # 有些模型会把 clinical_features 压成 {"C": "体重增加"} 或 {"name": "..."}；
+            # 这里统一把它拆成一条或多条提及项。
+            if any(key in payload for key in {"name", "normalized_name"}):
+                return self._coerce_clinical_feature_payload([payload], patient_text)
+
+            feature_items: list[dict] = []
+            for raw_value in payload.values():
+                if isinstance(raw_value, str):
+                    coerced = self._build_feature_from_name(
+                        raw_name=raw_value,
+                        patient_text=patient_text,
+                        metadata={"source": "llm_dict_string_payload"},
+                    )
+                    if coerced is not None:
+                        feature_items.append(coerced)
+                elif isinstance(raw_value, list):
+                    feature_items.extend(self._coerce_clinical_feature_payload(raw_value, patient_text))
             return feature_items
 
         return []
 
     def _normalize_feature_name(self, raw_name: str) -> str:
         return self.normalizer.normalize_feature_name(raw_name)
+
+    def _build_feature_from_name(self, raw_name: str, patient_text: str, metadata: dict) -> dict | None:
+        cleaned_name = str(raw_name).strip()
+        if len(cleaned_name) == 0:
+            return None
+
+        normalized_name = self.normalizer.normalize_feature_name(cleaned_name)
+        if len(normalized_name) == 0:
+            return None
+
+        category = self.normalizer.normalize_feature_category(normalized_name)
+        return {
+            "name": cleaned_name,
+            "normalized_name": normalized_name,
+            "category": category,
+            "mention_state": "present",
+            "evidence_text": patient_text,
+            "metadata": metadata,
+        }
+
+    def _coerce_mention_state(self, value: object, legacy_status: object = None) -> str:
+        mention_state = str(value or "").strip()
+        if mention_state in {"present", "absent", "unclear"}:
+            return mention_state
+
+        legacy_text = str(legacy_status or "").strip()
+        if legacy_text == "exist":
+            return "present"
+        if legacy_text == "non_exist":
+            return "absent"
+        return "unclear"

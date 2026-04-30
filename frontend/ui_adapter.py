@@ -19,12 +19,14 @@ EXISTENCE_LABELS = {
     "unknown": "不确定",
 }
 
-CERTAINTY_LABELS = {
-    "confident": "有把握",
-    "doubt": "存疑",
+RESOLUTION_LABELS = {
+    "clear": "明确",
+    "hedged": "保留",
     "unknown": "不确定",
-    "certain": "确定",
-    "uncertain": "不确定",
+    "confident": "明确",
+    "doubt": "保留",
+    "certain": "明确",
+    "uncertain": "保留",
 }
 
 STAGE_LABELS = {
@@ -196,8 +198,12 @@ def translate_existence(value: Any) -> str:
     return EXISTENCE_LABELS.get(value, str(value or "未知"))
 
 
+def translate_resolution(value: Any) -> str:
+    return RESOLUTION_LABELS.get(value, str(value or "未知"))
+
+
 def translate_certainty(value: Any) -> str:
-    return CERTAINTY_LABELS.get(value, str(value or "未知"))
+    return translate_resolution(value)
 
 
 def translate_stage(value: Any) -> str:
@@ -250,14 +256,14 @@ def _adapt_a1(a1: dict[str, Any]) -> dict[str, Any]:
         features.append(
             {
                 "name": item_dict.get("name") or item_dict.get("normalized_name") or "未命名线索",
-                "status": translate_existence(item_dict.get("status")),
-                "certainty": translate_certainty(item_dict.get("certainty")),
+                "category": item_dict.get("category", ""),
                 "reasoning": item_dict.get("reasoning", ""),
             }
         )
 
     return {
         "features": features,
+        "selection_decision": a1.get("selection_decision", "selected"),
         "reasoning": a1.get("reasoning", ""),
     }
 
@@ -380,7 +386,7 @@ def _adapt_a4(
         return {
             "has_result": False,
             "existence_label": "暂无上一轮回答",
-            "certainty_label": "暂无",
+            "resolution_label": "暂无",
             "reasoning": "第一轮尚未有待验证动作，因此没有 A4 演绎结果。",
             "route_label": translate_stage(route_after_a4.get("stage")),
         }
@@ -389,8 +395,8 @@ def _adapt_a4(
         "has_result": True,
         "existence": a4.get("existence"),
         "existence_label": translate_existence(a4.get("existence")),
-        "certainty": a4.get("certainty"),
-        "certainty_label": translate_certainty(a4.get("certainty")),
+        "resolution": a4.get("resolution", a4.get("certainty")),
+        "resolution_label": translate_resolution(a4.get("resolution", a4.get("certainty"))),
         "reasoning": a4.get("reasoning", ""),
         "supporting_span": a4.get("supporting_span", ""),
         "negation_span": a4.get("negation_span", ""),
@@ -567,7 +573,7 @@ def _adapt_evidence_item(item: dict[str, Any]) -> dict[str, Any]:
         "status": status,
         "status_label": item.get("status_label") or EVIDENCE_STATUS_LABELS[status],
         "status_icon": EVIDENCE_STATUS_ICONS[status],
-        "certainty": item.get("certainty", ""),
+        "resolution": item.get("resolution", item.get("certainty", "")),
         "evidence_text": item.get("evidence_text", ""),
     }
 

@@ -36,9 +36,10 @@ def test_a1_normalizes_llm_feature_names() -> None:
             _ = prompt_name, variables, schema
             return {
                 "key_features": [
-                    {"name": "咳嗽", "normalized_name": "咳嗽", "status": "exist", "certainty": "doubt"},
-                    {"name": "艾滋病", "normalized_name": "艾滋病", "status": "exist", "certainty": "confident"},
+                    {"name": "咳嗽", "normalized_name": "咳嗽", "category": "symptom"},
+                    {"name": "艾滋病", "normalized_name": "艾滋病", "category": "risk_factor"},
                 ],
+                "selection_decision": "selected",
                 "reasoning_summary": "已提取关键线索。",
             }
 
@@ -60,7 +61,7 @@ def test_a4_long_answer_uses_llm_target_interpretation() -> None:
             assert variables["target_node_name"] == "发热"
             return {
                 "existence": "non_exist",
-                "certainty": "confident",
+                "resolution": "clear",
                 "supporting_span": "",
                 "negation_span": "发热没有",
                 "uncertain_span": "",
@@ -138,7 +139,7 @@ def test_a4_long_answer_judge_uses_llm() -> None:
             if prompt_name == "a4_target_answer_interpretation":
                 return {
                     "existence": "exist",
-                    "certainty": "doubt",
+                    "resolution": "hedged",
                     "supporting_span": "好像有点发热",
                     "negation_span": "",
                     "uncertain_span": "好像有点发热",
@@ -146,7 +147,7 @@ def test_a4_long_answer_judge_uses_llm() -> None:
                 }
             return {
                 "existence": "exist",
-                "certainty": "doubt",
+                "resolution": "hedged",
                 "decision_type": "reverify_hypothesis",
                 "next_stage": "A3",
                 "diagnostic_rationale": "仍需继续验证。",

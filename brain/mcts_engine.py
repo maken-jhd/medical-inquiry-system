@@ -40,10 +40,10 @@ class MctsEngine:
         hypothesis_id: Optional[str] = None,
     ) -> str:
         positive_slots = sorted(
-            f"{slot.node_id}:{slot.certainty}" for slot in session_state.slots.values() if slot.status == "true"
+            f"{slot.node_id}:{slot.resolution}" for slot in session_state.slots.values() if slot.status == "true"
         )
         negative_slots = sorted(
-            f"{slot.node_id}:{slot.certainty}" for slot in session_state.slots.values() if slot.status == "false"
+            f"{slot.node_id}:{slot.resolution}" for slot in session_state.slots.values() if slot.status == "false"
         )
         active_topics = sorted(session_state.active_topics)
         payload = "|".join(

@@ -42,7 +42,7 @@ def test_focused_replay_summarizes_acceptance_categories() -> None:
                         "target_node_name": "CD4+ T淋巴细胞计数 < 200/μL",
                         "patient_answer": "有。",
                         "existence": "exist",
-                        "certainty": "confident",
+                        "resolution": "clear",
                         "evidence_tags": ["immune_status", "type:lab"],
                         "evidence_families": ["immune_status"],
                         "confirmed_family_candidate": True,

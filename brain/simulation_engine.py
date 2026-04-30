@@ -241,7 +241,7 @@ class SimulationEngine:
                         "stage": "A4",
                         "answer_branch": selected_branch["branch"],
                         "existence": branch_result.existence,
-                        "certainty": branch_result.certainty,
+                        "resolution": branch_result.resolution,
                         "reasoning": branch_result.reasoning,
                     },
                     {
@@ -346,7 +346,7 @@ class SimulationEngine:
                 "weighted_reward": positive_probability * outcome.positive_branch_reward,
                 "deductive_result": A4DeductiveResult(
                     existence="exist",
-                    certainty="confident",
+                    resolution="clear",
                     reasoning=f"模拟回答明确支持“{action.target_node_name}”存在。",
                     supporting_span=f"模拟正向回答：存在 {action.target_node_name}",
                 ),
@@ -358,7 +358,7 @@ class SimulationEngine:
                 "weighted_reward": negative_probability * outcome.negative_branch_reward,
                 "deductive_result": A4DeductiveResult(
                     existence="non_exist",
-                    certainty="confident",
+                    resolution="clear",
                     reasoning=f"模拟回答明确否定“{action.target_node_name}”。",
                     negation_span=f"模拟反向回答：无 {action.target_node_name}",
                 ),
@@ -370,7 +370,7 @@ class SimulationEngine:
                 "weighted_reward": doubtful_probability * doubtful_reward,
                 "deductive_result": A4DeductiveResult(
                     existence="exist",
-                    certainty="doubt",
+                    resolution="hedged",
                     reasoning=f"模拟回答对“{action.target_node_name}”提供了模糊支持，仍需复核。",
                     supporting_span=f"模拟模糊回答：可能有 {action.target_node_name}",
                     uncertain_span=f"模拟模糊回答：不太确定 {action.target_node_name}",
@@ -414,24 +414,24 @@ class SimulationEngine:
         hypothesis_manager: HypothesisManager,
     ) -> None:
         slot_status = "unknown"
-        slot_certainty = "unknown"
+        slot_resolution = "unknown"
 
         if deductive_result.existence == "exist":
             slot_status = "true"
         elif deductive_result.existence == "non_exist":
             slot_status = "false"
 
-        if deductive_result.certainty == "confident":
-            slot_certainty = "certain"
-        elif deductive_result.certainty == "doubt":
-            slot_certainty = "uncertain"
+        if deductive_result.resolution == "clear":
+            slot_resolution = "clear"
+        elif deductive_result.resolution == "hedged":
+            slot_resolution = "hedged"
 
         # rollout 里的模拟回答也会同步写槽位和 evidence_state，
         # 这样后续 hypothesis feedback 与 follow-up selection 才能读取到完整上下文。
         state.slots[action.target_node_id] = SlotState(
             node_id=action.target_node_id,
             status=slot_status,
-            certainty=slot_certainty,
+            resolution=slot_resolution,
             evidence=[deductive_result.supporting_span or deductive_result.negation_span or deductive_result.reasoning],
             source_turns=[turn_index],
             metadata={
@@ -443,7 +443,7 @@ class SimulationEngine:
         state.evidence_states[action.target_node_id] = EvidenceState(
             node_id=action.target_node_id,
             existence=deductive_result.existence,
-            certainty=deductive_result.certainty,
+            resolution=deductive_result.resolution,
             reasoning=deductive_result.reasoning,
             source_turns=[turn_index],
             metadata={

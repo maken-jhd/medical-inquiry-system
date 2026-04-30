@@ -229,7 +229,7 @@ class ConsultationBrain:
         evidence_state = EvidenceState(
             node_id=pending_action.target_node_id,
             existence=a4_result.existence,
-            certainty=a4_result.certainty,
+            resolution=a4_result.resolution,
             reasoning=a4_result.reasoning,
             source_turns=[turn_index],
             metadata={
@@ -437,22 +437,22 @@ class ConsultationBrain:
 
         for update in updates:
             existence = "unknown"
-            certainty = "unknown"
+            resolution = "unknown"
 
             if update.status == "true":
                 existence = "exist"
             elif update.status == "false":
                 existence = "non_exist"
 
-            if update.certainty == "certain":
-                certainty = "confident"
-            elif update.certainty == "uncertain":
-                certainty = "doubt"
+            if update.resolution == "clear":
+                resolution = "clear"
+            elif update.resolution == "hedged":
+                resolution = "hedged"
 
             evidence_state = EvidenceState(
                 node_id=update.node_id,
                 existence=existence,  # type: ignore[arg-type]
-                certainty=certainty,  # type: ignore[arg-type]
+                resolution=resolution,  # type: ignore[arg-type]
                 reasoning=f"由检查上下文回答映射得到：{update.value or update.evidence or ''}",
                 source_turns=[turn_index],
                 metadata={
@@ -480,7 +480,7 @@ class ConsultationBrain:
         exam_result: ExamContextResult,
     ) -> A4DeductiveResult:
         existence = "unknown"
-        certainty = "doubt" if exam_result.availability == "unknown" else "confident"
+        resolution = "hedged" if exam_result.availability == "unknown" else "clear"
 
         if exam_result.availability == "done":
             existence = "exist"
@@ -489,7 +489,7 @@ class ConsultationBrain:
 
         return A4DeductiveResult(
             existence=existence,  # type: ignore[arg-type]
-            certainty=certainty,  # type: ignore[arg-type]
+            resolution=resolution,  # type: ignore[arg-type]
             reasoning=exam_result.reasoning,
             supporting_span="；".join(item.raw_text for item in exam_result.mentioned_results),
             negation_span="未做相关检查" if exam_result.availability == "not_done" else "",
@@ -873,7 +873,7 @@ class ConsultationBrain:
                     "question_type": item.get("question_type_hint", group_key),
                     "status": item.get("status", "unknown"),
                     "status_label": item.get("status_label", "待验证"),
-                    "certainty": item.get("certainty", "unknown"),
+                    "resolution": item.get("resolution", "unknown"),
                     "evidence_text": item.get("evidence_text", ""),
                     "acquisition_mode": item.get("acquisition_mode", ""),
                     "evidence_cost": item.get("evidence_cost", ""),
@@ -1154,7 +1154,7 @@ class ConsultationBrain:
 
                 evidence_text = "；".join(str(item) for item in slot.evidence if len(str(item).strip()) > 0)
                 raw_sections.append(
-                    f"- {slot.node_id}: status={slot.status}, certainty={slot.certainty}, evidence={evidence_text}"
+                    f"- {slot.node_id}: status={slot.status}, resolution={slot.resolution}, evidence={evidence_text}"
                 )
 
         if len(state.evidence_states) > 0:
@@ -1162,7 +1162,7 @@ class ConsultationBrain:
 
             for evidence in state.evidence_states.values():
                 raw_sections.append(
-                    f"- {evidence.node_id}: existence={evidence.existence}, certainty={evidence.certainty}, reasoning={evidence.reasoning}"
+                    f"- {evidence.node_id}: existence={evidence.existence}, resolution={evidence.resolution}, reasoning={evidence.reasoning}"
                 )
 
         if len(state.candidate_hypotheses) > 0:
@@ -1536,7 +1536,7 @@ class ConsultationBrain:
             "topic_id": action.topic_id,
             "patient_answer": patient_text,
             "existence": a4_result.existence,
-            "certainty": a4_result.certainty,
+            "resolution": a4_result.resolution,
             "reasoning": a4_result.reasoning,
             "supporting_span": a4_result.supporting_span,
             "negation_span": a4_result.negation_span,
@@ -1650,7 +1650,7 @@ class ConsultationBrain:
         a4_result: A4DeductiveResult,
         evidence_tags: set[str],
     ) -> bool:
-        if a4_result.existence != "exist" or a4_result.certainty != "confident":
+        if a4_result.existence != "exist" or a4_result.resolution != "clear":
             return False
 
         relation_type = str(action.metadata.get("relation_type") or "")
@@ -1658,13 +1658,13 @@ class ConsultationBrain:
             evidence_tags & GUARDED_CONFIRMED_EVIDENCE_TAGS
         )
 
-    # 高价值 anchor 的 exist + doubt 可以进入 provisional family，但仍不等同 confirmed。
+    # 高价值 anchor 的 exist + hedged 可以进入 provisional family，但仍不等同 confirmed。
     def _is_provisional_family_candidate(
         self,
         a4_result: A4DeductiveResult,
         evidence_tags: set[str],
     ) -> bool:
-        if a4_result.existence != "exist" or a4_result.certainty != "doubt":
+        if a4_result.existence != "exist" or a4_result.resolution != "hedged":
             return False
 
         return bool(evidence_tags & {"imaging", "oxygenation", "pathogen", "immune_status", "pcp_specific"})
@@ -1678,13 +1678,13 @@ class ConsultationBrain:
     ) -> None:
         reward = 0.0
 
-        if a4_result.existence == "exist" and a4_result.certainty == "confident":
+        if a4_result.existence == "exist" and a4_result.resolution == "clear":
             reward = 1.0
-        elif a4_result.existence == "exist" and a4_result.certainty == "doubt":
+        elif a4_result.existence == "exist" and a4_result.resolution == "hedged":
             reward = 0.5
-        elif a4_result.existence == "non_exist" and a4_result.certainty == "confident":
+        elif a4_result.existence == "non_exist" and a4_result.resolution == "clear":
             reward = -0.4
-        elif a4_result.existence == "non_exist" and a4_result.certainty == "doubt":
+        elif a4_result.existence == "non_exist" and a4_result.resolution == "hedged":
             reward = -0.1
 
         self.deps.state_tracker.record_action_feedback(

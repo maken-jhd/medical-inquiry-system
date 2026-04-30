@@ -4,7 +4,7 @@ from brain.router import ReasoningRouter
 from brain.types import A4DeductiveResult, HypothesisScore, MctsAction, SessionState
 
 
-# 验证存在且确信且主假设优势明显时会进入终止阶段。
+# 验证存在且回答清晰且主假设优势明显时会进入终止阶段。
 def test_router_stops_when_positive_evidence_and_margin_is_sufficient() -> None:
     router = ReasoningRouter()
     action = MctsAction(
@@ -24,7 +24,7 @@ def test_router_stops_when_positive_evidence_and_margin_is_sufficient() -> None:
     )
 
     decision = router.route_after_question_answer(
-        A4DeductiveResult(existence="exist", certainty="confident", reasoning="明确存在"),
+        A4DeductiveResult(existence="exist", resolution="clear", reasoning="明确存在"),
         action,
         state,
     )
@@ -33,8 +33,8 @@ def test_router_stops_when_positive_evidence_and_margin_is_sufficient() -> None:
     assert decision.metadata["should_terminate_current_path"] is True
 
 
-# 验证不存在且确信会回到 A2 重新审视假设。
-def test_router_returns_to_a2_when_negative_evidence_is_confident() -> None:
+# 验证不存在且回答清晰会回到 A2 重新审视假设。
+def test_router_returns_to_a2_when_negative_evidence_is_clear() -> None:
     router = ReasoningRouter()
     action = MctsAction(
         action_id="a2",
@@ -47,7 +47,7 @@ def test_router_returns_to_a2_when_negative_evidence_is_confident() -> None:
     state = SessionState(session_id="s2")
 
     decision = router.route_after_question_answer(
-        A4DeductiveResult(existence="non_exist", certainty="confident", reasoning="明确不存在"),
+        A4DeductiveResult(existence="non_exist", resolution="clear", reasoning="明确不存在"),
         action,
         state,
     )

@@ -152,12 +152,12 @@ class LlmClient:
         # 各业务模块只传入 prompt_name，避免 prompt 文本散落在整个 brain 目录。
         prompt_blocks = {
             "med_extractor": (
-                "请从患者原话中提取一般信息 P 和临床特征 C。"
+                "请从患者原话中提取一般信息 P 和患者提及项 C。"
                 "输出字段必须包含 general_info 与 clinical_features。"
             ),
             "a1_key_symptom_extraction": (
-                "请从患者上下文中提取最关键的临床特征。"
-                "输出字段必须包含 key_features、uncertain_features、noise_features、reasoning_summary。"
+                "请从患者上下文中的提及项里选出最值得进入首轮检索的核心线索。"
+                "输出字段必须包含 key_features、selection_decision、reasoning_summary。"
             ),
             "intake_opening_response": (
                 "患者当前输入没有明确症状、风险因素或检查结果，"
@@ -193,13 +193,13 @@ class LlmClient:
             ),
             "a4_deductive_judge": (
                 "请根据目标验证点、患者回答、当前主假设和备选假设，给出诊断性演绎判断。"
-                "输出字段必须包含 existence、certainty、decision_type、next_stage、"
+                "输出字段必须包含 existence、resolution、decision_type、next_stage、"
                 "diagnostic_rationale、contradiction_explanation、"
                 "should_terminate_current_path、should_spawn_alternative_hypotheses、reasoning。"
             ),
             "a4_target_answer_interpretation": (
                 "请围绕当前目标验证点，解释患者本轮回答对该目标证据的支持情况。"
-                "输出字段必须包含 existence、certainty、supporting_span、negation_span、uncertain_span、reasoning。"
+                "输出字段必须包含 existence、resolution、supporting_span、negation_span、uncertain_span、reasoning。"
             ),
             "exam_context_interpretation": (
                 "请根据本轮患者回答，解析检查是否做过、提到过哪些检查名、有哪些结果、"

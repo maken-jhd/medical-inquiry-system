@@ -109,6 +109,15 @@
   - 当前在 `Ctrl+C` 或 `SIGTERM` 时会先写出中断状态，再强制结束进程，避免并发线程池在后台继续占用内存。
   - 当前会自动轻量化 `final_report.metadata`，不再把原始 `search_tree` 和 `last_search_result` 运行态对象直接写进 replay 结果，便于控制批量运行的内存占用。
 
+- [diagnose_smoke10_failures.py](/Users/loki/Workspace/GraduationDesign/scripts/diagnose_smoke10_failures.py)
+  - 对指定 replay 目录中的 failed opening 做 `med_extractor / A1` LLM payload 审计。
+  - 会读取 `replay_results.jsonl`，复现同一批 opening 的结构化调用，并输出：
+    - `llm_payload_audit.json`
+    - `llm_payload_audit_summary.json`
+    - `llm_payload_audit_report.md`
+  - 适合在 `failed=10`、`turns=0` 这类“前置抽取链路没跑起来”的场景下快速定位是 prompt、payload 还是业务层 coercion 的问题。
+  - 当前 `graph_cases_20260430_smoke10` 的最新审计结果已经显示：`med_probe_status_counts = {"ok": 10}`、`a1_probe_status_counts = {"ok": 10}`、`med_raw_empty_like_count = 0`、`a1_raw_empty_like_count = 0`，说明旧的 intake `certainty` 语义错位已经被修正；后续若 replay 仍失败，应优先排查网络 / API 连接或下游诊断阶段，而不是再回头怀疑 `MedExtractor / A1` payload 语义。
+
 - [generate_graph_virtual_patients.py](/Users/loki/Workspace/GraduationDesign/scripts/generate_graph_virtual_patients.py)
   - 使用疾病级图谱审计输出生成图谱驱动虚拟病人病例。
 

@@ -552,7 +552,7 @@ class GraphRetriever:
                     feature_names.append(feature.mention)
                 continue
 
-            if feature.status != "exist":
+            if isinstance(feature, ClinicalFeatureItem) and feature.mention_state != "present":
                 continue
 
             if feature.normalized_name not in feature_names:
@@ -563,7 +563,7 @@ class GraphRetriever:
 
         if patient_context is not None:
             for feature in patient_context.clinical_features:
-                if feature.status != "exist":
+                if feature.mention_state != "present":
                     continue
 
                 if feature.normalized_name not in feature_names:
@@ -618,7 +618,7 @@ class GraphRetriever:
         name = str(row.get("name") or "").strip()
         matched_keys = {item for item in (node_id, name) if len(item) > 0}
 
-        # evidence_state 优先级最高，因为它保留了 A4 后的存在性/确定性判断。
+        # evidence_state 优先级最高，因为它保留了 A4 后的存在性/回答清晰度判断。
         evidence_state = session_state.evidence_states.get(node_id)
 
         if evidence_state is not None:
@@ -626,7 +626,7 @@ class GraphRetriever:
                 return {
                     "status": "matched",
                     "status_label": "已命中",
-                    "certainty": evidence_state.certainty,
+                    "resolution": evidence_state.resolution,
                     "evidence_text": evidence_state.reasoning,
                 }
 
@@ -634,7 +634,7 @@ class GraphRetriever:
                 return {
                     "status": "negative",
                     "status_label": "已否定",
-                    "certainty": evidence_state.certainty,
+                    "resolution": evidence_state.resolution,
                     "evidence_text": evidence_state.reasoning,
                 }
 
@@ -655,7 +655,7 @@ class GraphRetriever:
                 return {
                     "status": "matched",
                     "status_label": "已命中",
-                    "certainty": slot.certainty,
+                    "resolution": slot.resolution,
                     "evidence_text": "；".join(slot.evidence),
                 }
 
@@ -663,14 +663,14 @@ class GraphRetriever:
                 return {
                     "status": "negative",
                     "status_label": "已否定",
-                    "certainty": slot.certainty,
+                    "resolution": slot.resolution,
                     "evidence_text": "；".join(slot.evidence),
                 }
 
         return {
             "status": "unknown",
             "status_label": "待验证",
-            "certainty": "unknown",
+            "resolution": "unknown",
             "evidence_text": "",
         }
 

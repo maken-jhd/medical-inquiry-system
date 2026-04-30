@@ -25,6 +25,10 @@
 - `LLM` 结构化调用统一由 [llm_client.py](/Users/loki/Workspace/GraduationDesign/brain/llm_client.py) 负责一次重试；仍失败时抛出结构化领域错误，而不是伪装成正常问诊结果
 - 名称归一化集中收口到 [normalization.py](/Users/loki/Workspace/GraduationDesign/brain/normalization.py)，位置固定在“LLM 输出之后、Neo4j / EntityLinker 之前”
 - 默认构造当前要求 `llm_available=true`；如果本机未配置可用 LLM，`build_default_brain_from_env()` 会尽早报错，而不是进入“半规则半模型”的模糊状态
+- 当前统一语义模型不再表达“医学 certainty”：
+  - `MedExtractor` 只输出患者提及项 `mention_state = present / absent / unclear`
+  - `A1` 只输出值得进入首轮检索的 `key_features + selection_decision`
+  - `A4 / slot / evidence` 统一使用 `resolution = clear / hedged / unknown` 表达“当前回答是否清晰”
 
 当前需要明确区分三种工作模式：
 
@@ -52,7 +56,7 @@
 
 - [types.py](/Users/loki/Workspace/GraduationDesign/brain/types.py)
   - 定义第二阶段通用数据结构。
-  - 包括槽位状态、置信度、患者上下文、实体链接、候选假设、候选动作、搜索树节点、轨迹与 A1/A2/A3/A4 阶段输出。
+  - 包括患者提及项、槽位状态、回答清晰度、患者上下文、实体链接、候选假设、候选动作、搜索树节点、轨迹与 A1/A2/A3/A4 阶段输出。
 
 - [llm_client.py](/Users/loki/Workspace/GraduationDesign/brain/llm_client.py)
   - 统一封装第二阶段大模型结构化调用。
@@ -69,7 +73,7 @@
 
 - [state_tracker.py](/Users/loki/Workspace/GraduationDesign/brain/state_tracker.py)
   - 负责维护会话中的槽位状态。
-  - 支持三态记录（阳性 / 阴性 / 未知）以及“确信 / 存疑”的置信维度。
+  - 支持三态记录（阳性 / 阴性 / 未知）以及 `resolution = clear / hedged / unknown` 的回答清晰度维度。
   - 当前也负责保存轨迹列表与绑定搜索树。
   - 当前已为 rollout / reroot 提供轻量状态快照，避免把 `search_tree`、`last_search_result` 等重量级运行时对象一并 deepcopy。
 
@@ -90,7 +94,7 @@
 - [retriever.py](/Users/loki/Workspace/GraduationDesign/brain/retriever.py)
   - 负责和知识图谱交互，提供候选节点、候选假设和验证证据的查询入口。
   - 当前已经实现论文风格的 `R1 / R2` 双向检索基础版。
-  - `R1` 已增加方向置信度与实体链接相似度融合。
+  - `R1` 已增加方向语义权重与实体链接相似度融合。
   - `R2` 已支持方向优先、已问节点过滤与问题类型提示。
 
 - [question_selector.py](/Users/loki/Workspace/GraduationDesign/brain/question_selector.py)
@@ -116,10 +120,12 @@
   - 对齐论文中的 MedExtractor。
   - 负责把患者原话拆成一般信息 `P` 和临床特征 `C`。
   - 当前长文本只接受 LLM 结构化抽取；短答仍允许走极薄的 direct reply 规则。
+  - 当前会兼容真实观测到的 `clinical_features` 多种 payload 形态，如 `str / list[str] / dict-wrapped`，并统一收敛为提及项列表。
 
 - [evidence_parser.py](/Users/loki/Workspace/GraduationDesign/brain/evidence_parser.py)
   - 对应 `A1` 与答案解释层。
-  - 负责从患者回答中提取关键医学线索，并解释目标验证点的回答结果。
+  - 负责从患者回答中筛选首轮检索线索，并解释目标验证点的回答结果。
+  - `A1` 当前只输出 `key_features + selection_decision`，不再输出 `uncertain_features / noise_features` 一类历史契约。
   - 当前会输出 `supporting_span / negation_span / uncertain_span`，并在长回答场景下优先使用 `a4_target_answer_interpretation`、`exam_context_interpretation` 和 `a4_deductive_judge` 三类结构化 prompt。
   - 当前不再把长回答静默退回规则词典；LLM 失败会直接向上抛出领域错误。
 
@@ -142,7 +148,7 @@
 
 - [router.py](/Users/loki/Workspace/GraduationDesign/brain/router.py)
   - 对应 `A4` 演绎分析后的代码级路由。
-  - 根据 `Exist / Non-exist` 与 `Confident / Doubt` 的组合决定继续验证、回溯、切换假设或终止。
+  - 根据 `existence + resolution` 的组合决定继续验证、回溯、切换假设或终止。
   - 当前已支持把 A4 结果转换为显式 `DeductiveDecision`。
 
 ### 4. 搜索与前瞻模块
@@ -207,6 +213,9 @@
 
 - 详细运行链路说明：
   - [brain_runtime_call_chain_guide.md](/Users/loki/Workspace/GraduationDesign/docs/brain_runtime_call_chain_guide.md)
+
+- 当前诊断系统待办清单：
+  - [diagnosis_system_todolist.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_system_todolist.md)
 
 - 第一阶段知识图谱底座：
   - [knowledge_graph/README.md](/Users/loki/Workspace/GraduationDesign/knowledge_graph/README.md)

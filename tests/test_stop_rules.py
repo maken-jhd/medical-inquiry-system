@@ -78,7 +78,7 @@ def test_guarded_lenient_blocks_negative_key_evidence() -> None:
     state.evidence_states["oxygen"] = EvidenceState(
         node_id="oxygen",
         existence="non_exist",
-        certainty="confident",
+        resolution="clear",
         metadata={
             "hypothesis_id": "pcp",
             "relation_type": "HAS_LAB_FINDING",
@@ -101,7 +101,7 @@ def test_guarded_lenient_delays_on_soft_negative_without_prior_stability() -> No
     state.evidence_states["ct"] = EvidenceState(
         node_id="ct",
         existence="exist",
-        certainty="confident",
+        resolution="clear",
         metadata={
             "hypothesis_id": "pcp",
             "relation_type": "HAS_LAB_FINDING",
@@ -112,7 +112,7 @@ def test_guarded_lenient_delays_on_soft_negative_without_prior_stability() -> No
     state.evidence_states["cd4"] = EvidenceState(
         node_id="cd4",
         existence="exist",
-        certainty="confident",
+        resolution="clear",
         metadata={
             "hypothesis_id": "pcp",
             "relation_type": "HAS_LAB_FINDING",
@@ -123,7 +123,7 @@ def test_guarded_lenient_delays_on_soft_negative_without_prior_stability() -> No
     state.evidence_states["resp_failure"] = EvidenceState(
         node_id="resp_failure",
         existence="unknown",
-        certainty="doubt",
+        resolution="hedged",
         metadata={
             "hypothesis_id": "alternative_pneumonia",
             "relation_type": "MANIFESTS_AS",
@@ -149,7 +149,7 @@ def test_guarded_lenient_accepts_soft_negative_after_prior_stability() -> None:
     state.evidence_states["ct"] = EvidenceState(
         node_id="ct",
         existence="exist",
-        certainty="confident",
+        resolution="clear",
         metadata={
             "hypothesis_id": "pcp",
             "relation_type": "HAS_LAB_FINDING",
@@ -160,7 +160,7 @@ def test_guarded_lenient_accepts_soft_negative_after_prior_stability() -> None:
     state.evidence_states["cd4"] = EvidenceState(
         node_id="cd4",
         existence="exist",
-        certainty="confident",
+        resolution="clear",
         metadata={
             "hypothesis_id": "pcp",
             "relation_type": "HAS_LAB_FINDING",
@@ -171,7 +171,7 @@ def test_guarded_lenient_accepts_soft_negative_after_prior_stability() -> None:
     state.evidence_states["resp_failure"] = EvidenceState(
         node_id="resp_failure",
         existence="unknown",
-        certainty="doubt",
+        resolution="hedged",
         metadata={
             "hypothesis_id": "alternative_pneumonia",
             "relation_type": "MANIFESTS_AS",
@@ -193,7 +193,7 @@ def test_guarded_lenient_accepts_after_confirmed_key_evidence() -> None:
     state.evidence_states["ct"] = EvidenceState(
         node_id="ct",
         existence="exist",
-        certainty="confident",
+        resolution="clear",
         metadata={
             "hypothesis_id": "pcp",
             "relation_type": "HAS_LAB_FINDING",
@@ -203,7 +203,7 @@ def test_guarded_lenient_accepts_after_confirmed_key_evidence() -> None:
     state.evidence_states["cd4"] = EvidenceState(
         node_id="cd4",
         existence="exist",
-        certainty="confident",
+        resolution="clear",
         metadata={
             "hypothesis_id": "pcp",
             "relation_type": "HAS_LAB_FINDING",
@@ -226,7 +226,7 @@ def test_guarded_lenient_counts_shareable_immune_evidence_for_pcp_combo() -> Non
     state.evidence_states["ct"] = EvidenceState(
         node_id="ct",
         existence="exist",
-        certainty="confident",
+        resolution="clear",
         metadata={
             "hypothesis_id": "pcp",
             "relation_type": "HAS_LAB_FINDING",
@@ -237,7 +237,7 @@ def test_guarded_lenient_counts_shareable_immune_evidence_for_pcp_combo() -> Non
     state.evidence_states["cd4"] = EvidenceState(
         node_id="cd4",
         existence="exist",
-        certainty="confident",
+        resolution="clear",
         metadata={
             "hypothesis_id": "alternative_pneumonia",
             "relation_type": "HAS_LAB_FINDING",
@@ -268,7 +268,7 @@ def test_guarded_lenient_allows_weak_alternative_after_combo_satisfied() -> None
     state.evidence_states["ct"] = EvidenceState(
         node_id="ct",
         existence="exist",
-        certainty="confident",
+        resolution="clear",
         metadata={
             "hypothesis_id": "pcp",
             "relation_type": "HAS_LAB_FINDING",
@@ -279,7 +279,7 @@ def test_guarded_lenient_allows_weak_alternative_after_combo_satisfied() -> None
     state.evidence_states["cd4"] = EvidenceState(
         node_id="cd4",
         existence="exist",
-        certainty="confident",
+        resolution="clear",
         metadata={
             "hypothesis_id": "pcp",
             "relation_type": "HAS_LAB_FINDING",
@@ -310,7 +310,7 @@ def test_guarded_lenient_blocks_only_strong_unresolved_alternative() -> None:
     state.evidence_states["ct"] = EvidenceState(
         node_id="ct",
         existence="exist",
-        certainty="confident",
+        resolution="clear",
         metadata={
             "hypothesis_id": "pcp",
             "relation_type": "HAS_LAB_FINDING",
@@ -321,7 +321,7 @@ def test_guarded_lenient_blocks_only_strong_unresolved_alternative() -> None:
     state.evidence_states["cd4"] = EvidenceState(
         node_id="cd4",
         existence="exist",
-        certainty="confident",
+        resolution="clear",
         metadata={
             "hypothesis_id": "pcp",
             "relation_type": "HAS_LAB_FINDING",
@@ -344,7 +344,7 @@ def test_guarded_lenient_uses_provisional_anchor_combo_for_vague_pcp_support() -
     state.evidence_states["ct"] = EvidenceState(
         node_id="ct",
         existence="exist",
-        certainty="doubt",
+        resolution="hedged",
         metadata={
             "hypothesis_id": "pcp",
             "relation_type": "HAS_LAB_FINDING",
@@ -355,7 +355,7 @@ def test_guarded_lenient_uses_provisional_anchor_combo_for_vague_pcp_support() -
     state.evidence_states["cd4"] = EvidenceState(
         node_id="cd4",
         existence="exist",
-        certainty="doubt",
+        resolution="hedged",
         metadata={
             "hypothesis_id": "pcp",
             "relation_type": "HAS_LAB_FINDING",
@@ -380,7 +380,7 @@ def test_guarded_lenient_still_blocks_single_provisional_anchor() -> None:
     state.evidence_states["ct"] = EvidenceState(
         node_id="ct",
         existence="exist",
-        certainty="doubt",
+        resolution="hedged",
         metadata={
             "hypothesis_id": "pcp",
             "relation_type": "HAS_LAB_FINDING",
@@ -403,7 +403,7 @@ def test_guarded_lenient_anchor_promotion_removes_cross_family_noise() -> None:
     state.evidence_states["cd4"] = EvidenceState(
         node_id="cd4",
         existence="exist",
-        certainty="confident",
+        resolution="clear",
         metadata={
             "hypothesis_id": "pcp",
             "relation_type": "HAS_LAB_FINDING",
@@ -428,7 +428,7 @@ def test_guarded_lenient_blocks_recent_hypothesis_switch() -> None:
     state.evidence_states["ct"] = EvidenceState(
         node_id="ct",
         existence="exist",
-        certainty="confident",
+        resolution="clear",
         metadata={
             "hypothesis_id": "pcp",
             "relation_type": "HAS_LAB_FINDING",
@@ -438,7 +438,7 @@ def test_guarded_lenient_blocks_recent_hypothesis_switch() -> None:
     state.evidence_states["cd4"] = EvidenceState(
         node_id="cd4",
         existence="exist",
-        certainty="confident",
+        resolution="clear",
         metadata={
             "hypothesis_id": "pcp",
             "relation_type": "HAS_LAB_FINDING",
@@ -470,7 +470,7 @@ def test_guarded_lenient_blocks_pcp_acceptance_with_only_imaging_evidence() -> N
     state.evidence_states["ct"] = EvidenceState(
         node_id="ct",
         existence="exist",
-        certainty="confident",
+        resolution="clear",
         metadata={
             "hypothesis_id": "pcp",
             "relation_type": "HAS_LAB_FINDING",
@@ -492,7 +492,7 @@ def test_guarded_lenient_blocks_pcp_acceptance_with_only_immune_evidence() -> No
     state.evidence_states["cd4"] = EvidenceState(
         node_id="cd4",
         existence="exist",
-        certainty="confident",
+        resolution="clear",
         metadata={
             "hypothesis_id": "pcp",
             "relation_type": "HAS_LAB_FINDING",
@@ -514,7 +514,7 @@ def test_guarded_lenient_blocks_pcp_acceptance_with_imaging_and_oxygenation_only
     state.evidence_states["ct"] = EvidenceState(
         node_id="ct",
         existence="exist",
-        certainty="confident",
+        resolution="clear",
         metadata={
             "hypothesis_id": "pcp",
             "relation_type": "HAS_LAB_FINDING",
@@ -525,7 +525,7 @@ def test_guarded_lenient_blocks_pcp_acceptance_with_imaging_and_oxygenation_only
     state.evidence_states["oxygen"] = EvidenceState(
         node_id="oxygen",
         existence="exist",
-        certainty="confident",
+        resolution="clear",
         metadata={
             "hypothesis_id": "alternative_pneumonia",
             "relation_type": "HAS_LAB_FINDING",
@@ -552,7 +552,7 @@ def test_guarded_lenient_writes_gate_audit_for_blocked_accept_candidate() -> Non
     state.evidence_states["ct"] = EvidenceState(
         node_id="ct",
         existence="exist",
-        certainty="confident",
+        resolution="clear",
         source_turns=[2],
         metadata={
             "hypothesis_id": "pcp",
@@ -593,7 +593,7 @@ def test_guarded_lenient_uses_evidence_tags_for_confirmed_key_evidence() -> None
     state.evidence_states["tspot"] = EvidenceState(
         node_id="tspot",
         existence="exist",
-        certainty="confident",
+        resolution="clear",
         metadata={
             "hypothesis_id": "tb",
             "relation_type": "ASSOCIATED_WITH",

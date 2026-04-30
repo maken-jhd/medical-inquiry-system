@@ -197,12 +197,12 @@ def test_retriever_builds_candidate_evidence_profile_with_statuses() -> None:
     retriever = GraphRetriever(ProfileFakeNeo4jClient())
     state = SessionState(
         session_id="s_profile",
-        slots={"发热": SlotState(node_id="发热", status="true", certainty="certain")},
+        slots={"发热": SlotState(node_id="发热", status="true", resolution="clear")},
         evidence_states={
             "lab_cd4_low": EvidenceState(
                 node_id="lab_cd4_low",
                 existence="non_exist",
-                certainty="confident",
+                resolution="clear",
                 reasoning="患者否认 CD4 很低。",
             )
         },

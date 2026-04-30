@@ -18,9 +18,9 @@ def test_med_extractor_uses_llm_for_long_text() -> None:
             return {
                 "general_info": {"age": 32, "sex": "男"},
                 "clinical_features": [
-                    {"name": "发烧", "normalized_name": "发热", "category": "symptom", "status": "exist", "certainty": "confident"},
-                    {"name": "咳嗽", "normalized_name": "咳嗽", "category": "symptom", "status": "exist", "certainty": "doubt"},
-                    {"name": "艾滋病", "normalized_name": "艾滋病", "category": "risk_factor", "status": "exist", "certainty": "confident"},
+                    {"name": "发烧", "normalized_name": "发热", "category": "symptom", "mention_state": "present"},
+                    {"name": "咳嗽", "normalized_name": "咳嗽", "category": "symptom", "mention_state": "present"},
+                    {"name": "艾滋病", "normalized_name": "艾滋病", "category": "risk_factor", "mention_state": "present"},
                 ],
             }
 

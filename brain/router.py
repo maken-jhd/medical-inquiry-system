@@ -19,7 +19,7 @@ from .types import (
 class RouterConfig:
     """保存 A4 路由阶段的基础策略开关。"""
 
-    prefer_reverify_on_doubt: bool = True
+    prefer_reverify_on_hedged: bool = True
     fallback_fail_count: int = 2
 
 
@@ -40,7 +40,7 @@ class ReasoningRouter:
 
         return RouteDecision(stage="A3", reason="已有假设，可进入 A3 选择验证动作。")
 
-    # 在 A4 演绎分析后，根据存在性与确定性做阶段路由。
+    # 在 A4 演绎分析后，根据存在性与回答清晰度做阶段路由。
     def route_after_question_answer(
         self,
         deductive_result: A4DeductiveResult,
@@ -68,13 +68,13 @@ class ReasoningRouter:
         contradicted_feature_name = action.target_node_name if action is not None else None
 
         # 明确阳性：支持当前主假设；若 hypothesis margin 已足够大，可以给出 STOP 倾向。
-        if deductive_result.existence == "exist" and deductive_result.certainty == "confident":
+        if deductive_result.existence == "exist" and deductive_result.resolution == "clear":
             next_stage = "STOP" if self._hypothesis_margin_is_sufficient(session_state) else "A3"
             return DeductiveDecision(
                 existence=deductive_result.existence,
-                certainty=deductive_result.certainty,
+                resolution=deductive_result.resolution,
                 decision_type="confirm_hypothesis",
-                diagnostic_rationale="验证结果为存在且确信，支持当前假设。",
+                diagnostic_rationale="验证结果为明确存在，支持当前假设。",
                 next_stage=next_stage,
                 should_terminate_current_path=next_stage == "STOP",
                 should_spawn_alternative_hypotheses=False,
@@ -88,12 +88,12 @@ class ReasoningRouter:
             )
 
         # 明确阴性：当前验证点与主假设直接矛盾，优先切回 A2 重整候选。
-        if deductive_result.existence == "non_exist" and deductive_result.certainty == "confident":
+        if deductive_result.existence == "non_exist" and deductive_result.resolution == "clear":
             return DeductiveDecision(
                 existence=deductive_result.existence,
-                certainty=deductive_result.certainty,
+                resolution=deductive_result.resolution,
                 decision_type="exclude_hypothesis",
-                contradiction_explanation="验证结果为不存在且确信，该证据与当前主假设直接矛盾，需要切回 A2 重整假设。",
+                contradiction_explanation="验证结果为明确不存在，该证据与当前主假设直接矛盾，需要切回 A2 重整假设。",
                 diagnostic_rationale="关键验证点被明确否定。",
                 next_stage="A2",
                 should_terminate_current_path=False,
@@ -109,13 +109,13 @@ class ReasoningRouter:
             )
 
         # 模糊阳性：倾向继续 A3 复核，而不是过早切回 A2。
-        if deductive_result.existence == "exist" and deductive_result.certainty == "doubt":
+        if deductive_result.existence == "exist" and deductive_result.resolution == "hedged":
             return DeductiveDecision(
                 existence=deductive_result.existence,
-                certainty=deductive_result.certainty,
+                resolution=deductive_result.resolution,
                 decision_type="reverify_hypothesis",
-                diagnostic_rationale="验证点疑似存在，但仍需继续细化确认。",
-                next_stage="A3" if self.config.prefer_reverify_on_doubt else "A2",
+                diagnostic_rationale="验证点倾向存在，但回答仍带保留，需继续细化确认。",
+                next_stage="A3" if self.config.prefer_reverify_on_hedged else "A2",
                 should_terminate_current_path=False,
                 should_spawn_alternative_hypotheses=False,
                 metadata={
@@ -127,10 +127,10 @@ class ReasoningRouter:
             )
 
         # 模糊阴性：先保留矛盾分析空间，避免把轻症/表达模糊误当成强反证。
-        if deductive_result.existence == "non_exist" and deductive_result.certainty == "doubt":
+        if deductive_result.existence == "non_exist" and deductive_result.resolution == "hedged":
             return DeductiveDecision(
                 existence=deductive_result.existence,
-                certainty=deductive_result.certainty,
+                resolution=deductive_result.resolution,
                 decision_type="need_more_information",
                 contradiction_explanation=(
                     f"“{contradicted_feature_name or '当前验证点'}”目前呈现弱否定。"
@@ -153,7 +153,7 @@ class ReasoningRouter:
         # 其余情况统一视作“当前证据不足以维持原路径”，回上游重新整理。
         return DeductiveDecision(
             existence=deductive_result.existence,
-            certainty=deductive_result.certainty,
+            resolution=deductive_result.resolution,
             decision_type="switch_hypothesis",
             diagnostic_rationale="当前证据不足以支持既有假设，建议回到上游重新整理线索。",
             next_stage="A1",

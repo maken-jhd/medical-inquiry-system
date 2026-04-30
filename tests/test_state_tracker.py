@@ -14,7 +14,7 @@ def test_state_tracker_sets_and_reads_slot() -> None:
         SlotUpdate(
             node_id="symptom_fever",
             status="true",
-            certainty="uncertain",
+            resolution="hedged",
             evidence="好像有点发热",
             turn_index=1,
         ),
@@ -24,7 +24,7 @@ def test_state_tracker_sets_and_reads_slot() -> None:
 
     assert slot is not None
     assert slot.status == "true"
-    assert slot.certainty == "uncertain"
+    assert slot.resolution == "hedged"
     assert slot.evidence == ["好像有点发热"]
     assert slot.source_turns == [1]
 
