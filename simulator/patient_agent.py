@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from brain.llm_client import LlmClient
+from brain.llm_client import LlmClient, PatientSlotSemanticMatchDraft
 from .case_schema import SlotTruth, VirtualPatientCase
 
 
@@ -77,7 +77,20 @@ class VirtualPatientAgent:
         question_text: str,
         case: VirtualPatientCase,
     ) -> PatientReply:
+        exam_reply = self._render_exam_context_reply(question_node_id, question_text, case)
+
+        if exam_reply is not None:
+            return exam_reply
+
         truth = self._resolve_truth(question_node_id, question_text, case)
+        no_match_answer: str | None = None
+
+        if truth is None:
+            truth, no_match_answer = self._try_resolve_truth_with_llm(
+                question_node_id,
+                question_text,
+                case,
+            )
 
         if (
             truth is not None
@@ -87,6 +100,8 @@ class VirtualPatientAgent:
             return self._render_hidden_reply(question_text, truth, case)
 
         if truth is None:
+            if no_match_answer:
+                return PatientReply(no_match_answer, confidence=0.5)
             return self._render_unknown_reply(question_text, case)
 
         return self._render_truth(question_text, truth, case.behavior_style)
@@ -147,6 +162,154 @@ class VirtualPatientAgent:
                 return truth
 
         return None
+
+    # 对检查上下文动作直接汇总病例里的检查真值，避免虚拟病人把已知检查答成“不记得”。
+    def _render_exam_context_reply(
+        self,
+        question_node_id: str,
+        question_text: str,
+        case: VirtualPatientCase,
+    ) -> PatientReply | None:
+        prefix = "__exam_context__::"
+
+        if not question_node_id.startswith(prefix):
+            return None
+
+        exam_kind = question_node_id.removeprefix(prefix).strip() or "general"
+        truths = self._collect_exam_context_truths(exam_kind, case)
+
+        if len(truths) == 0:
+            return self._render_unknown_reply(question_text, case)
+
+        positive_truths = [truth for truth in truths if self._truth_is_positive(truth)]
+        negative_truths = [truth for truth in truths if not self._truth_is_positive(truth)]
+
+        if len(positive_truths) > 0:
+            selected = positive_truths[:3]
+            names = "、".join(self._display_name(truth) for truth in selected)
+            return PatientReply(
+                answer_text=f"做过，结果提示{names}。",
+                revealed_slot_id=selected[0].node_id,
+            )
+
+        selected = negative_truths[:3]
+        names = "、".join(self._display_name(truth) for truth in selected)
+        return PatientReply(
+            answer_text=f"做过相关检查，没有提示{names}。",
+            revealed_slot_id=selected[0].node_id,
+        )
+
+    # 按检查类型收集病例真值；general 会汇总所有检查、影像和病原学槽位。
+    def _collect_exam_context_truths(self, exam_kind: str, case: VirtualPatientCase) -> list[SlotTruth]:
+        allowed_groups_by_kind = {
+            "general": {"lab", "imaging", "pathogen"},
+            "lab": {"lab"},
+            "imaging": {"imaging"},
+            "pathogen": {"pathogen"},
+        }
+        allowed_groups = allowed_groups_by_kind.get(exam_kind, {exam_kind})
+        values: list[SlotTruth] = []
+
+        for truth in case.slot_truth_map.values():
+            if (
+                truth.node_id in case.hidden_slots
+                and case.behavior_style in {"guarded", "concealing"}
+            ):
+                continue
+
+            if self._truth_exam_group(truth) not in allowed_groups:
+                continue
+
+            values.append(truth)
+
+        return values
+
+    # 兼容病例骨架 group 缺失时用节点标签兜底识别检查类别。
+    def _truth_exam_group(self, truth: SlotTruth) -> str:
+        group = str(truth.group or "").strip()
+
+        if group in {"lab", "imaging", "pathogen"}:
+            return group
+
+        if truth.node_label in {"LabFinding", "LabTest"}:
+            return "lab"
+
+        if truth.node_label == "ImagingFinding":
+            return "imaging"
+
+        if truth.node_label == "Pathogen":
+            return "pathogen"
+
+        return group
+
+    def _truth_is_positive(self, truth: SlotTruth) -> bool:
+        if isinstance(truth.value, bool):
+            return truth.value
+
+        value_text = str(truth.value).strip().lower()
+        negative_values = {
+            "",
+            "false",
+            "0",
+            "none",
+            "null",
+            "negative",
+            "absent",
+            "阴性",
+            "未见",
+            "未检出",
+            "无",
+            "否",
+            "正常",
+        }
+        return value_text not in negative_values
+
+    # 精确匹配失败时，允许 LLM 在病例已有槽位候选内做一次语义匹配。
+    def _try_resolve_truth_with_llm(
+        self,
+        question_node_id: str,
+        question_text: str,
+        case: VirtualPatientCase,
+    ) -> tuple[SlotTruth | None, str | None]:
+        if not self._llm_available() or len(case.slot_truth_map) == 0:
+            return None, None
+
+        candidate_slots = [
+            {
+                "node_id": truth.node_id,
+                "name": self._display_name(truth),
+                "group": truth.group,
+                "node_label": truth.node_label,
+                "aliases": list(truth.aliases),
+                "value_type": type(truth.value).__name__,
+            }
+            for truth in case.slot_truth_map.values()
+        ]
+
+        try:
+            draft = self.llm_client.run_structured_prompt(
+                "patient_slot_semantic_match",
+                {
+                    "question_node_id": question_node_id,
+                    "question_text": question_text,
+                    "candidate_slots": candidate_slots,
+                },
+                PatientSlotSemanticMatchDraft,
+            )
+        except Exception:
+            return None, None
+
+        if isinstance(draft, dict):
+            matched_node_id = str(draft.get("matched_node_id") or "").strip()
+            no_match_answer = str(draft.get("no_match_answer") or "").strip()
+        else:
+            matched_node_id = str(getattr(draft, "matched_node_id", "") or "").strip()
+            no_match_answer = str(getattr(draft, "no_match_answer", "") or "").strip()
+
+        if len(matched_node_id) > 0 and matched_node_id in case.slot_truth_map:
+            return case.slot_truth_map[matched_node_id], None
+
+        return None, no_match_answer or "没有相关情况。"
 
     # 将槽位真值渲染成自然语言形式的回答。
     def _render_truth(self, question_text: str, truth: SlotTruth, behavior_style: str) -> PatientReply:

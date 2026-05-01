@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from typing import Any, Type
 
 from openai import OpenAI
@@ -16,6 +16,15 @@ from .errors import (
     LlmTimeoutError,
     LlmUnavailableError,
 )
+
+
+@dataclass
+class PatientSlotSemanticMatchDraft:
+    """表示虚拟病人槽位语义匹配 prompt 的结构化输出。"""
+
+    matched_node_id: str = ""
+    no_match_answer: str = ""
+    reasoning: str = ""
 
 
 class LlmClient:
@@ -201,11 +210,28 @@ class LlmClient:
             "patient_answer_generation": (
                 "你现在扮演就诊患者。"
                 "请根据给定 question_text、answer_mode 和 matched_slot，生成一句简短、自然、口语化的中文回答。"
-                "如果 answer_mode=known，只能围绕 matched_slot 作答，不能扩写成新的医学事实；"
+                "如果 answer_mode=known，允许根据 question_text 与 matched_slot 的名称或别名之间的临床语义等价关系作答；"
+                "例如 question_text 问 HIV/AIDS，而 matched_slot 是 HIV感染时，可以按该槽位真值回答。"
+                "但只能表达 matched_slot.value 能支持的内容，不得引入病例槽位外的新事实，"
+                "也不得补充 matched_slot 之外的症状、检查、诊断、病史或治疗。"
                 "如果 answer_mode=hidden，要给出回避式表达；"
                 "如果 answer_mode=unknown，要表达不清楚、没注意或不确定。"
                 "必须严格输出 JSON object，且只包含字段：answer_text、reasoning。"
                 "answer_text 长度不超过 35 字。"
+            ),
+            "patient_slot_semantic_match": (
+                "你现在是虚拟病人的病例槽位匹配器。"
+                "任务只是在给定 candidate_slots 内判断 question_text / question_node_id "
+                "是否与某个病例槽位存在临床语义等价关系。"
+                "必须严格执行候选内匹配约束：matched_node_id 只能取 candidate_slots 中已有的 node_id，"
+                "不得输出候选外实体，不得凭医学知识新增病例槽位，也不要做诊断推断。"
+                "允许进行医学语义等价匹配，例如 HIV/AIDS ~= HIV感染/HIV感染者、"
+                "ART ~= 抗逆转录病毒治疗/抗病毒治疗、活动后气促 ~= 气促/呼吸困难、抽搐 ~= 癫痫。"
+                "如果候选中只有宽泛相关或弱相关项，不要强行匹配。"
+                "必须严格输出 JSON object，且只包含字段：matched_node_id、no_match_answer、reasoning。"
+                "有匹配时 matched_node_id 填候选 node_id，no_match_answer 为空字符串。"
+                "没有合适候选时 matched_node_id 必须为空字符串，"
+                "no_match_answer 填一句简短明确否定，例如“没有这个症状。”或“没有相关情况。”。"
             ),
             "a2_hypothesis_generation": (
                 "请根据患者一般信息、临床特征和图谱候选疾病生成主假设与备选假设。"

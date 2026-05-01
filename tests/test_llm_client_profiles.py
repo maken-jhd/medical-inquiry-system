@@ -31,6 +31,41 @@ def test_trajectory_verifier_prompt_requires_accept_reason(monkeypatch) -> None:
     assert "trajectory_stable" in prompt
 
 
+def test_patient_slot_semantic_match_prompt_constrains_candidate_matching() -> None:
+    client = LlmClient(api_key="")
+    prompt = client._build_prompt(
+        "patient_slot_semantic_match",
+        {
+            "question_text": "有没有 HIV/AIDS？",
+            "question_node_id": "kg_node_hiv_aids",
+            "candidate_slots": [{"node_id": "hiv", "name": "HIV感染"}],
+        },
+    )
+
+    assert "candidate_slots" in prompt
+    assert "候选内匹配约束" in prompt
+    assert "matched_node_id 只能取 candidate_slots 中已有的 node_id" in prompt
+    assert "HIV/AIDS ~= HIV感染/HIV感染者" in prompt
+    assert "ART ~= 抗逆转录病毒治疗/抗病毒治疗" in prompt
+    assert "没有合适候选时 matched_node_id 必须为空字符串" in prompt
+
+
+def test_patient_answer_generation_prompt_blocks_out_of_case_facts() -> None:
+    client = LlmClient(api_key="")
+    prompt = client._build_prompt(
+        "patient_answer_generation",
+        {
+            "question_text": "有没有 HIV/AIDS？",
+            "answer_mode": "known",
+            "matched_slot": {"node_id": "hiv", "name": "HIV感染", "value": True},
+        },
+    )
+
+    assert "临床语义等价关系" in prompt
+    assert "不得引入病例槽位外的新事实" in prompt
+    assert "不得补充 matched_slot 之外的症状、检查、诊断、病史或治疗" in prompt
+
+
 def test_llm_client_reads_timeout_from_environment(monkeypatch) -> None:
     monkeypatch.setenv("OPENAI_TIMEOUT_SECONDS", "12")
     client = LlmClient(api_key="")

@@ -38,6 +38,8 @@
 - [patient_agent.py](/Users/loki/Workspace/GraduationDesign/simulator/patient_agent.py)
   - 负责模拟“虚拟病人如何回答问题”。
   - 当前已支持根据病例骨架中的 opening slots 生成首轮开场，并在问答中遵循“未被问到不主动透露、敏感信息可回避、未知项不乱答”的行为规则。
+  - 当前已支持 `__exam_context__::general/lab/imaging/pathogen` 检查上下文回答：`general` 会汇总 lab / imaging / pathogen 槽位，具体类型只汇总对应槽位；优先回答最多 3 条阳性检查结果，没有阳性但有阴性时回答最多 3 条阴性结果，无相关检查槽位时才回到 unknown。
+  - 当前在精确匹配失败且配置了可用 LLM 时，会调用 `patient_slot_semantic_match`，只允许在病例已有 `candidate_slots` 内做医学语义等价匹配；匹配成功后按该槽位真值回答，匹配失败时给出简短明确否定且不揭示槽位。
   - 在配置了可用 LLM 时，会使用受约束的 LLM 生成更自然的患者表达；否则退回规则模板。
 
 ### 3. 自动对战与评测
@@ -69,7 +71,7 @@
 - 病例结构已定义并支持真实图谱 node id 对齐
 - 已具备一批可直接跑的 seed cases
 - 已具备基于疾病审计结果的图谱驱动病例骨架生成器
-- 病人代理已支持骨架驱动开场和受约束回答
+- 病人代理已支持骨架驱动开场、检查上下文汇总回答和候选内语义匹配受约束回答
 - 自动回放和基础评测已经能批量跑通
 - 当前图谱驱动病例正式输出已固定落盘到 `test_outputs/simulator_cases/graph_cases_20260426_final/`，并补充了固定随机种子的四类各 5 条抽样结果，便于人工复核
 - 路径缓存仍然是后续待完成模块

@@ -10,6 +10,50 @@
 - `phase2_execution_checklist.md` 更偏“路线设计与待办清单”
 - 本文更偏“已经发生过哪些阶段性变化、分别解决了什么问题”
 
+## 近期更新：2026-05-01 虚拟病人检查上下文与候选内语义匹配
+
+### 本次目标
+
+- 只增强虚拟病人侧可回答性，不放宽 `brain` 的 stop / verifier
+- 不把 HIV/AIDS、ART、气促、抽搐等医学同义词硬编码进诊断系统或 KG entity linker
+- 让病例骨架里已经存在的检查、病原学和语义等价槽位能被虚拟病人稳定回答出来
+
+### 本次改动
+
+- [simulator/patient_agent.py](/Users/loki/Workspace/GraduationDesign/simulator/patient_agent.py)
+  - 新增 `__exam_context__::general/lab/imaging/pathogen` 专门回答逻辑
+  - `general` 汇总 `lab / imaging / pathogen` 槽位，具体类型只汇总对应 group
+  - 有阳性检查真值时优先回答最多 3 条“做过，结果提示 XXX”
+  - 只有阴性检查真值时回答最多 3 条“做过相关检查，没有提示 XXX”
+  - 无相关检查槽位时回到 unknown，不把检查上下文误判成普通症状否定
+  - `_resolve_truth()` 保留原有精确匹配；精确匹配失败且 `use_llm=True` 时，新增 LLM 候选内语义匹配分支
+  - 语义匹配只允许返回病例 `candidate_slots` 中已有的 `node_id`；匹配成功后按该槽位真值回答，匹配失败时给出简短明确否定且不揭示槽位
+- [brain/llm_client.py](/Users/loki/Workspace/GraduationDesign/brain/llm_client.py)
+  - 新增 `patient_slot_semantic_match` prompt 与轻量输出 schema
+  - prompt 明确约束候选内匹配，并给出 `HIV/AIDS ~= HIV感染/HIV感染者`、`ART ~= 抗逆转录病毒治疗/抗病毒治疗`、`活动后气促 ~= 气促/呼吸困难`、`抽搐 ~= 癫痫` 等语义等价示例
+  - 调整 `patient_answer_generation` prompt：允许围绕 matched slot 做临床语义等价回答，但禁止引入病例槽位外事实
+- [tests/test_patient_agent.py](/Users/loki/Workspace/GraduationDesign/tests/test_patient_agent.py)
+  - 补充检查上下文阳性汇总、阴性汇总、LLM 语义命中、LLM no-match 和 `use_llm=False` fallback 测试
+- [tests/test_llm_client_profiles.py](/Users/loki/Workspace/GraduationDesign/tests/test_llm_client_profiles.py)
+  - 补充语义匹配 prompt 约束与病例外事实禁止 prompt 测试
+- [simulator/README.md](/Users/loki/Workspace/GraduationDesign/simulator/README.md)
+  - 同步记录虚拟病人检查上下文与候选内语义匹配规则
+
+### 影响范围
+
+- 影响虚拟病人回答生成与相关 LLM prompt
+- 不改变 `brain` 的 KG 检索、entity linker、stop rules、trajectory verifier 或最终诊断接受规则
+- 对 replay 的预期影响：
+  - `__exam_context__::*` 提问更容易揭示病例骨架中已有的检查支持证据
+  - HIV/AIDS、ART、气促、抽搐等问法与病例槽位名称不完全一致时，虚拟病人可在候选槽位内回答，而不是机械“不确定”
+  - 语义匹配失败时不会污染 revealed slots
+
+### 验证结果
+
+- 已执行针对性回归：
+  - `conda run -n GraduationDesign python -m pytest tests/test_patient_agent.py tests/test_llm_client_profiles.py -q`
+- 结果 `16 passed`
+
 ## 近期更新：2026-04-30 `ClinicalFeatureItem.status` 回归修复与 batch 单病例异常保护
 
 ### 本次目标
