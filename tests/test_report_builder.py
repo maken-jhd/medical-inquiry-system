@@ -1,8 +1,8 @@
-"""测试最终推理报告会输出解释性字段。"""
+"""测试最终推理报告会输出解释性字段与统一 mention 语义。"""
 
 from brain.report_builder import ReportBuilder
 from brain.search_tree import SearchTree
-from brain.types import FinalAnswerScore, MctsAction, ReasoningTrajectory, SearchResult, SessionState, StopDecision
+from brain.types import FinalAnswerScore, MctsAction, MentionContextItem, ReasoningTrajectory, SearchResult, SessionState, SlotState, StopDecision
 from brain.types import TreeNode
 
 
@@ -198,3 +198,33 @@ def test_report_builder_strips_heavy_runtime_metadata_from_final_report() -> Non
     assert metadata["last_search_result_summary"]["trajectory_count"] == 1
     assert metadata["last_search_result_summary"]["answer_group_score_count"] == 1
     assert metadata["last_guarded_acceptance_decision"]["accepted"] is True
+
+
+# 验证最终报告会显式暴露 confirmed slot polarity 与会话级 mention_context。
+def test_report_builder_exposes_mention_context_and_slot_polarity() -> None:
+    builder = ReportBuilder()
+    state = SessionState(session_id="s4")
+    state.slots["symptom_cough"] = SlotState(
+        node_id="symptom_cough",
+        status="true",
+        polarity="present",
+        resolution="clear",
+        evidence=["最近一直咳嗽"],
+    )
+    state.mention_context["干咳"] = MentionContextItem(
+        normalized_name="干咳",
+        display_name="咳嗽",
+        node_id="symptom_cough",
+        polarity="present",
+        evidence=["最近一直咳嗽"],
+        source_turns=[1],
+    )
+
+    report = builder.build_final_report(
+        state,
+        StopDecision(should_stop=False, reason="insufficient_evidence", confidence=0.2),
+    )
+
+    assert report["confirmed_slots"][0]["polarity"] == "present"
+    assert report["mention_context"][0]["normalized_name"] == "干咳"
+    assert report["mention_context"][0]["polarity"] == "present"

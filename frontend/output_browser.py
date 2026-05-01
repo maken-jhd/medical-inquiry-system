@@ -13,8 +13,8 @@ from brain.action_builder import ActionBuilder
 from brain.types import MctsAction
 from frontend.ui_adapter import (
     normalize_backend_turn,
-    translate_existence,
     translate_guarded_block,
+    translate_polarity,
     translate_question_type,
     translate_reject_reason,
     translate_repair_mode,
@@ -37,7 +37,8 @@ RUN_FILE_KIND_MAP = {
     "focused_repair_summary.jsonl": "focused repair cases",
     "ablation_summary.jsonl": "ablation cases",
     "replay_results.jsonl": "replay cases",
-    "a4_evidence_audit.jsonl": "A4 evidence audit",
+    "pending_action_audit.jsonl": "Pending action audit",
+    "a4_evidence_audit.jsonl": "Pending action audit",
     "guarded_gate_audit.jsonl": "guarded gate audit",
 }
 
@@ -259,14 +260,14 @@ def _focused_turn_to_ui(turn: dict[str, Any], record: dict[str, Any], is_last: b
     selected_action = _as_dict(turn.get("selected_action"))
     root_action = _as_dict(turn.get("root_best_action"))
     repair_action = _as_dict(turn.get("repair_selected_action"))
-    a4_audit = _as_dict(turn.get("a4_evidence_audit"))
+    pending_action_audit = _as_dict(turn.get("pending_action_audit") or turn.get("a4_evidence_audit"))
     best_answer_name = turn.get("best_answer_name") or record.get("final_best_answer_name", "")
     stop_reason = turn.get("stop_reason") or (record.get("final_stop_reason") if is_last else "")
     is_final = bool(stop_reason)
 
     return {
         "turn_index": turn.get("turn_index", 0),
-        "patient_text": turn.get("answer_text") or a4_audit.get("patient_answer", ""),
+        "patient_text": turn.get("answer_text") or pending_action_audit.get("patient_answer", ""),
         "system_question": _question_from_action(selected_action),
         "chat_order": "system_then_patient",
         "is_final": is_final,
@@ -305,7 +306,10 @@ def _focused_turn_to_ui(turn: dict[str, Any], record: dict[str, Any], is_last: b
             "recommended_match_score": None,
             "discriminative_gain": None,
         },
-        "a4": _a4_from_audit(a4_audit, turn.get("route_after_a4_stage")),
+        "pending_action_result": _pending_action_from_audit(
+            pending_action_audit,
+            turn.get("route_after_pending_action_stage") or turn.get("route_after_a4_stage"),
+        ),
         "search": {
             "rollouts": "实验摘要",
             "tree_node_count": "—",
@@ -363,9 +367,9 @@ def _replay_result_turn_to_ui(turn: dict[str, Any], record: dict[str, Any], is_l
             "is_repair_override": False,
             "evidence_tags": [],
         },
-        "a4": {
+        "pending_action_result": {
             "has_result": bool(turn.get("answer_text")),
-            "existence_label": "见患者回答",
+            "polarity_label": "见患者回答",
             "resolution_label": "未结构化保存",
             "reasoning": turn.get("answer_text", ""),
             "route_label": translate_stage(turn.get("stage")),
@@ -413,11 +417,11 @@ def _case_summary_to_ui_turn(record: dict[str, Any]) -> dict[str, Any]:
             "question_type_label": "未保存",
             "reasoning": "该记录未保存下一问细节。",
         },
-        "a4": {
+        "pending_action_result": {
             "has_result": False,
-            "existence_label": "未保存",
+            "polarity_label": "未保存",
             "resolution_label": "未保存",
-            "reasoning": "该记录未保存 A4 逐轮解释。",
+            "reasoning": "该记录未保存逐轮回答解释。",
             "route_label": "未保存",
         },
         "search": {
@@ -443,21 +447,21 @@ def _case_summary_to_ui_turn(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _a4_from_audit(audit: dict[str, Any], route_stage: Any) -> dict[str, Any]:
+def _pending_action_from_audit(audit: dict[str, Any], route_stage: Any) -> dict[str, Any]:
     if not audit:
         return {
             "has_result": False,
-            "existence_label": "未保存",
+            "polarity_label": "未保存",
             "resolution_label": "未保存",
-            "reasoning": "该轮摘要未记录 A4 evidence audit。",
+            "reasoning": "该轮摘要未记录 pending action audit。",
             "route_label": translate_stage(route_stage),
         }
     return {
         "has_result": True,
-        "existence": audit.get("existence"),
-        "existence_label": translate_existence(audit.get("existence")),
-        "resolution": audit.get("resolution", audit.get("certainty")),
-        "resolution_label": translate_resolution(audit.get("resolution", audit.get("certainty"))),
+        "polarity": audit.get("polarity"),
+        "polarity_label": translate_polarity(audit.get("polarity")),
+        "resolution": audit.get("resolution"),
+        "resolution_label": translate_resolution(audit.get("resolution")),
         "reasoning": audit.get("reasoning", ""),
         "supporting_span": audit.get("supporting_span", ""),
         "negation_span": audit.get("negation_span", ""),
@@ -706,7 +710,7 @@ def _run_detail_rank(file_kinds: tuple[str, ...]) -> int:
         return 3
     if "ablation cases" in file_kinds:
         return 2
-    if "A4 evidence audit" in file_kinds or "guarded gate audit" in file_kinds:
+    if "Pending action audit" in file_kinds or "guarded gate audit" in file_kinds:
         return 1
     return 0
 

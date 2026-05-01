@@ -8,7 +8,7 @@ from typing import Iterable, List
 
 from .normalization import NameNormalizer
 from .neo4j_client import Neo4jClient
-from .types import ClinicalFeatureItem, LinkedEntity
+from .types import ClinicalFeatureItem, LinkedEntity, MentionItem
 
 
 @dataclass
@@ -52,6 +52,10 @@ class EntityLinker:
     def link_clinical_features(self, features: Iterable[ClinicalFeatureItem]) -> List[LinkedEntity]:
         mentions = [item.normalized_name for item in features if item.mention_state == "present"]
         return self.link_mentions(mentions)
+
+    # 对统一提及项逐条做实体链接；不过滤 polarity，便于后续消费负向和不确定线索。
+    def link_mention_items(self, mentions: Iterable[MentionItem]) -> List[LinkedEntity]:
+        return [self._link_single_mention(item.normalized_name) for item in mentions if len(item.normalized_name.strip()) > 0]
 
     # 判断当前链接结果是否整体可信。
     def has_trusted_entities(self, linked_entities: Iterable[LinkedEntity]) -> bool:

@@ -19,6 +19,12 @@ EXISTENCE_LABELS = {
     "unknown": "不确定",
 }
 
+POLARITY_LABELS = {
+    "present": "已提到 / 存在",
+    "absent": "明确否定",
+    "unclear": "不清楚",
+}
+
 RESOLUTION_LABELS = {
     "clear": "明确",
     "hedged": "保留",
@@ -33,7 +39,7 @@ STAGE_LABELS = {
     "A1": "A1 重新抽取线索",
     "A2": "A2 重新排序候选诊断",
     "A3": "A3 继续验证证据",
-    "A4": "A4 演绎分析",
+    "PENDING_ACTION": "上一轮动作解释",
     "STOP": "建议停止并输出结论",
     "FALLBACK": "兜底追问",
 }
@@ -122,9 +128,9 @@ def normalize_backend_turn(result: dict[str, Any]) -> dict[str, Any]:
     final_report = _as_dict(result.get("final_report"))
     pending_action = _as_dict(result.get("pending_action"))
     a3 = _as_dict(result.get("a3"))
-    a4 = _as_dict(result.get("a4"))
-    route_after_a4 = _as_dict(result.get("route_after_a4"))
-    deductive_decision = _as_dict(result.get("deductive_decision"))
+    pending_action_result = _as_dict(result.get("pending_action_result"))
+    route_after_pending_action = _as_dict(result.get("route_after_pending_action"))
+    pending_action_decision = _as_dict(result.get("pending_action_decision"))
     selected_action = _as_dict(search_report.get("selected_action") or pending_action)
     root_best_action = _as_dict(search_report.get("root_best_action"))
     repair_action = _as_dict(search_report.get("repair_selected_action"))
@@ -154,7 +160,12 @@ def normalize_backend_turn(result: dict[str, Any]) -> dict[str, Any]:
             _as_list(result.get("a2_evidence_profiles")),
         ),
         "a3": _adapt_a3(a3, selected_action, root_best_action, repair_action, repair_context),
-        "a4": _adapt_a4(a4, route_after_a4, deductive_decision, _as_dict(result.get("evidence_audit"))),
+        "pending_action_result": _adapt_pending_action(
+            pending_action_result,
+            route_after_pending_action,
+            pending_action_decision,
+            _as_dict(result.get("pending_action_audit")),
+        ),
         "search": _adapt_search(search_report, best_score),
         "safety": _adapt_safety(search_report, best_score, repair_context),
         "raw": result,
@@ -181,7 +192,7 @@ def _normalize_demo_turn(turn: dict[str, Any]) -> dict[str, Any]:
             "question_type_label": a3.get("question_type_label")
             or translate_question_type(a3.get("question_type")),
         },
-        "a4": _as_dict(turn.get("a4")),
+        "pending_action_result": _as_dict(turn.get("pending_action_result") or turn.get("a4")),
         "search": search,
         "safety": {
             **safety,
@@ -198,6 +209,10 @@ def _normalize_demo_turn(turn: dict[str, Any]) -> dict[str, Any]:
 
 def translate_existence(value: Any) -> str:
     return EXISTENCE_LABELS.get(value, str(value or "未知"))
+
+
+def translate_polarity(value: Any) -> str:
+    return POLARITY_LABELS.get(value, str(value or "未知"))
 
 
 def translate_resolution(value: Any) -> str:
@@ -378,37 +393,39 @@ def _adapt_a3(
     }
 
 
-def _adapt_a4(
-    a4: dict[str, Any],
-    route_after_a4: dict[str, Any],
-    deductive_decision: dict[str, Any],
-    evidence_audit: dict[str, Any],
+def _adapt_pending_action(
+    pending_action_result: dict[str, Any],
+    route_after_pending_action: dict[str, Any],
+    pending_action_decision: dict[str, Any],
+    pending_action_audit: dict[str, Any],
 ) -> dict[str, Any]:
-    if not a4:
+    if not pending_action_result:
         return {
             "has_result": False,
-            "existence_label": "暂无上一轮回答",
+            "polarity_label": "暂无上一轮回答",
             "resolution_label": "暂无",
-            "reasoning": "第一轮尚未有待验证动作，因此没有 A4 演绎结果。",
-            "route_label": translate_stage(route_after_a4.get("stage")),
+            "reasoning": "第一轮尚未有待验证动作，因此没有上一轮动作解释结果。",
+            "route_label": translate_stage(route_after_pending_action.get("stage")),
         }
 
     return {
         "has_result": True,
-        "existence": a4.get("existence"),
-        "existence_label": translate_existence(a4.get("existence")),
-        "resolution": a4.get("resolution", a4.get("certainty")),
-        "resolution_label": translate_resolution(a4.get("resolution", a4.get("certainty"))),
-        "reasoning": a4.get("reasoning", ""),
-        "supporting_span": a4.get("supporting_span", ""),
-        "negation_span": a4.get("negation_span", ""),
-        "uncertain_span": a4.get("uncertain_span", ""),
-        "route_stage": route_after_a4.get("stage") or deductive_decision.get("next_stage"),
-        "route_label": translate_stage(route_after_a4.get("stage") or deductive_decision.get("next_stage")),
-        "decision_type": deductive_decision.get("decision_type", ""),
-        "evidence_families": evidence_audit.get("evidence_families", []),
-        "entered_confirmed_family": evidence_audit.get("entered_confirmed_family", False),
-        "provisional_family_candidate": evidence_audit.get("provisional_family_candidate", False),
+        "polarity": pending_action_result.get("polarity"),
+        "polarity_label": translate_polarity(pending_action_result.get("polarity")),
+        "resolution": pending_action_result.get("resolution"),
+        "resolution_label": translate_resolution(pending_action_result.get("resolution")),
+        "reasoning": pending_action_result.get("reasoning", ""),
+        "supporting_span": pending_action_result.get("supporting_span", ""),
+        "negation_span": pending_action_result.get("negation_span", ""),
+        "uncertain_span": pending_action_result.get("uncertain_span", ""),
+        "route_stage": route_after_pending_action.get("stage") or pending_action_decision.get("next_stage"),
+        "route_label": translate_stage(
+            route_after_pending_action.get("stage") or pending_action_decision.get("next_stage")
+        ),
+        "decision_type": pending_action_decision.get("decision_type", ""),
+        "evidence_families": pending_action_audit.get("evidence_families", []),
+        "entered_confirmed_family": pending_action_audit.get("entered_confirmed_family", False),
+        "provisional_family_candidate": pending_action_audit.get("provisional_family_candidate", False),
     }
 
 

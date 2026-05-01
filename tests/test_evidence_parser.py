@@ -1,4 +1,4 @@
-"""测试 EvidenceParser 在 LLM-first 模式下的 A1 / A4 / exam_context 行为。"""
+"""测试 EvidenceParser 在 LLM-first 模式下的 A1 / pending-action / exam_context 行为。"""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ def test_a1_raises_when_llm_returns_no_key_features() -> None:
         def run_structured_prompt(self, prompt_name: str, variables: dict, schema):
             _ = prompt_name, variables, schema
             return {
-                "key_features": [],
+                "mentions": [],
                 "reasoning_summary": "LLM 未提取到核心线索。",
             }
 
@@ -35,9 +35,9 @@ def test_a1_normalizes_llm_feature_names() -> None:
         def run_structured_prompt(self, prompt_name: str, variables: dict, schema):
             _ = prompt_name, variables, schema
             return {
-                "key_features": [
-                    {"name": "咳嗽", "normalized_name": "咳嗽", "category": "symptom"},
-                    {"name": "艾滋病", "normalized_name": "艾滋病", "category": "risk_factor"},
+                "mentions": [
+                    {"name": "咳嗽", "polarity": "present", "evidence_span": "最近咳嗽"},
+                    {"name": "艾滋病", "polarity": "present", "evidence_span": "担心艾滋病"},
                 ],
                 "selection_decision": "selected",
                 "reasoning_summary": "已提取关键线索。",
@@ -51,21 +51,20 @@ def test_a1_normalizes_llm_feature_names() -> None:
     assert "HIV感染" in feature_names
 
 
-def test_a4_long_answer_uses_llm_target_interpretation() -> None:
+def test_pending_action_result_uses_turn_interpreter() -> None:
     class FakeLlmClient:
         def is_available(self) -> bool:
             return True
 
         def run_structured_prompt(self, prompt_name: str, variables: dict, schema):
-            assert prompt_name == "a4_target_answer_interpretation"
-            assert variables["target_node_name"] == "发热"
+            assert prompt_name == "turn_interpreter"
+            assert variables["pending_target_name"] == "发热"
             return {
-                "existence": "non_exist",
-                "resolution": "clear",
-                "supporting_span": "",
-                "negation_span": "发热没有",
-                "uncertain_span": "",
-                "reasoning": "患者明确否认发热。",
+                "mentions": [
+                    {"name": "发热", "polarity": "absent", "evidence_span": "发热没有", "reasoning": "患者明确否认发热。"},
+                    {"name": "咳嗽", "polarity": "present", "evidence_span": "有点咳嗽"},
+                ],
+                "reasoning_summary": "已识别目标症状是否定，同时提到新的症状。",
             }
 
     parser = EvidenceParser(llm_client=FakeLlmClient())
@@ -77,14 +76,14 @@ def test_a4_long_answer_uses_llm_target_interpretation() -> None:
         target_node_name="发热",
     )
 
-    result = parser.run_a4_deductive_analysis("发热没有，但是有点咳嗽。", action)
+    result = parser.derive_pending_action_result_from_text("发热没有，但是有点咳嗽。", action)
 
-    assert result.existence == "non_exist"
+    assert result.polarity == "absent"
     assert result.negation_span == "发热没有"
-    assert result.metadata["interpretation_source"] == "llm"
+    assert result.metadata["interpretation_source"] == "turn_interpreter"
 
 
-def test_a4_short_direct_reply_skips_llm_and_judge_uses_rule_path() -> None:
+def test_pending_action_short_direct_reply_skips_llm() -> None:
     class FakeLlmClient:
         def __init__(self) -> None:
             self.called = False
@@ -108,24 +107,14 @@ def test_a4_short_direct_reply_skips_llm_and_judge_uses_rule_path() -> None:
         hypothesis_id="d1",
         topic_id="Disease",
     )
-    patient_context = PatientContext(raw_text="没有步态异常。")
-    interpretation = parser.interpret_answer_for_target("没有步态异常。", action)
-
-    decision = parser.judge_deductive_result(
-        patient_context,
-        action,
-        interpretation,
-        None,
-        [],
-    )
+    interpretation = parser.derive_pending_action_result_from_text("没有步态异常。", action)
 
     assert client.called is False
-    assert interpretation.existence == "non_exist"
-    assert decision.metadata["judge_source"] == "rule"
-    assert decision.existence == "non_exist"
+    assert interpretation.polarity == "absent"
+    assert interpretation.metadata["interpretation_source"] == "turn_interpreter"
 
 
-def test_a4_long_answer_judge_uses_llm() -> None:
+def test_pending_action_unclear_answer_marks_hedged() -> None:
     class FakeLlmClient:
         def __init__(self) -> None:
             self.prompts: list[str] = []
@@ -136,26 +125,19 @@ def test_a4_long_answer_judge_uses_llm() -> None:
         def run_structured_prompt(self, prompt_name: str, variables: dict, schema):
             _ = variables, schema
             self.prompts.append(prompt_name)
-            if prompt_name == "a4_target_answer_interpretation":
+            if prompt_name == "turn_interpreter":
                 return {
-                    "existence": "exist",
-                    "resolution": "hedged",
-                    "supporting_span": "好像有点发热",
-                    "negation_span": "",
-                    "uncertain_span": "好像有点发热",
-                    "reasoning": "患者给出了模糊阳性回答。",
+                    "mentions": [
+                        {
+                            "name": "发热",
+                            "polarity": "unclear",
+                            "evidence_span": "好像有点发热",
+                            "reasoning": "患者给出了模糊阳性回答。",
+                        }
+                    ],
+                    "reasoning_summary": "目标症状存在但回答保留。",
                 }
-            return {
-                "existence": "exist",
-                "resolution": "hedged",
-                "decision_type": "reverify_hypothesis",
-                "next_stage": "A3",
-                "diagnostic_rationale": "仍需继续验证。",
-                "contradiction_explanation": "",
-                "should_terminate_current_path": False,
-                "should_spawn_alternative_hypotheses": False,
-                "reasoning": "继续追问。",
-            }
+            return {}
 
     client = FakeLlmClient()
     parser = EvidenceParser(llm_client=client)
@@ -169,15 +151,14 @@ def test_a4_long_answer_judge_uses_llm() -> None:
         topic_id="Disease",
     )
 
-    interpretation = parser.run_a4_deductive_analysis("好像有点发热。", action)
-    decision = parser.judge_deductive_result(PatientContext(raw_text="好像有点发热。"), action, interpretation, None, [])
+    interpretation = parser.derive_pending_action_result_from_text("好像有点发热。", action)
 
-    assert client.prompts == ["a4_target_answer_interpretation", "a4_deductive_judge"]
-    assert decision.metadata["judge_source"] == "llm"
-    assert decision.decision_type == "reverify_hypothesis"
+    assert client.prompts == ["turn_interpreter"]
+    assert interpretation.polarity == "unclear"
+    assert interpretation.resolution == "hedged"
 
 
-def test_a4_long_answer_raises_when_llm_unavailable() -> None:
+def test_pending_action_long_answer_raises_when_llm_unavailable() -> None:
     parser = EvidenceParser()
     action = MctsAction(
         action_id="a4",
@@ -188,7 +169,7 @@ def test_a4_long_answer_raises_when_llm_unavailable() -> None:
     )
 
     with pytest.raises(LlmUnavailableError):
-        parser.run_a4_deductive_analysis("发热没有，但是有点咳嗽。", action)
+        parser.derive_pending_action_result_from_text("发热没有，但是有点咳嗽。", action)
 
 
 def test_exam_context_long_answer_uses_llm_and_normalizes_tests() -> None:

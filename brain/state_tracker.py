@@ -13,6 +13,8 @@ from .types import (
     ExamMentionedResult,
     EvidenceState,
     HypothesisScore,
+    MentionContextItem,
+    MentionItem,
     MctsAction,
     ReasoningTrajectory,
     SessionState,
@@ -61,6 +63,7 @@ class StateTracker:
             session_id=state.session_id,
             turn_index=state.turn_index,
             active_topics=list(state.active_topics),
+            mention_context=deepcopy(state.mention_context),
             slots=deepcopy(state.slots),
             evidence_states=deepcopy(state.evidence_states),
             exam_context=deepcopy(state.exam_context),
@@ -92,6 +95,7 @@ class StateTracker:
         slot = self.ensure_slot(session_id, update.node_id)
 
         slot.status = update.status
+        slot.polarity = update.polarity
         slot.resolution = update.resolution
         slot.value = update.value
         slot.metadata.update(update.metadata)
@@ -123,6 +127,54 @@ class StateTracker:
             self.set_slot(session_id, update)
 
         return self.get_session(session_id)
+
+    # 按 present > unclear > absent 的优先级合并本轮提及项，形成会话级上下文。
+    def merge_mention_items(
+        self,
+        session_id: str,
+        mentions: Iterable[MentionItem],
+        *,
+        turn_index: Optional[int] = None,
+    ) -> Dict[str, MentionContextItem]:
+        state = self.get_session(session_id)
+
+        for mention in mentions:
+            normalized_name = str(mention.normalized_name).strip()
+
+            if len(normalized_name) == 0:
+                continue
+
+            existing = state.mention_context.get(normalized_name)
+
+            if existing is None:
+                existing = MentionContextItem(
+                    normalized_name=normalized_name,
+                    node_id=mention.node_id,
+                    display_name=str(mention.name or normalized_name),
+                    polarity=mention.polarity,
+                    metadata=dict(mention.metadata),
+                )
+                state.mention_context[normalized_name] = existing
+            else:
+                if mention.node_id is not None and existing.node_id is None:
+                    existing.node_id = mention.node_id
+
+                if len(str(existing.display_name).strip()) == 0 and len(str(mention.name).strip()) > 0:
+                    existing.display_name = str(mention.name)
+
+                if self._mention_priority(mention.polarity) > self._mention_priority(existing.polarity):
+                    existing.polarity = mention.polarity
+
+                existing.metadata.update(dict(mention.metadata))
+
+            evidence_text = str(mention.evidence_text).strip()
+            if len(evidence_text) > 0 and evidence_text not in existing.evidence:
+                existing.evidence.append(evidence_text)
+
+            if turn_index is not None and turn_index not in existing.source_turns:
+                existing.source_turns.append(turn_index)
+
+        return state.mention_context
 
     # 确保指定检查类型的上下文状态存在。
     def ensure_exam_context(self, session_id: str, exam_kind: str) -> ExamContextState:
@@ -250,6 +302,13 @@ class StateTracker:
         state = self.get_session(session_id)
         state.evidence_states[evidence_state.node_id] = evidence_state
         return evidence_state
+
+    def _mention_priority(self, polarity: str) -> int:
+        if polarity == "present":
+            return 3
+        if polarity == "unclear":
+            return 2
+        return 1
 
     # 读取当前待验证动作；若不存在则返回空值。
     def get_pending_action(self, session_id: str) -> Optional[MctsAction]:

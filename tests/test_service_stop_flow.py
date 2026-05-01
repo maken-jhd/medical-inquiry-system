@@ -17,6 +17,7 @@ from brain.types import (
     SearchResult,
     SessionState,
     StopDecision,
+    TurnInterpretationResult,
 )
 
 
@@ -121,6 +122,14 @@ class EmptyMedExtractor:
 
 class EmptyEvidenceParser:
     """模拟 A1 没有抽到任何关键线索。"""
+
+    def interpret_turn(self, patient_text: str, pending_action: MctsAction | None = None) -> TurnInterpretationResult:
+        _ = patient_text, pending_action
+        return TurnInterpretationResult()
+
+    def build_patient_context_from_turn(self, turn_result: TurnInterpretationResult, patient_text: str) -> PatientContext:
+        _ = turn_result
+        return PatientContext(raw_text=patient_text)
 
     def run_a1_key_symptom_extraction(
         self,

@@ -1,7 +1,7 @@
-"""测试 A2 假设管理中的竞争性重排与 LLM metadata 回写。"""
+"""测试 A2 假设管理中的竞争性重排、极性计分与 LLM metadata 回写。"""
 
 from brain.hypothesis_manager import HypothesisManager
-from brain.types import HypothesisCandidate, HypothesisScore, PatientContext
+from brain.types import EvidenceState, HypothesisCandidate, HypothesisScore, PatientContext
 
 
 class FakeLlmClient:
@@ -84,3 +84,35 @@ def test_hypothesis_manager_applies_verifier_reshuffle() -> None:
     assert reranked[0].metadata["recommended_next_evidence"] == ["低氧血症"]
     assert reranked[0].metadata["hypothesis_recommended_next_evidence"] == []
     assert reranked[0].metadata["verifier_recommended_next_evidence"] == ["低氧血症"]
+
+
+# 验证 evidence_state 即使还保留旧 existence 字段，也会优先按 polarity 做分数调整。
+def test_hypothesis_manager_scores_unclear_and_absent_by_polarity() -> None:
+    manager = HypothesisManager()
+    hypotheses = [HypothesisScore(node_id="d1", label="Disease", name="PCP", score=1.0, metadata={})]
+
+    unclear_updated = manager.apply_evidence_feedback(
+        hypotheses,
+        EvidenceState(
+            node_id="symptom_fatigue",
+            polarity="unclear",
+            existence="unknown",
+            resolution="hedged",
+            metadata={"relation_type": "MANIFESTS_AS"},
+        ),
+        ["d1"],
+    )
+    absent_updated = manager.apply_evidence_feedback(
+        hypotheses,
+        EvidenceState(
+            node_id="lab_po2",
+            polarity="absent",
+            existence="unknown",
+            resolution="clear",
+            metadata={"relation_type": "HAS_LAB_FINDING"},
+        ),
+        ["d1"],
+    )
+
+    assert unclear_updated[0].score < hypotheses[0].score
+    assert absent_updated[0].score < unclear_updated[0].score

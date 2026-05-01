@@ -85,7 +85,7 @@ def _extract_turn_summary(output: dict, previous_question_node_id: str | None = 
         "root_best_action": root_best_action,
         "repair_selected_action": repair_selected_action,
         "pending_action": pending_action,
-        "route_after_a4_stage": (output.get("route_after_a4") or {}).get("stage"),
+        "route_after_pending_action_stage": (output.get("route_after_pending_action") or {}).get("stage"),
         "best_answer_name": search_report.get("best_answer_name") or best_final_answer.get("answer_name"),
         "stop_reason": final_report.get("stop_reason"),
         "same_question_as_previous": (
@@ -158,7 +158,7 @@ def main() -> int:
             "step": f"turn_{turn_index}",
             "has_final_report": current_output.get("final_report") is not None,
             "next_question": current_output.get("next_question"),
-            "route_after_a4": current_output.get("route_after_a4"),
+            "route_after_pending_action": current_output.get("route_after_pending_action"),
             "turn_summary": turn_summary,
         }
         if not args.summary_only:

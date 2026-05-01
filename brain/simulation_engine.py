@@ -11,11 +11,11 @@ from .hypothesis_manager import HypothesisManager
 from .retriever import GraphRetriever
 from .router import ReasoningRouter
 from .types import (
-    A4DeductiveResult,
     EvidenceState,
     HypothesisCandidate,
     HypothesisScore,
     MctsAction,
+    PendingActionResult,
     PatientContext,
     ReasoningTrajectory,
     SessionState,
@@ -154,7 +154,7 @@ class SimulationEngine:
                 "question_type_hint": action.metadata.get("question_type_hint", "symptom"),
             },
             {
-                "stage": "A4",
+                "stage": "PENDING_ACTION",
                 "branch_answer": selected_branch["branch"],
                 "expected_reward": outcome.expected_reward,
                 "depth": min(depth, self.config.rollout_max_depth),
@@ -170,7 +170,7 @@ class SimulationEngine:
             metadata={"simulation_outcome": outcome.metadata, "branch_evaluations": branch_payloads},
         )
 
-    # 从搜索树节点出发执行多步 rollout，模拟 A3 -> A4 -> route -> A2/A3 的前瞻过程。
+    # 从搜索树节点出发执行多步 rollout，模拟 A3 -> 回答解释 -> route -> A2/A3 的前瞻过程。
     def rollout_from_tree_node(
         self,
         node: TreeNode,
@@ -206,14 +206,14 @@ class SimulationEngine:
                 branch_payloads,
                 key=lambda item: (-item["weighted_reward"], item["branch"]),
             )[0]
-            branch_result: A4DeductiveResult = selected_branch["deductive_result"]
-            decision = router.build_deductive_decision(branch_result, action, rollout_state)
+            branch_result: PendingActionResult = selected_branch["pending_action_result"]
+            decision = router.build_pending_action_decision(branch_result, action, rollout_state)
             step_reward = selected_branch["reward"] * (self.config.rollout_discount ** (step_depth - 1))
             context_bonus = self._estimate_context_bonus(action, patient_context)
             total_reward += step_reward + context_bonus
             last_stage = decision.next_stage
 
-            # 一旦选中了某条模拟回答，就把它像真实 A4 一样写回 rollout_state，
+            # 一旦选中了某条模拟回答，就把它像真实 pending_action 一样写回 rollout_state，
             # 这样后续 R2/action selection 才能基于“已知新证据”继续展开。
             self._apply_rollout_state_update(
                 rollout_state,
@@ -238,9 +238,9 @@ class SimulationEngine:
                         "question_type_hint": action.metadata.get("question_type_hint", "symptom"),
                     },
                     {
-                        "stage": "A4",
+                        "stage": "PENDING_ACTION",
                         "answer_branch": selected_branch["branch"],
-                        "existence": branch_result.existence,
+                        "polarity": branch_result.polarity,
                         "resolution": branch_result.resolution,
                         "reasoning": branch_result.reasoning,
                     },
@@ -344,8 +344,11 @@ class SimulationEngine:
                 "probability": positive_probability,
                 "reward": outcome.positive_branch_reward,
                 "weighted_reward": positive_probability * outcome.positive_branch_reward,
-                "deductive_result": A4DeductiveResult(
-                    existence="exist",
+                "pending_action_result": PendingActionResult(
+                    action_type=action.action_type,
+                    target_node_id=action.target_node_id,
+                    target_node_name=action.target_node_name,
+                    polarity="present",
                     resolution="clear",
                     reasoning=f"模拟回答明确支持“{action.target_node_name}”存在。",
                     supporting_span=f"模拟正向回答：存在 {action.target_node_name}",
@@ -356,8 +359,11 @@ class SimulationEngine:
                 "probability": negative_probability,
                 "reward": outcome.negative_branch_reward,
                 "weighted_reward": negative_probability * outcome.negative_branch_reward,
-                "deductive_result": A4DeductiveResult(
-                    existence="non_exist",
+                "pending_action_result": PendingActionResult(
+                    action_type=action.action_type,
+                    target_node_id=action.target_node_id,
+                    target_node_name=action.target_node_name,
+                    polarity="absent",
                     resolution="clear",
                     reasoning=f"模拟回答明确否定“{action.target_node_name}”。",
                     negation_span=f"模拟反向回答：无 {action.target_node_name}",
@@ -368,8 +374,11 @@ class SimulationEngine:
                 "probability": doubtful_probability,
                 "reward": doubtful_reward,
                 "weighted_reward": doubtful_probability * doubtful_reward,
-                "deductive_result": A4DeductiveResult(
-                    existence="exist",
+                "pending_action_result": PendingActionResult(
+                    action_type=action.action_type,
+                    target_node_id=action.target_node_id,
+                    target_node_name=action.target_node_name,
+                    polarity="unclear",
                     resolution="hedged",
                     reasoning=f"模拟回答对“{action.target_node_name}”提供了模糊支持，仍需复核。",
                     supporting_span=f"模拟模糊回答：可能有 {action.target_node_name}",
@@ -409,21 +418,21 @@ class SimulationEngine:
         self,
         state: SessionState,
         action: MctsAction,
-        deductive_result: A4DeductiveResult,
+        pending_action_result: PendingActionResult,
         turn_index: int,
         hypothesis_manager: HypothesisManager,
     ) -> None:
         slot_status = "unknown"
         slot_resolution = "unknown"
 
-        if deductive_result.existence == "exist":
+        if pending_action_result.polarity == "present":
             slot_status = "true"
-        elif deductive_result.existence == "non_exist":
+        elif pending_action_result.polarity == "absent":
             slot_status = "false"
 
-        if deductive_result.resolution == "clear":
+        if pending_action_result.resolution == "clear":
             slot_resolution = "clear"
-        elif deductive_result.resolution == "hedged":
+        elif pending_action_result.resolution == "hedged":
             slot_resolution = "hedged"
 
         # rollout 里的模拟回答也会同步写槽位和 evidence_state，
@@ -431,8 +440,14 @@ class SimulationEngine:
         state.slots[action.target_node_id] = SlotState(
             node_id=action.target_node_id,
             status=slot_status,
+            polarity=pending_action_result.polarity,
             resolution=slot_resolution,
-            evidence=[deductive_result.supporting_span or deductive_result.negation_span or deductive_result.reasoning],
+            evidence=[
+                pending_action_result.supporting_span
+                or pending_action_result.negation_span
+                or pending_action_result.uncertain_span
+                or pending_action_result.reasoning
+            ],
             source_turns=[turn_index],
             metadata={
                 "source_stage": "SIMULATION",
@@ -442,9 +457,16 @@ class SimulationEngine:
         )
         state.evidence_states[action.target_node_id] = EvidenceState(
             node_id=action.target_node_id,
-            existence=deductive_result.existence,
-            resolution=deductive_result.resolution,
-            reasoning=deductive_result.reasoning,
+            polarity=pending_action_result.polarity,
+            existence=(
+                "exist"
+                if pending_action_result.polarity == "present"
+                else "non_exist"
+                if pending_action_result.polarity == "absent"
+                else "unknown"
+            ),
+            resolution=pending_action_result.resolution,
+            reasoning=pending_action_result.reasoning,
             source_turns=[turn_index],
             metadata={
                 "action_id": action.action_id,

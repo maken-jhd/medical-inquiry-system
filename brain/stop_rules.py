@@ -570,7 +570,7 @@ class StopRuleEngine:
             ):
                 continue
 
-            if evidence.existence != "exist" or evidence.resolution != "clear":
+            if self._evidence_polarity(evidence) != "present" or evidence.resolution != "clear":
                 continue
 
             values.append(self._compact_evidence(evidence, answer_score=answer_score))
@@ -586,7 +586,7 @@ class StopRuleEngine:
         values: list[dict] = []
 
         for evidence in self._iter_guarded_evidence(answer_score, session_state):
-            if evidence.existence != "exist" or evidence.resolution != "hedged":
+            if self._evidence_polarity(evidence) != "present" or evidence.resolution != "hedged":
                 continue
 
             if not self._is_provisional_anchor_evidence(evidence):
@@ -615,8 +615,10 @@ class StopRuleEngine:
             ):
                 continue
 
-            if evidence.existence == "non_exist" or evidence.resolution == "hedged":
-                if evidence.existence == "exist" and evidence.resolution == "hedged" and self._is_provisional_anchor_evidence(evidence):
+            polarity = self._evidence_polarity(evidence)
+
+            if polarity == "absent" or polarity == "unclear" or evidence.resolution == "hedged":
+                if polarity == "present" and evidence.resolution == "hedged" and self._is_provisional_anchor_evidence(evidence):
                     continue
 
                 compact = self._compact_evidence(evidence, answer_score=answer_score)
@@ -670,6 +672,7 @@ class StopRuleEngine:
         return {
             "node_id": evidence.node_id,
             "name": str(evidence.metadata.get("target_node_name") or evidence.node_id),
+            "polarity": self._evidence_polarity(evidence),
             "existence": evidence.existence,
             "resolution": evidence.resolution,
             "relation_type": str(evidence.metadata.get("relation_type") or ""),
@@ -690,7 +693,7 @@ class StopRuleEngine:
         }
         evidence_scope = str(compact.get("evidence_scope") or "")
         relation_type = str(compact.get("relation_type") or "")
-        is_clear_absence = evidence.existence == "non_exist" and evidence.resolution == "clear"
+        is_clear_absence = self._evidence_polarity(evidence) == "absent" and evidence.resolution == "clear"
         is_definition_like = relation_type in GUARDED_DEFINITION_RELATION_TYPES or len(
             evidence_families & GUARDED_HARD_NEGATIVE_EVIDENCE_TAGS
         ) > 0
@@ -735,6 +738,9 @@ class StopRuleEngine:
                 str(item.get("name") or ""),
             ),
         )[:limit]
+
+    def _evidence_polarity(self, evidence: EvidenceState) -> str:
+        return evidence.effective_polarity()
 
     def _collect_evidence_families(self, compact_evidence: list[dict]) -> set[str]:
         families: set[str] = set()

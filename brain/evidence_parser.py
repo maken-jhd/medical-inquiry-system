@@ -1,4 +1,4 @@
-"""负责 A1 核心线索提取、答案解释和 A4 结果转槽位更新。"""
+"""负责 A1 核心线索提取、统一提及解释与检查上下文解析。"""
 
 from __future__ import annotations
 
@@ -11,25 +11,24 @@ from .llm_client import LlmClient
 from .normalization import NameNormalizer
 from .types import (
     A1ExtractionResult,
-    A4DeductiveResult,
     ClinicalFeatureItem,
-    DeductiveDecision,
     ExamContextResult,
     ExamMentionedResult,
-    HypothesisScore,
     KeyFeature,
+    MentionItem,
     MctsAction,
+    PendingActionResult,
     PatientContext,
+    TurnInterpretationResult,
     SlotUpdate,
 )
 
 
 @dataclass
 class EvidenceParserConfig:
-    """保存 A1 / A4 在 LLM-first 模式下的轻量配置。"""
+    """保存统一解释链在 LLM-first 模式下的轻量配置。"""
 
     use_llm_extractor: bool = True
-    use_llm_deductive_judge: bool = True
 
 
 class EvidenceParser:
@@ -41,45 +40,68 @@ class EvidenceParser:
         self.config = config or EvidenceParserConfig()
         self.normalizer = NameNormalizer()
 
+    # 统一提及抽取入口：无论是自由描述还是回答上一轮问题，都只输出 mentions。
+    def interpret_turn(
+        self,
+        patient_text: str,
+        pending_action: MctsAction | None = None,
+    ) -> TurnInterpretationResult:
+        if pending_action is not None:
+            direct_reply = self._classify_direct_reply(patient_text)
+            if direct_reply is not None:
+                return self._build_direct_reply_turn_result(patient_text, pending_action, direct_reply)
+
+        if self.llm_client is None or not self.llm_client.is_available():
+            raise LlmUnavailableError(stage="turn_interpreter", prompt_name="turn_interpreter")
+
+        payload = self.llm_client.run_structured_prompt(
+            "turn_interpreter",
+            {
+                "patient_text": patient_text,
+                "previous_question_text": str(pending_action.metadata.get("question_text") or "") if pending_action is not None else "",
+                "pending_target_name": pending_action.target_node_name if pending_action is not None else "",
+                "pending_target_aliases": (
+                    self._candidate_target_aliases(pending_action.target_node_name, pending_action)
+                    if pending_action is not None
+                    else []
+                ),
+                "question_type": (
+                    str(pending_action.metadata.get("question_type_hint") or pending_action.action_type or "")
+                    if pending_action is not None
+                    else ""
+                ),
+            },
+            dict,
+        )
+        return self._coerce_turn_payload(payload, patient_text, pending_action)
+
     # 对外提供 A1 阶段入口；长文本只接受 LLM 结构化结果。
     def run_a1_key_symptom_extraction(
         self,
         patient_input: str | PatientContext,
         known_feature_names: Optional[Sequence[str]] = None,
     ) -> A1ExtractionResult:
-        if self.llm_client is None or not self.llm_client.is_available() or not self.config.use_llm_extractor:
-            raise LlmUnavailableError(stage="a1_key_symptom_extraction", prompt_name="a1_key_symptom_extraction")
+        patient_context = self._ensure_patient_context(patient_input)
 
-        return self._run_a1_with_llm(patient_input, known_feature_names)
+        if len(patient_context.clinical_features) > 0:
+            turn_result = TurnInterpretationResult(
+                mentions=list(patient_context.clinical_features),
+                reasoning="沿用当前患者上下文中的统一提及项。",
+                metadata={"source": "patient_context"},
+            )
+        else:
+            turn_result = self.interpret_turn(patient_context.raw_text)
 
-    # 将 A4 阶段的目标问题回答解释成目标感知的证据状态。
-    def interpret_answer_for_target(
+        return self._build_a1_result_from_turn(turn_result, known_feature_names)
+
+    # 将上一轮待处理动作的回答解释成目标感知的统一结果。
+    def derive_pending_action_result_from_text(
         self,
         patient_text: str,
         action: MctsAction,
-    ) -> A4DeductiveResult:
-        direct_reply = self._classify_direct_reply(patient_text)
-        if direct_reply is not None:
-            return self._build_direct_reply_interpretation(patient_text, action, direct_reply)
-
-        if self.llm_client is None or not self.llm_client.is_available():
-            raise LlmUnavailableError(
-                stage="a4_target_answer_interpretation",
-                prompt_name="a4_target_answer_interpretation",
-            )
-
-        payload = self.llm_client.run_structured_prompt(
-            "a4_target_answer_interpretation",
-            {
-                "question_text": str(action.metadata.get("question_text") or ""),
-                "target_node_name": action.target_node_name,
-                "target_aliases": self.normalizer.candidate_feature_aliases(action.target_node_name),
-                "question_type": str(action.metadata.get("question_type_hint") or action.action_type or ""),
-                "patient_answer": patient_text,
-            },
-            dict,
-        )
-        return self._coerce_target_answer_payload(payload, action, patient_text)
+    ) -> PendingActionResult:
+        turn_result = self.interpret_turn(patient_text, pending_action=action)
+        return self._build_pending_action_result_from_turn(turn_result, action, patient_text)
 
     # collect_exam_context 动作专用解析：一次回答里同时识别是否做过、检查名称和结果。
     def interpret_exam_context_answer(
@@ -123,96 +145,344 @@ class EvidenceParser:
         )
         return self._coerce_exam_context_payload(payload, action, patient_text, exam_kind)
 
-    # 对 verify_evidence 的短答使用确定性解释，避免每轮都为“有/没有/不清楚”支付一次 LLM 成本。
-    def _build_direct_reply_interpretation(
+    # 将统一提及结果回填成当前链路仍在使用的 PatientContext 兼容对象。
+    def build_patient_context_from_turn(
+        self,
+        turn_result: TurnInterpretationResult,
+        patient_text: str,
+    ) -> PatientContext:
+        return PatientContext(
+            clinical_features=list(turn_result.mentions),
+            raw_text=patient_text,
+            metadata={"source": "turn_interpreter", **dict(turn_result.metadata)},
+        )
+
+    def _build_a1_result_from_turn(
+        self,
+        turn_result: TurnInterpretationResult,
+        known_feature_names: Optional[Sequence[str]] = None,
+    ) -> A1ExtractionResult:
+        known_names = {
+            self.normalizer.normalize_graph_mention(str(item))
+            for item in (known_feature_names or [])
+            if len(str(item).strip()) > 0
+        }
+        key_features: List[KeyFeature] = []
+        seen_normalized_names: set[str] = set()
+
+        for mention in turn_result.mentions:
+            if mention.polarity != "present":
+                continue
+
+            normalized_name = self.normalizer.normalize_graph_mention(mention.normalized_name or mention.name)
+            if len(normalized_name) == 0 or normalized_name in seen_normalized_names or normalized_name in known_names:
+                continue
+
+            key_features.append(
+                KeyFeature(
+                    name=str(mention.name or normalized_name),
+                    normalized_name=normalized_name,
+                    category=self.normalizer.normalize_feature_category(normalized_name),
+                    reasoning=str(mention.metadata.get("reasoning") or "由统一提及抽取器提取。"),
+                    metadata={"source": "turn_interpreter", **dict(mention.metadata)},
+                )
+            )
+            seen_normalized_names.add(normalized_name)
+
+        return A1ExtractionResult(
+            key_features=key_features,
+            selection_decision="selected" if len(key_features) > 0 else "none_salient",
+            reasoning=turn_result.reasoning or "已根据统一提及项生成当前首轮检索线索。",
+            metadata={"source": "turn_interpreter", **dict(turn_result.metadata)},
+        )
+
+    def _build_direct_reply_turn_result(
         self,
         patient_text: str,
         action: MctsAction,
         direct_reply: str,
-    ) -> A4DeductiveResult:
+    ) -> TurnInterpretationResult:
         if direct_reply == "positive":
-            existence, resolution = "exist", "clear"
-            reasoning = f"患者对“{action.target_node_name}”给出了直接肯定回答。"
+            polarity = "present"
+            reasoning = f"患者围绕“{action.target_node_name}”给出了直接肯定回答。"
         elif direct_reply == "negative":
-            existence, resolution = "non_exist", "clear"
-            reasoning = f"患者对“{action.target_node_name}”给出了直接否定回答。"
+            polarity = "absent"
+            reasoning = f"患者围绕“{action.target_node_name}”给出了直接否定回答。"
         else:
-            existence, resolution = "unknown", "hedged"
-            reasoning = f"患者对“{action.target_node_name}”给出了不确定回答。"
+            polarity = "unclear"
+            reasoning = f"患者围绕“{action.target_node_name}”给出了不确定回答。"
 
-        return A4DeductiveResult(
-            existence=existence,  # type: ignore[arg-type]
-            resolution=resolution,  # type: ignore[arg-type]
+        normalized_name = self.normalizer.normalize_graph_mention(action.target_node_name)
+        return TurnInterpretationResult(
+            mentions=[
+                MentionItem(
+                    name=action.target_node_name,
+                    normalized_name=normalized_name or action.target_node_name,
+                    mention_state=polarity,  # type: ignore[arg-type]
+                    evidence_text=patient_text,
+                    node_id=action.target_node_id if action.action_type == "verify_evidence" else None,
+                    metadata={
+                        "source": "direct_reply_rule",
+                        "direct_reply": direct_reply,
+                        "reasoning": reasoning,
+                        "from_pending_action": True,
+                        "question_text": str(action.metadata.get("question_text") or ""),
+                    },
+                )
+            ],
             reasoning=reasoning,
-            supporting_span=patient_text if direct_reply == "positive" else "",
-            negation_span=patient_text if direct_reply == "negative" else "",
-            uncertain_span=patient_text if direct_reply == "uncertain" else "",
-            metadata={
-                "action_id": action.action_id,
-                "target_node_id": action.target_node_id,
-                "target_node_name": action.target_node_name,
-                "focused_spans": [patient_text.strip()] if len(patient_text.strip()) > 0 else [],
-                "direct_reply": direct_reply,
-                "has_contradiction": False,
-                "interpretation_source": "direct_reply_rule",
-            },
+            metadata={"source": "direct_reply_rule", "direct_reply": direct_reply},
         )
 
-    def _coerce_target_answer_payload(
+    def _coerce_turn_payload(
         self,
         payload: dict,
-        action: MctsAction,
         patient_text: str,
-    ) -> A4DeductiveResult:
+        pending_action: MctsAction | None = None,
+    ) -> TurnInterpretationResult:
         if not isinstance(payload, dict):
             raise LlmOutputInvalidError(
-                stage="a4_target_answer_interpretation",
-                prompt_name="a4_target_answer_interpretation",
+                stage="turn_interpreter",
+                prompt_name="turn_interpreter",
                 attempts=1,
-                message="A4 target answer interpretation 收到的 payload 不是 JSON object。",
+                message="turn_interpreter 收到的 payload 不是 JSON object。",
             )
 
-        existence = str(payload.get("existence", "")).strip()
-        resolution = self._coerce_resolution_value(payload.get("resolution", payload.get("certainty", "")))
-        if existence not in {"exist", "non_exist", "unknown"}:
+        raw_mentions = payload.get("mentions", payload.get("clinical_features", payload.get("key_features", [])))
+        mentions: list[MentionItem] = []
+
+        if isinstance(raw_mentions, str):
+            raw_mentions = self.normalizer.split_feature_string(raw_mentions)
+
+        if not isinstance(raw_mentions, list):
             raise LlmOutputInvalidError(
-                stage="a4_target_answer_interpretation",
-                prompt_name="a4_target_answer_interpretation",
+                stage="turn_interpreter",
+                prompt_name="turn_interpreter",
                 attempts=1,
-                message=f"A4 target answer interpretation 返回了非法 existence：{existence or '空'}",
-            )
-        if resolution not in {"clear", "hedged", "unknown"}:
-            raise LlmOutputInvalidError(
-                stage="a4_target_answer_interpretation",
-                prompt_name="a4_target_answer_interpretation",
-                attempts=1,
-                message=f"A4 target answer interpretation 返回了非法 resolution：{resolution or '空'}",
+                message="turn_interpreter 的 mentions 字段不是数组。",
             )
 
-        supporting_span = str(payload.get("supporting_span", "") or "")
-        negation_span = str(payload.get("negation_span", "") or "")
-        uncertain_span = str(payload.get("uncertain_span", "") or "")
-        contradiction_detected = bool(
-            len(negation_span) > 0 and len(supporting_span) > 0 and negation_span != supporting_span
+        for item in raw_mentions:
+            if isinstance(item, str):
+                raw_name = item
+                polarity = "present"
+                evidence_text = patient_text
+                metadata: dict[str, Any] = {"source": "llm_string_payload"}
+            elif isinstance(item, dict):
+                raw_name = str(item.get("name", item.get("normalized_name", item.get("mention", ""))) or "")
+                polarity = self._coerce_mention_polarity(
+                    item.get("polarity", item.get("mention_state", item.get("status", item.get("existence", ""))))
+                )
+                evidence_text = str(
+                    item.get("evidence_span", item.get("evidence_text", item.get("raw_text", patient_text))) or patient_text
+                )
+                metadata = {
+                    "source": "llm",
+                    "reasoning": str(item.get("reasoning", "") or ""),
+                }
+            else:
+                continue
+
+            normalized_name = self.normalizer.normalize_graph_mention(raw_name)
+            if len(normalized_name) == 0:
+                continue
+
+            mentions.append(
+                MentionItem(
+                    name=str(raw_name or normalized_name),
+                    normalized_name=normalized_name,
+                    category="",
+                    mention_state=polarity,  # type: ignore[arg-type]
+                    evidence_text=evidence_text,
+                    metadata=metadata,
+                )
+            )
+
+        if pending_action is not None and pending_action.action_type == "verify_evidence":
+            matched = self._find_best_target_mention(mentions, pending_action)
+            if matched is None:
+                mentions.append(
+                    MentionItem(
+                        name=pending_action.target_node_name,
+                        normalized_name=self.normalizer.normalize_graph_mention(pending_action.target_node_name)
+                        or pending_action.target_node_name,
+                        mention_state="unclear",
+                        evidence_text=patient_text,
+                        node_id=pending_action.target_node_id,
+                        metadata={
+                            "source": "pending_target_backfill",
+                            "reasoning": "当前回答未稳定命中目标提及项，按 unclear 回填目标节点。",
+                            "from_pending_action": True,
+                        },
+                    )
+                )
+
+        if len(mentions) == 0:
+            raise LlmEmptyExtractionError(
+                stage="turn_interpreter",
+                prompt_name="turn_interpreter",
+                attempts=1,
+                message="turn_interpreter 未从当前回答中抽取出任何提及项。",
+            )
+
+        return TurnInterpretationResult(
+            mentions=mentions,
+            reasoning=str(payload.get("reasoning_summary", payload.get("reasoning", "")) or ""),
+            metadata={"source": "llm"},
         )
 
-        return A4DeductiveResult(
-            existence=existence,  # type: ignore[arg-type]
-            resolution=resolution,  # type: ignore[arg-type]
-            reasoning=str(payload.get("reasoning", "") or "已由 LLM 完成目标回答解释。"),
-            supporting_span=supporting_span,
-            negation_span=negation_span,
-            uncertain_span=uncertain_span,
+    def _build_pending_action_result_from_turn(
+        self,
+        turn_result: TurnInterpretationResult,
+        action: MctsAction,
+        patient_text: str,
+    ) -> PendingActionResult:
+        matched = self._find_best_target_mention(turn_result.mentions, action)
+
+        if matched is None:
+            return PendingActionResult(
+                action_type=action.action_type,
+                target_node_id=action.target_node_id,
+                target_node_name=action.target_node_name,
+                polarity="unclear",
+                resolution="hedged",
+                reasoning=f"统一提及抽取器未从当前回答中稳定命中“{action.target_node_name}”，按 unclear 处理。",
+                uncertain_span=patient_text,
+                metadata={
+                    "action_id": action.action_id,
+                    "target_node_id": action.target_node_id,
+                    "target_node_name": action.target_node_name,
+                    "interpretation_source": "turn_interpreter",
+                    "polarity": "unclear",
+                },
+            )
+
+        reasoning = str(matched.metadata.get("reasoning") or f"统一提及抽取器已命中“{action.target_node_name}”。")
+        direct_reply = str(
+            matched.metadata.get("direct_reply")
+            or turn_result.metadata.get("direct_reply")
+            or ""
+        ).strip()
+        if matched.polarity == "present":
+            return PendingActionResult(
+                action_type=action.action_type,
+                target_node_id=action.target_node_id,
+                target_node_name=action.target_node_name,
+                polarity="present",
+                resolution="clear",
+                reasoning=reasoning,
+                supporting_span=matched.evidence_text or patient_text,
+                metadata={
+                    "action_id": action.action_id,
+                    "target_node_id": action.target_node_id,
+                    "target_node_name": action.target_node_name,
+                    "interpretation_source": "turn_interpreter",
+                    "polarity": "present",
+                    "direct_reply": direct_reply or None,
+                },
+            )
+        if matched.polarity == "absent":
+            return PendingActionResult(
+                action_type=action.action_type,
+                target_node_id=action.target_node_id,
+                target_node_name=action.target_node_name,
+                polarity="absent",
+                resolution="clear",
+                reasoning=reasoning,
+                negation_span=matched.evidence_text or patient_text,
+                metadata={
+                    "action_id": action.action_id,
+                    "target_node_id": action.target_node_id,
+                    "target_node_name": action.target_node_name,
+                    "interpretation_source": "turn_interpreter",
+                    "polarity": "absent",
+                    "direct_reply": direct_reply or None,
+                },
+            )
+
+        return PendingActionResult(
+            action_type=action.action_type,
+            target_node_id=action.target_node_id,
+            target_node_name=action.target_node_name,
+            polarity="unclear",
+            resolution="hedged",
+            reasoning=reasoning,
+            uncertain_span=matched.evidence_text or patient_text,
             metadata={
                 "action_id": action.action_id,
                 "target_node_id": action.target_node_id,
                 "target_node_name": action.target_node_name,
-                "focused_spans": [patient_text.strip()] if len(patient_text.strip()) > 0 else [],
-                "direct_reply": None,
-                "has_contradiction": contradiction_detected,
-                "interpretation_source": "llm",
+                "interpretation_source": "turn_interpreter",
+                "polarity": "unclear",
+                "direct_reply": direct_reply or None,
             },
         )
+
+    def derive_pending_action_result(
+        self,
+        turn_result: TurnInterpretationResult,
+        action: MctsAction,
+        patient_text: str,
+    ) -> PendingActionResult:
+        return self._build_pending_action_result_from_turn(turn_result, action, patient_text)
+
+    def find_target_mention(
+        self,
+        mentions: Sequence[MentionItem],
+        action: MctsAction,
+    ) -> MentionItem | None:
+        return self._find_best_target_mention(mentions, action)
+
+    def _find_best_target_mention(
+        self,
+        mentions: Sequence[MentionItem],
+        action: MctsAction,
+    ) -> MentionItem | None:
+        target_aliases = {
+            self.normalizer.normalize_graph_mention(alias)
+            for alias in self._candidate_target_aliases(action.target_node_name, action)
+            if len(self.normalizer.normalize_graph_mention(alias)) > 0
+        }
+
+        for mention in mentions:
+            if mention.node_id is not None and mention.node_id == action.target_node_id:
+                return mention
+
+        for mention in mentions:
+            normalized_name = self.normalizer.normalize_graph_mention(mention.normalized_name or mention.name)
+            if normalized_name in target_aliases:
+                return mention
+
+        return None
+
+    def _candidate_target_aliases(self, target_name: str, action: MctsAction | None = None) -> list[str]:
+        normalized_name = self.normalizer.normalize_graph_mention(target_name)
+        aliases = set([target_name, normalized_name])
+        aliases.update(self.normalizer.candidate_feature_aliases(normalized_name))
+        aliases.update(self.normalizer.candidate_exam_aliases(normalized_name))
+
+        if action is not None:
+            candidate_payloads = action.metadata.get("exam_candidate_evidence", [])
+            if isinstance(candidate_payloads, list):
+                for item in candidate_payloads:
+                    if not isinstance(item, dict):
+                        continue
+                    candidate_name = str(item.get("name", "")).strip()
+                    if len(candidate_name) > 0:
+                        aliases.add(candidate_name)
+
+        return [alias for alias in aliases if len(str(alias).strip()) > 0]
+
+    def _coerce_mention_polarity(self, value: object) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized in {"present", "exist", "positive", "true", "yes"}:
+            return "present"
+        if normalized in {"absent", "non_exist", "negative", "false", "no"}:
+            return "absent"
+        if normalized in {"unclear", "unknown", "uncertain", "hedged", "maybe"}:
+            return "unclear"
+        return "present"
+
 
     def _build_direct_reply_exam_context_result(
         self,
@@ -364,6 +634,7 @@ class EvidenceParser:
                 SlotUpdate(
                     node_id=node_id,
                     status=status,
+                    polarity="present" if status == "true" else "absent",
                     resolution=resolution,
                     value=evidence_text,
                     evidence=raw_evidence_text,
@@ -386,94 +657,6 @@ class EvidenceParser:
 
         return updates
 
-    # 基于回答解释结果与主备选假设，输出更贴近论文 A4 的演绎决策。
-    def judge_deductive_result(
-        self,
-        patient_context: PatientContext,
-        action: MctsAction,
-        answer_interpretation: A4DeductiveResult,
-        current_hypothesis: HypothesisScore | None,
-        alternatives: list[HypothesisScore],
-    ) -> DeductiveDecision:
-        if self._should_skip_llm_deductive_judge(patient_context, action, answer_interpretation):
-            return self._build_rule_based_deductive_decision(
-                action,
-                answer_interpretation,
-                current_hypothesis,
-                alternatives,
-            )
-
-        if self.llm_client is None or not self.llm_client.is_available() or not self.config.use_llm_deductive_judge:
-            raise LlmUnavailableError(stage="a4_deductive_judge", prompt_name="a4_deductive_judge")
-
-        payload = self.llm_client.run_structured_prompt(
-            "a4_deductive_judge",
-            {
-                "patient_context": patient_context,
-                "action": action,
-                "answer_interpretation": answer_interpretation,
-                "current_hypothesis": current_hypothesis,
-                "alternatives": alternatives[:3],
-            },
-            dict,
-        )
-        return self._coerce_judge_payload(payload, action, answer_interpretation)
-
-    # 明确短答的 targeted verification 通常不需要再走一次 LLM judge，规则决策即可支撑后续路由。
-    def _should_skip_llm_deductive_judge(
-        self,
-        patient_context: PatientContext,
-        action: MctsAction,
-        answer_interpretation: A4DeductiveResult,
-    ) -> bool:
-        if action.action_type != "verify_evidence":
-            return False
-
-        if bool(answer_interpretation.metadata.get("has_contradiction", False)):
-            return False
-
-        direct_reply = str(answer_interpretation.metadata.get("direct_reply") or "").strip()
-        if direct_reply in {"positive", "negative", "uncertain"}:
-            return True
-
-        return False
-
-    # 将 A4 演绎分析结果转换为可写入状态机的槽位更新。
-    def build_slot_updates_from_a4(
-        self,
-        action: MctsAction,
-        deductive_result: A4DeductiveResult,
-        raw_evidence_text: str,
-        turn_index: Optional[int] = None,
-    ) -> List[SlotUpdate]:
-        status = "unknown"
-        resolution = "unknown"
-
-        if deductive_result.existence == "exist":
-            status = "true"
-        elif deductive_result.existence == "non_exist":
-            status = "false"
-
-        if deductive_result.resolution == "clear":
-            resolution = "clear"
-        elif deductive_result.resolution == "hedged":
-            resolution = "hedged"
-
-        return [
-            SlotUpdate(
-                node_id=action.target_node_id,
-                status=status,
-                resolution=resolution,
-                evidence=raw_evidence_text,
-                turn_index=turn_index,
-                metadata={
-                    "action_id": action.action_id,
-                    "deductive_reasoning": deductive_result.reasoning,
-                    "action_type": action.action_type,
-                },
-            )
-        ]
-
     # 将 A1 阶段提取出的核心线索转换为可写入状态机的槽位更新。
     def build_slot_updates_from_a1(
         self,
@@ -487,6 +670,7 @@ class EvidenceParser:
                 SlotUpdate(
                     node_id=feature.normalized_name,
                     status="true",
+                    polarity="present",
                     resolution="unknown",
                     evidence=feature.name,
                     turn_index=turn_index,
@@ -500,14 +684,6 @@ class EvidenceParser:
             )
 
         return updates
-
-    # 兼容旧入口：当前直接复用目标感知解释逻辑。
-    def run_a4_deductive_analysis(
-        self,
-        patient_text: str,
-        action: MctsAction,
-    ) -> A4DeductiveResult:
-        return self.interpret_answer_for_target(patient_text, action)
 
     # 使用 LLM 执行 A1 结构化关键特征抽取。
     def _run_a1_with_llm(
@@ -988,164 +1164,6 @@ class EvidenceParser:
     def _normalize_exam_text(self, text: str) -> str:
         return self.normalizer.normalize_exam_text(text)
 
-    # 将 LLM judge 的 JSON 负载转成 DeductiveDecision。
-    def _coerce_judge_payload(
-        self,
-        payload: dict,
-        action: MctsAction,
-        answer_interpretation: A4DeductiveResult,
-    ) -> DeductiveDecision:
-        next_stage = str(payload.get("next_stage", "A3"))
-        decision_type = str(payload.get("decision_type", "need_more_information"))
-
-        # 先把 LLM 输出收敛到系统允许的枚举，避免上游判断分支被自由文本打穿。
-        if decision_type not in {
-            "confirm_hypothesis",
-            "exclude_hypothesis",
-            "reverify_hypothesis",
-            "switch_hypothesis",
-            "need_more_information",
-        }:
-            decision_type = "need_more_information"
-
-        if next_stage not in {"A1", "A2", "A3", "A4", "STOP", "FALLBACK"}:
-            next_stage = "A3"
-
-        # supporting/negation/uncertain span 继续挂到 metadata，
-        # 这样 router、audit 和前端都能追溯本轮判断是基于哪段患者原话。
-        return DeductiveDecision(
-            existence=str(payload.get("existence", answer_interpretation.existence)),
-            resolution=self._coerce_resolution_value(
-                payload.get("resolution", payload.get("certainty", answer_interpretation.resolution))
-            ),
-            decision_type=decision_type,  # type: ignore[arg-type]
-            contradiction_explanation=str(payload.get("contradiction_explanation", "")),
-            diagnostic_rationale=str(payload.get("diagnostic_rationale", payload.get("reasoning", answer_interpretation.reasoning))),
-            next_stage=next_stage,  # type: ignore[arg-type]
-            should_terminate_current_path=bool(payload.get("should_terminate_current_path", next_stage == "STOP")),
-            should_spawn_alternative_hypotheses=bool(payload.get("should_spawn_alternative_hypotheses", False)),
-            metadata={
-                "next_topic_id": action.topic_id,
-                "next_hypothesis_id": action.hypothesis_id,
-                "supporting_span": answer_interpretation.supporting_span,
-                "negation_span": answer_interpretation.negation_span,
-                "uncertain_span": answer_interpretation.uncertain_span,
-                "judge_source": "llm",
-            },
-        )
-
-    # 在没有 LLM judge 时，基于回答解释与主备选假设做规则化演绎决策。
-    def _build_rule_based_deductive_decision(
-        self,
-        action: MctsAction,
-        answer_interpretation: A4DeductiveResult,
-        current_hypothesis: HypothesisScore | None,
-        alternatives: list[HypothesisScore],
-    ) -> DeductiveDecision:
-        margin = 0.0
-
-        # margin 只在“当前主假设已存在且存在 alternatives”时才有意义，
-        # 用来区分“已确认关键证据”后是直接 STOP 还是继续 A3。
-        if current_hypothesis is not None and len(alternatives) > 0:
-            margin = current_hypothesis.score - max(item.score for item in alternatives)
-
-        # 明确阳性：支持当前路径；若主假设优势足够明显，可给出 STOP 倾向。
-        if answer_interpretation.existence == "exist" and answer_interpretation.resolution == "clear":
-            next_stage = "STOP" if current_hypothesis is not None and margin >= 1.0 else "A3"
-            return DeductiveDecision(
-                existence="exist",
-                resolution="clear",
-                decision_type="confirm_hypothesis",
-                diagnostic_rationale="目标证据被明确确认，当前路径对主假设形成强支持。",
-                next_stage=next_stage,
-                should_terminate_current_path=next_stage == "STOP",
-                should_spawn_alternative_hypotheses=False,
-                metadata={
-                    "next_topic_id": action.topic_id,
-                    "next_hypothesis_id": action.hypothesis_id,
-                    "supporting_span": answer_interpretation.supporting_span,
-                    "judge_source": "rule",
-                    "path_terminal": next_stage == "STOP",
-                },
-            )
-
-        # 明确阴性：当前关键证据被反驳，优先退回 A2 重整 hypothesis 排名。
-        if answer_interpretation.existence == "non_exist" and answer_interpretation.resolution == "clear":
-            return DeductiveDecision(
-                existence="non_exist",
-                resolution="clear",
-                decision_type="exclude_hypothesis",
-                contradiction_explanation=f"关键证据“{action.target_node_name}”被明确否定，当前假设需要被下调或切换。",
-                diagnostic_rationale="当前回答对主假设形成稳定反证。",
-                next_stage="A2",
-                should_terminate_current_path=False,
-                should_spawn_alternative_hypotheses=len(alternatives) > 0,
-                metadata={
-                    "next_topic_id": action.topic_id,
-                    "next_hypothesis_id": action.hypothesis_id,
-                    "negation_span": answer_interpretation.negation_span,
-                    "contradicted_feature": action.target_node_id,
-                    "judge_source": "rule",
-                },
-            )
-
-        # 模糊阳性：保留当前假设，但继续 A3 复核，不急着终止路径。
-        if answer_interpretation.existence == "exist" and answer_interpretation.resolution == "hedged":
-            return DeductiveDecision(
-                existence="exist",
-                resolution="hedged",
-                decision_type="reverify_hypothesis",
-                diagnostic_rationale="回答对目标证据提供了模糊支持，建议继续 A3 做更细的验证。",
-                next_stage="A3",
-                should_terminate_current_path=False,
-                should_spawn_alternative_hypotheses=False,
-                metadata={
-                    "next_topic_id": action.topic_id,
-                    "next_hypothesis_id": action.hypothesis_id,
-                    "uncertain_span": answer_interpretation.uncertain_span,
-                    "judge_source": "rule",
-                },
-            )
-
-        # 模糊阴性：不直接排除，先把它当成“需要更多信息”的矛盾分析入口。
-        if answer_interpretation.existence == "non_exist" and answer_interpretation.resolution == "hedged":
-            return DeductiveDecision(
-                existence="non_exist",
-                resolution="hedged",
-                decision_type="need_more_information",
-                contradiction_explanation=(
-                    f"“{action.target_node_name}”目前只表现出弱否定。"
-                    "需要判断这是患者忽略、表述模糊还是当前假设确实不成立。"
-                ),
-                diagnostic_rationale="建议继续 A3 做矛盾分析，同时保留备选假设。",
-                next_stage="A3",
-                should_terminate_current_path=False,
-                should_spawn_alternative_hypotheses=True,
-                metadata={
-                    "next_topic_id": action.topic_id,
-                    "next_hypothesis_id": action.hypothesis_id,
-                    "negation_span": answer_interpretation.negation_span,
-                    "uncertain_span": answer_interpretation.uncertain_span,
-                    "need_contradiction_analysis": True,
-                    "judge_source": "rule",
-                },
-            )
-
-        return DeductiveDecision(
-            existence=answer_interpretation.existence,
-            resolution=answer_interpretation.resolution,
-            decision_type="switch_hypothesis",
-            diagnostic_rationale="当前回答无法稳定支持现有路径，建议回到 A1/A2 重新整理线索。",
-            next_stage="A1" if current_hypothesis is None else "A2",
-            should_terminate_current_path=False,
-            should_spawn_alternative_hypotheses=len(alternatives) > 0,
-            metadata={
-                "next_topic_id": action.topic_id,
-                "next_hypothesis_id": action.hypothesis_id,
-                "judge_source": "rule",
-            },
-        )
-
     # 将输入统一转换为 PatientContext，便于上游既可以传原文也可以传结构化上下文。
     def _ensure_patient_context(self, patient_input: str | PatientContext) -> PatientContext:
         if isinstance(patient_input, PatientContext):
@@ -1200,10 +1218,10 @@ class EvidenceParser:
         if stripped_text in {"没有", "没有的", "不是", "不会", "无"}:
             return "negative"
 
-        if stripped_text in {"不确定", "不太清楚", "说不上来", "没有特别注意到"}:
+        if stripped_text in {"不确定", "不太清楚", "说不上来", "没有特别注意到", "不太确定", "没太注意", "记不太清", "不好说"}:
             return "uncertain"
 
-        if any(phrase in stripped_text for phrase in {"没有特别注意到", "不太清楚", "说不上来", "不确定"}):
+        if any(phrase in stripped_text for phrase in {"没有特别注意到", "不太清楚", "说不上来", "不确定", "不太确定", "没太注意", "记不太清", "不好说"}):
             return "uncertain"
 
         if len(stripped_text) <= 20:
@@ -1211,7 +1229,7 @@ class EvidenceParser:
                 return "positive"
             if stripped_text.startswith(("没有", "不是", "不会", "无")):
                 return "negative"
-            if stripped_text.startswith(("不确定", "不太清楚", "说不上来", "没注意")):
+            if stripped_text.startswith(("不确定", "不太清楚", "说不上来", "没注意", "不太确定", "没太注意", "记不太清", "不好说")):
                 return "uncertain"
 
         return None

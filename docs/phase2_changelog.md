@@ -2623,6 +2623,140 @@ python -m py_compile frontend/app.py frontend/output_browser.py frontend/ui_adap
 - 结果：
   - 通过
 
+## 三十六、2026-05-01：把 `process_turn()` 主链路切到统一 `turn_interpreter`
+
+### 本次目标
+
+- 落地“去 A4 化后的统一提及项驱动”第一阶段重构
+- 让 `brain/service.py::process_turn()` 每轮只做一次 LLM 长文本解释
+- 用同一份 `mentions` 同时驱动：
+  - `PatientContext`
+  - `A1 key_features`
+  - pending action 的 target-aware 解释
+  - 会话级 `mention_context` 合并
+
+### 本次实现
+
+- 更新：
+  - [brain/types.py](/Users/loki/Workspace/GraduationDesign/brain/types.py)
+  - [brain/state_tracker.py](/Users/loki/Workspace/GraduationDesign/brain/state_tracker.py)
+  - [brain/entity_linker.py](/Users/loki/Workspace/GraduationDesign/brain/entity_linker.py)
+  - [brain/llm_client.py](/Users/loki/Workspace/GraduationDesign/brain/llm_client.py)
+  - [brain/evidence_parser.py](/Users/loki/Workspace/GraduationDesign/brain/evidence_parser.py)
+  - [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - [brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
+  - [tests/test_evidence_parser.py](/Users/loki/Workspace/GraduationDesign/tests/test_evidence_parser.py)
+  - [tests/test_service_stop_flow.py](/Users/loki/Workspace/GraduationDesign/tests/test_service_stop_flow.py)
+- 具体改动：
+  - `types.py`
+    - 新增 `MentionPolarity`、`TurnInterpretationResult`、`MentionContextItem`
+    - 为 `ClinicalFeatureItem / SlotState / EvidenceState / SlotUpdate / SessionState` 补上统一 mention 语义字段
+  - `state_tracker.py`
+    - 新增 `merge_mention_items()`
+    - 会话级提及项按 `present > unclear > absent` 做简单优先级合并
+  - `entity_linker.py`
+    - 新增 `link_mention_items()`，允许对 `present / unclear / absent` 提及项统一做链接
+  - `llm_client.py`
+    - 新增 `turn_interpreter` 结构化 prompt
+    - 输出固定收口到 `mentions + reasoning_summary`
+  - `evidence_parser.py`
+    - 新增 `interpret_turn()` 主入口
+    - `A1` 改为从统一 `mentions` 派生
+    - `interpret_answer_for_target()` 改为复用同一份 `turn_interpreter` 结果，而不是再做第二次长文本解释
+    - 短答命中时会显式保留 `direct_reply` 元数据，避免 judge 再额外调用一次 LLM
+  - `service.py`
+    - `process_turn()` 改成：
+      1. 调用一次 `turn_interpreter`
+      2. 合并 `mention_context`
+      3. 落通用 `slots / evidence_states`
+      4. 再消费 pending action
+      5. 由同一份结果派生 `A1`
+    - 新增对旧 `entity_linker` 测试桩的薄兼容，避免只实现了 `link_clinical_features()` 的老桩直接报错
+
+### 结果影响
+
+- 长文本患者回答不再被 `MedExtractor` 和 `A4 target parser` 各解释一遍
+- “新症状”与“回答上一轮问题”开始共用同一个统一提及结果
+- 短答规则链真正可以短路，不会再被后续 judge 二次触发 LLM
+- 会话内开始显式保留 `mention_context`，为后续继续推进“去 A4 化”和上下文合并简化打下基础
+
+### 验证
+
+- 执行：
+
+```bash
+python -m pytest tests/test_evidence_parser.py tests/test_service_stop_flow.py tests/test_state_tracker.py tests/test_entity_linker.py tests/test_replay_engine.py tests/test_run_batch_replay.py -q
+python -m pytest tests/test_stop_rules.py tests/test_router_control_flow.py tests/test_exam_context_flow.py -q
+```
+
+- 结果：
+  - 通过
+
+## 三十七、2026-05-01：继续把下游收口到 `polarity` 语义
+
+### 本次目标
+
+- 让统一 `mentions` 主链路继续向下游收口
+- 减少 `router / hypothesis_manager / report_builder / search signature / guarded stop` 对旧 `existence/status` 语义的主依赖
+- 保持历史对象兼容，但把“优先读 `polarity`”固定下来
+
+### 本次实现
+
+- 更新：
+  - [brain/types.py](/Users/loki/Workspace/GraduationDesign/brain/types.py)
+  - [brain/hypothesis_manager.py](/Users/loki/Workspace/GraduationDesign/brain/hypothesis_manager.py)
+  - [brain/router.py](/Users/loki/Workspace/GraduationDesign/brain/router.py)
+  - [brain/mcts_engine.py](/Users/loki/Workspace/GraduationDesign/brain/mcts_engine.py)
+  - [brain/retriever.py](/Users/loki/Workspace/GraduationDesign/brain/retriever.py)
+  - [brain/report_builder.py](/Users/loki/Workspace/GraduationDesign/brain/report_builder.py)
+  - [brain/stop_rules.py](/Users/loki/Workspace/GraduationDesign/brain/stop_rules.py)
+  - [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - [brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
+  - [tests/test_hypothesis_manager.py](/Users/loki/Workspace/GraduationDesign/tests/test_hypothesis_manager.py)
+  - [tests/test_router_control_flow.py](/Users/loki/Workspace/GraduationDesign/tests/test_router_control_flow.py)
+  - [tests/test_report_builder.py](/Users/loki/Workspace/GraduationDesign/tests/test_report_builder.py)
+- 具体改动：
+  - `types.py`
+    - 为 `SlotState`、`EvidenceState` 新增 `effective_polarity()`，把旧 `status/existence` 自动兼容映射到统一极性
+  - `hypothesis_manager.py`
+    - 证据反馈改为优先按 `EvidenceState.effective_polarity()` 计分
+    - 为 `unclear` 引入轻量惩罚，表达“降低置信、等待复核”
+  - `router.py`
+    - 路由决策优先读取 `A4DeductiveResult.metadata["polarity"]`
+    - 旧 `existence` 字段保留为兼容 fallback
+  - `mcts_engine.py`
+    - 状态签名开始显式编码 `present / absent / unclear`
+  - `retriever.py`
+    - 证据画像状态判断优先按 `effective_polarity()` 输出
+    - 对 `unclear` 补充 `待复核` 展示文案
+  - `report_builder.py`
+    - 最终报告新增 `confirmed_slots[].polarity`
+    - 新增会话级 `mention_context` 输出
+  - `service.py`
+    - verifier 上下文摘要补入 `mention_context` 与 `polarity`
+  - `stop_rules.py`
+    - guarded acceptance 相关关键证据判断改为优先按 `effective_polarity()` 处理
+
+### 结果影响
+
+- 下游开始真正把 `present / absent / unclear` 当成第一语义来源
+- 旧 `existence/status` 仍可兼容历史对象和旧测试桩，但不再是主判断入口
+- 报告和前端展示更容易直接表达“患者提到了什么、是肯定/否定/不清楚”
+- 为后续继续弱化 `A4` 的中心地位、进一步简化状态机打下了更稳的基础
+
+### 验证
+
+- 执行：
+
+```bash
+python -m pytest tests/test_hypothesis_manager.py tests/test_router_control_flow.py tests/test_report_builder.py -q
+python -m pytest tests/test_stop_rules.py tests/test_service_stop_flow.py tests/test_exam_context_flow.py tests/test_retriever.py tests/test_simulation_engine.py tests/test_replay_engine.py -q
+python -m py_compile brain/types.py brain/hypothesis_manager.py brain/router.py brain/mcts_engine.py brain/retriever.py brain/report_builder.py brain/stop_rules.py brain/service.py
+```
+
+- 结果：
+  - 通过
+
 ## 三十三、2026-04-30：修复实验复盘下拉框切换不灵敏
 
 ### 本次目标
@@ -2736,3 +2870,64 @@ python -m py_compile frontend/app.py frontend/output_browser.py
 
 - 结果：
   - 通过
+
+## 三十六、2026-05-01：完成去 A4 化的全量替换与输出收口
+
+### 本次目标
+
+- 把运行时里的 `A4DeductiveResult / DeductiveDecision / route_after_a4 / a4_evidence_audit` 全量替换为统一的 `pending_action_*` 结构
+- 让 `EvidenceState` 真正由统一 `mentions` 直接写入，pending action 只做目标节点富化、反馈和路由
+- 同步收口前端、focused replay 脚本、README 与配置命名，避免出现“一半叫 A4、一半叫 mentions”的混合状态
+
+### 本次实现
+
+- 更新：
+  - [brain/types.py](/Users/loki/Workspace/GraduationDesign/brain/types.py)
+  - [brain/router.py](/Users/loki/Workspace/GraduationDesign/brain/router.py)
+  - [brain/evidence_parser.py](/Users/loki/Workspace/GraduationDesign/brain/evidence_parser.py)
+  - [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - [brain/simulation_engine.py](/Users/loki/Workspace/GraduationDesign/brain/simulation_engine.py)
+  - [brain/llm_client.py](/Users/loki/Workspace/GraduationDesign/brain/llm_client.py)
+  - [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml)
+  - [frontend/ui_adapter.py](/Users/loki/Workspace/GraduationDesign/frontend/ui_adapter.py)
+  - [frontend/app.py](/Users/loki/Workspace/GraduationDesign/frontend/app.py)
+  - [frontend/output_browser.py](/Users/loki/Workspace/GraduationDesign/frontend/output_browser.py)
+  - [frontend/README.md](/Users/loki/Workspace/GraduationDesign/frontend/README.md)
+  - [brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
+  - [scripts/run_focused_repair_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_focused_repair_replay.py)
+  - [scripts/run_focused_ablation.py](/Users/loki/Workspace/GraduationDesign/scripts/run_focused_ablation.py)
+  - [scripts/run_single_case_smoke.py](/Users/loki/Workspace/GraduationDesign/scripts/run_single_case_smoke.py)
+  - 多个相关测试文件
+- 具体改动：
+  - 新增 `PendingActionResult / PendingActionDecision`，删除运行时对 `A4DeductiveResult / DeductiveDecision` 的依赖
+  - `process_turn()` 统一返回：
+    - `pending_action_result`
+    - `pending_action_decision`
+    - `route_after_pending_action`
+    - `pending_action_audit`
+  - 普通 `verify_evidence` 不再额外生成一份 A4 专用 `slot / evidence_state`
+    - 统一先由 `turn_interpreter -> mentions -> slots / evidence_states`
+    - pending action 再只对目标证据节点补充 action metadata、family 标记、reward 与 hypothesis feedback
+  - `simulation_engine` 的 rollout 轨迹从 `A3 -> A4 -> ROUTE` 改为 `A3 -> PENDING_ACTION -> ROUTE`
+  - focused replay / ablation 输出文件改名为 `pending_action_audit.jsonl`
+  - 前端卡片从 “A4 回答解释与路由” 改为 “上一轮回答解释与路由”
+  - 移除不再使用的 `a4_deductive_judge` / `a4_target_answer_interpretation` prompt 定义以及 `configs/brain.yaml` 中的 `a4.use_llm_deductive_judge`
+
+### 结果影响
+
+- 运行时不再维护第二套 A4 专用语义外壳，真正收口到“统一提及项 + 上一轮动作解释”这条主链路
+- `EvidenceState` 的来源更单一，后续调试“为什么某条证据进入 / 没进入状态机”时可以直接回看 `mentions`
+- 前端、脚本和实验复盘输出都改成同一套 `pending_action_*` 命名，减少理解和排错负担
+
+### 验证
+
+- 执行：
+
+```bash
+conda run -n GraduationDesign python -m pytest tests/test_router_control_flow.py tests/test_exam_context_flow.py tests/test_evidence_parser.py tests/test_focused_replay_metrics.py tests/test_service_config.py -q
+conda run -n GraduationDesign python -m pytest tests/test_frontend_ui_adapter.py tests/test_output_browser.py tests/test_simulation_engine.py tests/test_service_stop_flow.py tests/test_report_builder.py -q
+```
+
+- 结果：
+  - `23 passed`
+  - `17 passed`

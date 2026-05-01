@@ -1,4 +1,4 @@
-"""编排患者上下文提取、A1-A4 推理、图谱检索与局部树搜索。"""
+"""编排患者上下文提取、统一提及推理、图谱检索与局部树搜索。"""
 
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ from .types import (
     A1ExtractionResult,
     A2HypothesisResult,
     A3VerificationResult,
-    A4DeductiveResult,
+    ClinicalFeatureItem,
     ExamContextResult,
     EvidenceState,
     FinalAnswerScore,
@@ -45,6 +45,8 @@ from .types import (
     LinkedEntity,
     MctsAction,
     PatientContext,
+    PendingActionDecision,
+    PendingActionResult,
     ReasoningTrajectory,
     SearchResult,
     SessionState,
@@ -52,6 +54,7 @@ from .types import (
     StopDecision,
     TreeNode,
     RouteDecision,
+    TurnInterpretationResult,
 )
 
 
@@ -166,6 +169,121 @@ class ConsultationBrain:
         _ = session_id
         return self.deps.med_extractor.extract_patient_context(patient_text)
 
+    def _prepare_turn_mentions(
+        self,
+        turn_result: TurnInterpretationResult,
+        pending_action: MctsAction | None = None,
+    ) -> list[LinkedEntity]:
+        if hasattr(self.deps.entity_linker, "link_mention_items"):
+            linked_results = self.deps.entity_linker.link_mention_items(turn_result.mentions)
+        else:
+            linked_results = self.deps.entity_linker.link_clinical_features(turn_result.mentions)
+        positive_links: list[LinkedEntity] = []
+
+        for mention, linked in zip(turn_result.mentions, linked_results):
+            mention.metadata.update(
+                {
+                    "linked_canonical_name": linked.canonical_name,
+                    "linked_similarity": linked.similarity,
+                    "linked_label": linked.label,
+                    "linked_is_trusted": linked.is_trusted,
+                }
+            )
+
+            if linked.node_id is not None and linked.is_trusted:
+                mention.node_id = str(linked.node_id)
+
+            if pending_action is not None and mention.node_id is None:
+                matched = self.deps.evidence_parser.find_target_mention([mention], pending_action)
+                if matched is not None:
+                    mention.node_id = pending_action.target_node_id
+
+            if mention.polarity == "present":
+                positive_links.append(linked)
+
+        return positive_links
+
+    def _build_slot_updates_from_mentions(
+        self,
+        mentions: Iterable[ClinicalFeatureItem],
+        *,
+        turn_index: int,
+    ) -> list[SlotUpdate]:
+        updates: list[SlotUpdate] = []
+
+        for mention in mentions:
+            node_id = str(mention.node_id or mention.normalized_name).strip()
+            if len(node_id) == 0:
+                continue
+
+            updates.append(
+                SlotUpdate(
+                    node_id=node_id,
+                    status=self._polarity_to_slot_status(mention.polarity),
+                    polarity=mention.polarity,
+                    resolution=self._polarity_to_resolution_compat(mention.polarity),
+                    evidence=mention.evidence_text,
+                    turn_index=turn_index,
+                    metadata={
+                        "source_stage": "TURN_INTERPRETER",
+                        "normalized_name": mention.normalized_name,
+                        "display_name": mention.name,
+                        **dict(mention.metadata),
+                    },
+                )
+            )
+
+        return updates
+
+    def _apply_generic_evidence_states_from_mentions(
+        self,
+        session_id: str,
+        mentions: Iterable[ClinicalFeatureItem],
+        *,
+        turn_index: int,
+    ) -> None:
+        for mention in mentions:
+            node_id = str(mention.node_id or "").strip()
+            if len(node_id) == 0:
+                continue
+
+            self.deps.state_tracker.set_evidence_state(
+                session_id,
+                EvidenceState(
+                    node_id=node_id,
+                    polarity=mention.polarity,
+                    existence=self._polarity_to_existence_compat(mention.polarity),
+                    resolution=self._polarity_to_resolution_compat(mention.polarity),
+                    reasoning=str(mention.metadata.get("reasoning") or ""),
+                    source_turns=[turn_index],
+                    metadata={
+                        "target_node_name": mention.name,
+                        "normalized_name": mention.normalized_name,
+                        "source_stage": "TURN_INTERPRETER",
+                        **dict(mention.metadata),
+                    },
+                ),
+            )
+
+    def _polarity_to_slot_status(self, polarity: str) -> str:
+        if polarity == "present":
+            return "true"
+        if polarity == "absent":
+            return "false"
+        return "unknown"
+
+    def _polarity_to_existence_compat(self, polarity: str) -> str:
+        if polarity == "present":
+            return "exist"
+        if polarity == "absent":
+            return "non_exist"
+        return "unknown"
+
+    def _polarity_to_resolution_compat(self, polarity: str) -> str:
+        if polarity in {"present", "absent"}:
+            return "clear"
+        return "hedged"
+
     # 根据上一轮待验证动作更新证据状态、槽位状态和路由决策。
     def update_from_pending_action(
         self,
@@ -173,12 +291,13 @@ class ConsultationBrain:
         patient_context: PatientContext,
         patient_text: str,
         turn_index: int,
-    ) -> tuple[A4DeductiveResult | None, object | None, object | None, list[SlotUpdate]]:
+        turn_result: TurnInterpretationResult | None = None,
+    ) -> tuple[PendingActionResult | None, PendingActionDecision | None, RouteDecision | None, list[SlotUpdate]]:
         tracker = self.deps.state_tracker
         pending_action = tracker.get_pending_action(session_id)
 
         # 没有 pending_action 说明这句患者输入不是在回答上一轮问题，
-        # 而是新的自由描述；本轮前半段就不做 A4 消费。
+        # 而是新的自由描述；本轮前半段就不做“上一轮动作消化”。
         if pending_action is None:
             return None, None, None, []
 
@@ -199,7 +318,7 @@ class ConsultationBrain:
             )
 
         if pending_action.action_type in {"collect_exam_context", "collect_general_exam_context"}:
-            # 检查上下文动作和普通 verify 动作的解析逻辑完全不同，单独走专门分支。
+            # 检查上下文动作和普通 verify 动作的解析逻辑不同，单独走专门分支。
             return self._update_from_exam_context_action(
                 session_id,
                 pending_action,
@@ -207,81 +326,65 @@ class ConsultationBrain:
                 turn_index,
             )
 
-        # 普通 verify 动作先按 target-aware A4 解释回答，再把结果落成 slot update。
-        a4_result = self.deps.evidence_parser.interpret_answer_for_target(patient_text, pending_action)
-        a4_updates = self.deps.evidence_parser.build_slot_updates_from_a4(
-            pending_action,
-            a4_result,
-            patient_text,
-            turn_index=turn_index,
+        # 普通 verify 动作直接从统一 mentions 中解释出目标提及项；
+        # slot / evidence_state 已在前半段统一写入，这里只做目标节点富化、反馈与路由。
+        pending_action_result = (
+            self.deps.evidence_parser.derive_pending_action_result(turn_result, pending_action, patient_text)
+            if turn_result is not None
+            else self.deps.evidence_parser.derive_pending_action_result_from_text(patient_text, pending_action)
         )
-        tracker.apply_slot_updates(session_id, a4_updates)
-
-        # 同一份 A4 结果还会同步转成 evidence_state，
-        # 因为 stop_rules / guarded gate / repair 更依赖 evidence_state 的存在性和 family 信息。
         evidence_tags = self._infer_action_evidence_tags(pending_action)
         confirmed_family_candidate = self._is_confirmed_family_candidate(
             pending_action,
-            a4_result,
+            pending_action_result,
             evidence_tags,
         )
-        provisional_family_candidate = self._is_provisional_family_candidate(a4_result, evidence_tags)
-        evidence_state = EvidenceState(
-            node_id=pending_action.target_node_id,
-            existence=a4_result.existence,
-            resolution=a4_result.resolution,
-            reasoning=a4_result.reasoning,
-            source_turns=[turn_index],
-            metadata={
-                "action_id": pending_action.action_id,
-                "hypothesis_id": pending_action.hypothesis_id,
-                "relation_type": pending_action.metadata.get("relation_type"),
-                "target_node_name": pending_action.target_node_name,
-                "target_node_label": pending_action.target_node_label,
-                "evidence_tags": sorted(evidence_tags),
-                "a4_supporting_span": a4_result.supporting_span,
-                "a4_negation_span": a4_result.negation_span,
-                "a4_uncertain_span": a4_result.uncertain_span,
-                "confirmed_family_candidate": confirmed_family_candidate,
-                "confirmed_family_candidates": sorted(evidence_tags & GUARDED_CONFIRMED_EVIDENCE_TAGS),
-                "provisional_family_candidate": provisional_family_candidate,
-                "provisional_family_candidates": sorted(
-                    evidence_tags & {"imaging", "oxygenation", "pathogen", "immune_status", "pcp_specific"}
-                ),
-                "patient_answer": patient_text,
-            },
+        provisional_family_candidate = self._is_provisional_family_candidate(pending_action_result, evidence_tags)
+        evidence_state = self._get_or_build_pending_action_evidence_state(
+            session_id,
+            pending_action,
+            pending_action_result,
+            turn_index,
+        )
+        self._enrich_pending_action_evidence_state(
+            evidence_state,
+            pending_action,
+            pending_action_result,
+            evidence_tags,
+            patient_text,
+            confirmed_family_candidate,
+            provisional_family_candidate,
         )
         tracker.set_evidence_state(session_id, evidence_state)
-        self._record_a4_evidence_audit(session_id, pending_action, evidence_state, a4_result, patient_text, turn_index)
+        self._record_pending_action_audit(
+            session_id,
+            pending_action,
+            evidence_state,
+            pending_action_result,
+            patient_text,
+            turn_index,
+        )
 
-        # A4 证据一旦写入，就立即反馈到 hypothesis 排名和 action_stats，
+        # 目标节点一旦被统一 mentions 写入并富化完成，就立即反馈到 hypothesis 排名和 action_stats，
         # 这样本轮后续 search 会基于最新诊断竞争态继续推进。
         self._apply_hypothesis_feedback(session_id, pending_action, evidence_state)
-        self._record_action_reward(session_id, pending_action, a4_result)
+        self._record_action_reward(session_id, pending_action, pending_action_result)
         tracker.get_session(session_id).metadata["last_answered_action"] = pending_action
         tracker.clear_pending_action(session_id)
         updated_state = tracker.get_session(session_id)
 
-        # 最后再基于“已更新后的 hypothesis 排名”做 deductive judge 和 route，
-        # 避免路由还停留在旧的诊断排序上。
-        current_hypothesis = self._find_hypothesis_by_id(
-            updated_state.candidate_hypotheses,
-            pending_action.hypothesis_id,
-        )
-        alternatives = [
-            item
-            for item in updated_state.candidate_hypotheses
-            if current_hypothesis is None or item.node_id != current_hypothesis.node_id
-        ]
-        deductive_decision = self.deps.evidence_parser.judge_deductive_result(
-            patient_context,
+        # 最后再基于“已更新后的 hypothesis 排名”做路由，
+        # 避免阶段切换还停留在旧的诊断排序上。
+        pending_action_decision = self.deps.router.build_pending_action_decision(
+            pending_action_result,
             pending_action,
-            a4_result,
-            current_hypothesis,
-            alternatives,
+            updated_state,
         )
-        route_after_a4 = self.deps.router.decide_next_stage(deductive_decision, updated_state)
-        return a4_result, deductive_decision, route_after_a4, a4_updates
+        route_after_pending_action = self.deps.router.decide_next_stage(
+            pending_action_decision,
+            updated_state,
+        )
+        return pending_action_result, pending_action_decision, route_after_pending_action, []
 
     # 处理 collect_exam_context：更新检查上下文，必要时把结果映射到具体证据节点。
     def _update_from_exam_context_action(
@@ -290,7 +393,7 @@ class ConsultationBrain:
         pending_action: MctsAction,
         patient_text: str,
         turn_index: int,
-    ) -> tuple[A4DeductiveResult | None, object | None, object | None, list[SlotUpdate]]:
+    ) -> tuple[PendingActionResult | None, PendingActionDecision | None, RouteDecision | None, list[SlotUpdate]]:
         tracker = self.deps.state_tracker
 
         # exam_context 解析会一次性提取：
@@ -331,12 +434,12 @@ class ConsultationBrain:
                 exam_result,
             )
 
-        # exam_context 也会构造一个轻量 A4 result，便于后续统一复盘“这一轮发生了什么”。
-        a4_result = self._build_a4_result_from_exam_context(pending_action, exam_result)
+        # exam_context 也会构造一个轻量 pending_action_result，便于统一复盘“这一轮发生了什么”。
+        pending_action_result = self._build_pending_action_result_from_exam_context(pending_action, exam_result)
         tracker.get_session(session_id).metadata["last_exam_context_result"] = asdict(exam_result)
         tracker.get_session(session_id).metadata["last_answered_action"] = pending_action
         tracker.clear_pending_action(session_id)
-        route_after_a4 = RouteDecision(
+        route_after_pending_action = RouteDecision(
             stage="A3",
             reason="已解析检查上下文回答，继续根据现有证据执行搜索或澄清。",
             next_topic_id=pending_action.topic_id,
@@ -349,7 +452,7 @@ class ConsultationBrain:
                 "followup_reason": exam_result.followup_reason,
             },
         )
-        return a4_result, None, route_after_a4, exam_updates
+        return pending_action_result, None, route_after_pending_action, exam_updates
 
     # 将检查上下文中映射到具体证据节点的结果写入 evidence_states 并反馈 hypothesis。
     def _sync_general_exam_context_to_specific_kinds(
@@ -456,7 +559,7 @@ class ConsultationBrain:
                 reasoning=f"由检查上下文回答映射得到：{update.value or update.evidence or ''}",
                 source_turns=[turn_index],
                 metadata={
-                    "source_stage": "A4_EXAM_CONTEXT",
+                    "source_stage": "PENDING_ACTION_EXAM_CONTEXT",
                     "action_id": pending_action.action_id,
                     "hypothesis_id": pending_action.hypothesis_id,
                     "exam_kind": exam_result.exam_kind,
@@ -473,22 +576,92 @@ class ConsultationBrain:
                 related_ids,
             )
 
-    # 将检查上下文解析结果转换成兼容前端和报告的 A4DeductiveResult。
-    def _build_a4_result_from_exam_context(
+    # 优先复用本轮统一 mentions 已写入的 target evidence_state；若异常缺失，再从同一份解释结果补一份。
+    def _get_or_build_pending_action_evidence_state(
+        self,
+        session_id: str,
+        action: MctsAction,
+        pending_action_result: PendingActionResult,
+        turn_index: int,
+    ) -> EvidenceState:
+        state = self.deps.state_tracker.get_session(session_id)
+        existing = state.evidence_states.get(action.target_node_id)
+
+        if existing is not None:
+            if turn_index not in existing.source_turns:
+                existing.source_turns.append(turn_index)
+            return existing
+
+        return EvidenceState(
+            node_id=action.target_node_id,
+            polarity=pending_action_result.polarity,
+            existence=self._polarity_to_existence_compat(pending_action_result.polarity),
+            resolution=pending_action_result.resolution,
+            reasoning=pending_action_result.reasoning,
+            source_turns=[turn_index],
+            metadata={
+                "source_stage": "TURN_INTERPRETER",
+                "recovered_for_pending_action": True,
+                "target_node_name": action.target_node_name,
+            },
+        )
+
+    # 在不重建 evidence_state 的前提下，把 pending_action 相关的解释信息补充到目标节点上。
+    def _enrich_pending_action_evidence_state(
+        self,
+        evidence_state: EvidenceState,
+        action: MctsAction,
+        pending_action_result: PendingActionResult,
+        evidence_tags: set[str],
+        patient_text: str,
+        confirmed_family_candidate: bool,
+        provisional_family_candidate: bool,
+    ) -> None:
+        evidence_state.polarity = pending_action_result.polarity
+        evidence_state.existence = self._polarity_to_existence_compat(pending_action_result.polarity)
+        evidence_state.resolution = pending_action_result.resolution
+        evidence_state.reasoning = pending_action_result.reasoning
+        evidence_state.metadata.update(
+            {
+                "action_id": action.action_id,
+                "hypothesis_id": action.hypothesis_id,
+                "relation_type": action.metadata.get("relation_type"),
+                "target_node_name": action.target_node_name,
+                "target_node_label": action.target_node_label,
+                "evidence_tags": sorted(evidence_tags),
+                "supporting_span": pending_action_result.supporting_span,
+                "negation_span": pending_action_result.negation_span,
+                "uncertain_span": pending_action_result.uncertain_span,
+                "confirmed_family_candidate": confirmed_family_candidate,
+                "confirmed_family_candidates": sorted(evidence_tags & GUARDED_CONFIRMED_EVIDENCE_TAGS),
+                "provisional_family_candidate": provisional_family_candidate,
+                "provisional_family_candidates": sorted(
+                    evidence_tags & {"imaging", "oxygenation", "pathogen", "immune_status", "pcp_specific"}
+                ),
+                "patient_answer": patient_text,
+                **dict(pending_action_result.metadata),
+            }
+        )
+
+    # 将检查上下文解析结果转换成兼容前端和报告的 pending_action_result。
+    def _build_pending_action_result_from_exam_context(
         self,
         action: MctsAction,
         exam_result: ExamContextResult,
-    ) -> A4DeductiveResult:
-        existence = "unknown"
+    ) -> PendingActionResult:
+        polarity = "unclear"
         resolution = "hedged" if exam_result.availability == "unknown" else "clear"
 
         if exam_result.availability == "done":
-            existence = "exist"
+            polarity = "present"
         elif exam_result.availability == "not_done":
-            existence = "non_exist"
+            polarity = "absent"
 
-        return A4DeductiveResult(
-            existence=existence,  # type: ignore[arg-type]
+        return PendingActionResult(
+            action_type=action.action_type,
+            target_node_id=action.target_node_id,
+            target_node_name=action.target_node_name,
+            polarity=polarity,  # type: ignore[arg-type]
             resolution=resolution,  # type: ignore[arg-type]
             reasoning=exam_result.reasoning,
             supporting_span="；".join(item.raw_text for item in exam_result.mentioned_results),
@@ -1035,7 +1208,7 @@ class ConsultationBrain:
             # 而是对每个 child 都做一次独立 rollout，尽量多收集候选路径。
             for child in child_nodes:
                 # rollout_from_tree_node 会模拟：
-                # A3 动作 -> A4 假想回答分支 -> route -> 下一步动作 ...
+                # A3 动作 -> 假想回答分支 -> route -> 下一步动作 ...
                 # 直到达到 max_depth、路径停止，或没有后续动作。
                 trajectory = self.deps.simulation_engine.rollout_from_tree_node(
                     child,
@@ -1149,20 +1322,29 @@ class ConsultationBrain:
             raw_sections.append("累计已确认槽位：")
 
             for slot in state.slots.values():
-                if slot.status == "unknown":
+                if slot.status == "unknown" and slot.effective_polarity() == "unclear":
                     continue
 
                 evidence_text = "；".join(str(item) for item in slot.evidence if len(str(item).strip()) > 0)
                 raw_sections.append(
-                    f"- {slot.node_id}: status={slot.status}, resolution={slot.resolution}, evidence={evidence_text}"
+                    f"- {slot.node_id}: polarity={slot.effective_polarity()}, status={slot.status}, resolution={slot.resolution}, evidence={evidence_text}"
+                )
+
+        if len(state.mention_context) > 0:
+            raw_sections.append("累计提及项上下文：")
+
+            for mention in state.mention_context.values():
+                evidence_text = "；".join(str(item) for item in mention.evidence if len(str(item).strip()) > 0)
+                raw_sections.append(
+                    f"- {mention.display_name or mention.normalized_name}: polarity={mention.polarity}, evidence={evidence_text}"
                 )
 
         if len(state.evidence_states) > 0:
-            raw_sections.append("累计 A4 证据判断：")
+            raw_sections.append("累计上一轮动作证据判断：")
 
             for evidence in state.evidence_states.values():
                 raw_sections.append(
-                    f"- {evidence.node_id}: existence={evidence.existence}, resolution={evidence.resolution}, reasoning={evidence.reasoning}"
+                    f"- {evidence.node_id}: polarity={evidence.effective_polarity()}, existence={evidence.existence}, resolution={evidence.resolution}, reasoning={evidence.reasoning}"
                 )
 
         if len(state.candidate_hypotheses) > 0:
@@ -1209,38 +1391,53 @@ class ConsultationBrain:
     # 处理单轮患者输入，并输出当前下一问或最终报告。
     def process_turn(self, session_id: str, patient_text: str) -> dict:
         tracker = self.deps.state_tracker
-        # 单轮入口先推进轮次，再把患者原话结构化；随后优先消费“上一轮待验证动作”的回答。
-        # 这决定了本轮不是“从零开始推理”，而是“先更新上一问的结果，再决定下一步”。
+        # 单轮入口先推进轮次，再统一执行一次 turn_interpreter。
+        # 之后所有分支都只消费这一份 mentions 结果，避免重复解释同一回答。
         turn_index = tracker.increment_turn(session_id)
-        patient_context = self.ingest_patient_turn(session_id, patient_text)
+        pending_action = tracker.get_pending_action(session_id)
+        known_feature_names = self._collect_known_feature_names(session_id)
+        turn_result = self.deps.evidence_parser.interpret_turn(patient_text, pending_action=pending_action)
+        patient_context = self.deps.evidence_parser.build_patient_context_from_turn(turn_result, patient_text)
+        a1_result = self.deps.evidence_parser.run_a1_key_symptom_extraction(
+            patient_context,
+            known_feature_names=known_feature_names,
+        )
+        linked_entities = self._prepare_turn_mentions(turn_result, pending_action)
+        generic_updates = self._build_slot_updates_from_mentions(turn_result.mentions, turn_index=turn_index)
+
+        # 统一提及项先合并进会话上下文，再写入通用 slots/evidence_states，
+        # 让 present / unclear / absent 都能被后续检索、重排与冲突分析复用。
+        tracker.merge_mention_items(session_id, turn_result.mentions, turn_index=turn_index)
+        if len(generic_updates) > 0:
+            tracker.apply_slot_updates(session_id, generic_updates)
+        self._apply_generic_evidence_states_from_mentions(session_id, turn_result.mentions, turn_index=turn_index)
 
         # 如果上一轮已经发出问题，这里会先把本轮回答解释成：
-        # - A4 证据判断
+        # - 上一轮动作对应的目标证据判断
         # - exam context 更新
         # - slot / evidence state 更新
         # - route 决策
         # 也就是说，真正的状态刷新发生在 A1/A2/A3 之前。
-        a4_result, deductive_decision, route_after_a4, a4_updates = self.update_from_pending_action(
+        pending_action_result, pending_action_decision, route_after_pending_action, pending_action_updates = self.update_from_pending_action(
             session_id,
             patient_context,
             patient_text,
             turn_index,
+            turn_result=turn_result,
         )
 
-        # A4 即使给出局部 STOP 倾向，也要先降级成继续搜索，由 verifier + guarded gate 再做一次全局确认。
-        route_after_a4 = self._gate_route_after_a4(route_after_a4)
+        # pending_action 即使给出局部 STOP 倾向，也要先降级成继续搜索，由 verifier + guarded gate 再做一次全局确认。
+        route_after_pending_action = self._gate_pending_action_route(route_after_pending_action)
 
         # `applied_updates` 用来累计本轮所有真正写入状态的更新，最终统一返回给前端 / replay 结果。
-        # 这里先放入 A4/exam-context 已经产生的更新，后面如果 A1 再抽出新线索，会继续 append 进去。
-        applied_updates: list[SlotUpdate] = list(a4_updates)
+        # 统一提及写入是本轮的主状态来源，exam_context 等动作产生的补充更新叠加在后面。
+        applied_updates: list[SlotUpdate] = list(generic_updates) + list(pending_action_updates)
 
-        # 读取一次已经过 A4 刷新的最新会话状态；后续阶段判断都基于这个状态而不是旧状态。
+        # 读取一次已经过 pending_action 刷新的最新会话状态；后续阶段判断都基于这个状态而不是旧状态。
         state = tracker.get_session(session_id)
-        stage_after_a4 = getattr(route_after_a4, "stage", None)
+        stage_after_pending_action = getattr(route_after_pending_action, "stage", None)
 
         # 下面这些对象是本轮统一返回结构的占位结果；无论走哪条分支，都尽量返回同一套字段。
-        a1_result = A1ExtractionResult()
-        linked_entities: list[LinkedEntity] = []
         a2_result = A2HypothesisResult()
         search_result = SearchResult()
         selected_action: MctsAction | None = None
@@ -1257,43 +1454,25 @@ class ConsultationBrain:
         forced_stop_decision: StopDecision | None = None
 
         # 这是基于“当前 session_state 里有没有槽位 / hypothesis”得到的朴素阶段判断，
-        # 后面还会与 A4 的 route 决策合并，形成真正的 `effective_stage`。
+        # 后面还会与 pending_action 的 route 决策合并，形成真正的 `effective_stage`。
         route_after_slot_update = self.deps.router.route_after_slot_update(state)
 
-        # 首轮主诉，或 A4/路由显式要求回到 A1 时，重新做关键线索抽取。
-        should_run_a1 = tracker.get_session(session_id).turn_index == 1 or stage_after_a4 == "A1"
+        # A1 现在只是同一份 mentions 的“首轮检索视图”，因此每轮都可稳定派生，
+        # 不再需要再做一次独立的抽取或写槽位。
+        should_run_a1 = True
 
-        if should_run_a1:
-            # A1 的职责是从当前这句自然语言里找显式医学线索；
-            # `known_feature_names` 用来告诉 extractor：这些特征之前已经见过，当前轮别轻易重复抽成“新线索”。
-            a1_result = self.deps.evidence_parser.run_a1_key_symptom_extraction(
-                patient_context,
-                known_feature_names=self._collect_known_feature_names(session_id),
-            )
-
-            # A1 本身只负责抽取，真正写回会话状态仍然通过 SlotUpdate -> StateTracker 完成。
-            a1_updates = self.deps.evidence_parser.build_slot_updates_from_a1(a1_result, turn_index=turn_index)
-
-            if len(a1_updates) > 0:
-                # 只有当 A1 真的抽到了有效 key features，才写入 slots，并记录到本轮 updates 列表里。
-                tracker.apply_slot_updates(session_id, a1_updates)
-                applied_updates.extend(a1_updates)
-
-            # 无论 A1 是否抽到很多特征，这一轮都会做实体链接，为后续 R1 提供图谱入口。
-            linked_entities = self.deps.entity_linker.link_clinical_features(patient_context.clinical_features)
-        else:
-            # 普通 A3 追问轮次通常不重跑 A1，但仍要保留实体链接能力，
-            # 因为患者回答里可能含有额外的新症状词，后续 A2 refresh 时仍可能用到。
-            linked_entities = self.deps.entity_linker.link_clinical_features(patient_context.clinical_features)
-
-        # A4 写回状态后，再根据最新槽位与 hypothesis 重新判断本轮主阶段。
+        # pending_action 写回状态后，再根据最新槽位与 hypothesis 重新判断本轮主阶段。
         route_after_slot_update = self.deps.router.route_after_slot_update(tracker.get_session(session_id))
 
         # `effective_stage` 的优先级是：
-        # - 若 A4 没给出更强约束，沿用基于 state 的 route_after_slot_update
-        # - 若 A4 明确要求转去 A2/A3/FALLBACK，则优先听从 A4 的路由结果
-        # - 只有 A4=None 或 A4->A1 时，才允许 route_after_slot_update 接管
-        effective_stage = route_after_slot_update.stage if stage_after_a4 in {None, "A1"} else stage_after_a4
+        # - 若 pending_action 没给出更强约束，沿用基于 state 的 route_after_slot_update
+        # - 若 pending_action 明确要求转去 A2/A3/FALLBACK，则优先听从这条路由结果
+        # - 只有 pending_action=None 或 pending_action->A1 时，才允许 route_after_slot_update 接管
+        effective_stage = (
+            route_after_slot_update.stage
+            if stage_after_pending_action in {None, "A1"}
+            else stage_after_pending_action
+        )
 
         # 先处理无需正式 search 的快捷分支：检查 follow-up、主诉澄清、重复 intake 停止、fallback。
         if exam_followup_action is not None:
@@ -1303,11 +1482,16 @@ class ConsultationBrain:
             search_result.selected_action = selected_action
             search_result.root_best_action = selected_action
             search_result.metadata["fallback_reason"] = "exam_context_needs_followup"
-        elif self._should_stop_after_repeated_chief_complaint(session_id, patient_context, a1_result, a4_result):
+        elif self._should_stop_after_repeated_chief_complaint(
+            session_id,
+            patient_context,
+            a1_result,
+            pending_action_result,
+        ):
             # 连续两轮主诉澄清仍然没有任何临床信号时，不再机械重复 intake，直接阶段性停止。
             forced_stop_decision = self._build_repeated_chief_complaint_stop_decision(session_id)
             search_result.metadata["fallback_reason"] = "repeated_chief_complaint_without_signal"
-        elif self._should_collect_chief_complaint(patient_context, a1_result, a4_result):
+        elif self._should_collect_chief_complaint(patient_context, a1_result, pending_action_result):
             # 当前输入几乎没有可推理的症状/病史/检查信息，先回到“请描述主诉”的 intake 动作。
             selected_action = self._build_chief_complaint_intake_action(patient_text)
             search_result.selected_action = selected_action
@@ -1335,7 +1519,7 @@ class ConsultationBrain:
             )
 
             if should_run_a2:
-                # 只有在 hypothesis 尚未建立、A4 明确要求回 A2、或 A1 抽出了新线索时，才重跑 R1 + A2。
+                # 只有在 hypothesis 尚未建立、pending_action 明确要求回 A2、或 A1 抽出了新线索时，才重跑 R1 + A2。
                 a2_result = self._run_a2(session_id, patient_context, a1_result, linked_entities)
             else:
                 # 大多数常规 A3 追问轮次会复用上一轮的 hypothesis 排名，避免每轮重复重算 A2。
@@ -1444,12 +1628,18 @@ class ConsultationBrain:
                 "a2": asdict(a2_result),
                 "a2_evidence_profiles": a2_evidence_profiles,
                 "a3": asdict(A3VerificationResult()),
-                "a4": asdict(a4_result) if a4_result is not None else None,
-                "deductive_decision": asdict(deductive_decision) if deductive_decision is not None else None,
-                "route_after_a4": asdict(route_after_a4) if route_after_a4 is not None else None,
+                "pending_action_result": (
+                    asdict(pending_action_result) if pending_action_result is not None else None
+                ),
+                "pending_action_decision": (
+                    asdict(pending_action_decision) if pending_action_decision is not None else None
+                ),
+                "route_after_pending_action": (
+                    asdict(route_after_pending_action) if route_after_pending_action is not None else None
+                ),
                 "route_after_slot_update": asdict(route_after_slot_update),
                 "updates": [asdict(item) for item in applied_updates],
-                "evidence_audit": tracker.get_session(session_id).metadata.get("last_a4_evidence_audit"),
+                "pending_action_audit": tracker.get_session(session_id).metadata.get("last_pending_action_audit"),
                 "search_report": (
                     self.deps.report_builder.build_search_report(tracker.get_session(session_id), search_result)
                     if len(search_result.trajectories) > 0 or search_result.selected_action is not None
@@ -1494,12 +1684,16 @@ class ConsultationBrain:
             "a2": asdict(a2_result),
             "a2_evidence_profiles": a2_evidence_profiles,
             "a3": asdict(a3_result),
-            "a4": asdict(a4_result) if a4_result is not None else None,
-            "deductive_decision": asdict(deductive_decision) if deductive_decision is not None else None,
-            "route_after_a4": asdict(route_after_a4) if route_after_a4 is not None else None,
+            "pending_action_result": asdict(pending_action_result) if pending_action_result is not None else None,
+            "pending_action_decision": (
+                asdict(pending_action_decision) if pending_action_decision is not None else None
+            ),
+            "route_after_pending_action": (
+                asdict(route_after_pending_action) if route_after_pending_action is not None else None
+            ),
             "route_after_slot_update": asdict(route_after_slot_update),
             "updates": [asdict(item) for item in applied_updates],
-            "evidence_audit": tracker.get_session(session_id).metadata.get("last_a4_evidence_audit"),
+            "pending_action_audit": tracker.get_session(session_id).metadata.get("last_pending_action_audit"),
             "search_report": (
                 self.deps.report_builder.build_search_report(tracker.get_session(session_id), search_result)
                 if len(search_result.trajectories) > 0 or search_result.selected_action is not None
@@ -1510,13 +1704,13 @@ class ConsultationBrain:
             "final_report": None,
         }
 
-    # 将 A4 问答解释写成逐轮审计记录，用来定位“问到了但没有进入 confirmed family”的断点。
-    def _record_a4_evidence_audit(
+    # 将上一轮动作解释写成逐轮审计记录，用来定位“问到了但没有进入 confirmed family”的断点。
+    def _record_pending_action_audit(
         self,
         session_id: str,
         action: MctsAction,
         evidence_state: EvidenceState,
-        a4_result: A4DeductiveResult,
+        pending_action_result: PendingActionResult,
         patient_text: str,
         turn_index: int,
     ) -> None:
@@ -1535,12 +1729,12 @@ class ConsultationBrain:
             "hypothesis_id": action.hypothesis_id,
             "topic_id": action.topic_id,
             "patient_answer": patient_text,
-            "existence": a4_result.existence,
-            "resolution": a4_result.resolution,
-            "reasoning": a4_result.reasoning,
-            "supporting_span": a4_result.supporting_span,
-            "negation_span": a4_result.negation_span,
-            "uncertain_span": a4_result.uncertain_span,
+            "polarity": pending_action_result.polarity,
+            "resolution": pending_action_result.resolution,
+            "reasoning": pending_action_result.reasoning,
+            "supporting_span": pending_action_result.supporting_span,
+            "negation_span": pending_action_result.negation_span,
+            "uncertain_span": pending_action_result.uncertain_span,
             "relation_type": str(action.metadata.get("relation_type") or ""),
             "question_type_hint": str(action.metadata.get("question_type_hint") or ""),
             "evidence_tags": sorted(evidence_tags),
@@ -1553,16 +1747,16 @@ class ConsultationBrain:
             ),
             "entered_confirmed_family": confirmed_family_candidate,
         }
-        history = state.metadata.get("a4_evidence_audit_history", [])
+        history = state.metadata.get("pending_action_audit_history", [])
 
         if not isinstance(history, list):
             history = []
 
         history.append(entry)
-        state.metadata["last_a4_evidence_audit"] = entry
-        state.metadata["a4_evidence_audit_history"] = history[-48:]
+        state.metadata["last_pending_action_audit"] = entry
+        state.metadata["pending_action_audit_history"] = history[-48:]
 
-    # A4 证据标签必须比动作 metadata 更鲁棒；节点名可兜底识别 CD4、β-D、PCR、CT 等锚点。
+    # 待处理动作的证据标签必须比动作 metadata 更鲁棒；节点名可兜底识别 CD4、β-D、PCR、CT 等锚点。
     def _infer_action_evidence_tags(self, action: MctsAction) -> set[str]:
         tags = {
             item
@@ -1643,14 +1837,14 @@ class ConsultationBrain:
 
         return set()
 
-    # 判断当前 A4 结果是否具备被 guarded gate 计入 confirmed family 的基础条件。
+    # 判断当前上一轮动作结果是否具备被 guarded gate 计入 confirmed family 的基础条件。
     def _is_confirmed_family_candidate(
         self,
         action: MctsAction,
-        a4_result: A4DeductiveResult,
+        pending_action_result: PendingActionResult,
         evidence_tags: set[str],
     ) -> bool:
-        if a4_result.existence != "exist" or a4_result.resolution != "clear":
+        if pending_action_result.polarity != "present" or pending_action_result.resolution != "clear":
             return False
 
         relation_type = str(action.metadata.get("relation_type") or "")
@@ -1658,33 +1852,33 @@ class ConsultationBrain:
             evidence_tags & GUARDED_CONFIRMED_EVIDENCE_TAGS
         )
 
-    # 高价值 anchor 的 exist + hedged 可以进入 provisional family，但仍不等同 confirmed。
+    # 高价值 anchor 的 present + hedged 可以进入 provisional family，但仍不等同 confirmed。
     def _is_provisional_family_candidate(
         self,
-        a4_result: A4DeductiveResult,
+        pending_action_result: PendingActionResult,
         evidence_tags: set[str],
     ) -> bool:
-        if a4_result.existence != "exist" or a4_result.resolution != "hedged":
+        if pending_action_result.polarity != "present" or pending_action_result.resolution != "hedged":
             return False
 
         return bool(evidence_tags & {"imaging", "oxygenation", "pathogen", "immune_status", "pcp_specific"})
 
-    # 根据 A4 结果将 reward 反馈给 MCTS 动作统计。
+    # 根据上一轮动作结果将 reward 反馈给 MCTS 动作统计。
     def _record_action_reward(
         self,
         session_id: str,
         action: MctsAction,
-        a4_result: A4DeductiveResult,
+        pending_action_result: PendingActionResult,
     ) -> None:
         reward = 0.0
 
-        if a4_result.existence == "exist" and a4_result.resolution == "clear":
+        if pending_action_result.polarity == "present" and pending_action_result.resolution == "clear":
             reward = 1.0
-        elif a4_result.existence == "exist" and a4_result.resolution == "hedged":
+        elif pending_action_result.polarity == "present" and pending_action_result.resolution == "hedged":
             reward = 0.5
-        elif a4_result.existence == "non_exist" and a4_result.resolution == "clear":
+        elif pending_action_result.polarity == "absent" and pending_action_result.resolution == "clear":
             reward = -0.4
-        elif a4_result.existence == "non_exist" and a4_result.resolution == "hedged":
+        elif pending_action_result.polarity == "absent" and pending_action_result.resolution == "hedged":
             reward = -0.1
 
         self.deps.state_tracker.record_action_feedback(
@@ -1694,7 +1888,7 @@ class ConsultationBrain:
             {"hypothesis_id": action.hypothesis_id},
         )
 
-    # 将 A4 证据状态反馈回当前假设分数。
+    # 将 evidence_state 反馈回当前假设分数。
     def _apply_hypothesis_feedback(
         self,
         session_id: str,
@@ -1718,6 +1912,14 @@ class ConsultationBrain:
     def _collect_known_feature_names(self, session_id: str) -> list[str]:
         state = self.deps.state_tracker.get_session(session_id)
         names: list[str] = []
+
+        for mention in state.mention_context.values():
+            if mention.normalized_name not in names:
+                names.append(mention.normalized_name)
+
+            display_name = str(mention.display_name).strip()
+            if len(display_name) > 0 and display_name not in names:
+                names.append(display_name)
 
         for slot in state.slots.values():
             if slot.node_id not in names:
@@ -1877,14 +2079,14 @@ class ConsultationBrain:
 
         return None
 
-    # 将 A4 的直接 STOP 先降级为继续搜索，由 verifier 再决定是否真正终止。
-    def _gate_route_after_a4(self, route: RouteDecision | None) -> RouteDecision | None:
+    # 将 pending_action 的直接 STOP 先降级为继续搜索，由 verifier 再决定是否真正终止。
+    def _gate_pending_action_route(self, route: RouteDecision | None) -> RouteDecision | None:
         if route is None or route.stage != "STOP":
             return route
 
         return RouteDecision(
             stage="A3",
-            reason="A4 给出终止倾向，但系统会先经过 search + verifier 二次确认后再真正停止。",
+            reason="上一轮动作解释给出终止倾向，但系统会先经过 search + verifier 二次确认后再真正停止。",
             next_topic_id=route.next_topic_id,
             next_hypothesis_id=route.next_hypothesis_id,
             metadata={
@@ -2838,9 +3040,9 @@ class ConsultationBrain:
         self,
         patient_context: PatientContext,
         a1_result: A1ExtractionResult,
-        a4_result: A4DeductiveResult | None,
+        pending_action_result: PendingActionResult | None,
     ) -> bool:
-        if a4_result is not None:
+        if pending_action_result is not None:
             return False
 
         if len(a1_result.key_features) > 0:
@@ -2864,9 +3066,9 @@ class ConsultationBrain:
         session_id: str,
         patient_context: PatientContext,
         a1_result: A1ExtractionResult,
-        a4_result: A4DeductiveResult | None,
+        pending_action_result: PendingActionResult | None,
     ) -> bool:
-        if not self._should_collect_chief_complaint(patient_context, a1_result, a4_result):
+        if not self._should_collect_chief_complaint(patient_context, a1_result, pending_action_result):
             return False
 
         state = self.deps.state_tracker.get_session(session_id)
@@ -3008,7 +3210,6 @@ def build_default_brain(client: Neo4jClient, config_overrides: dict | None = Non
     llm_config = dict(config.get("llm", {}))
     a1_config = dict(config.get("a1", {}))
     a2_config = dict(config.get("a2", {}))
-    a4_config = dict(config.get("a4", {}))
     fallback_config = dict(config.get("fallback", {}))
     stop_config = dict(config.get("stop", {}))
     repair_config = dict(config.get("repair", {}))
@@ -3061,7 +3262,6 @@ def build_default_brain(client: Neo4jClient, config_overrides: dict | None = Non
             llm_client,
             EvidenceParserConfig(
                 use_llm_extractor=bool(a1_config.get("use_llm_extractor", True)),
-                use_llm_deductive_judge=bool(a4_config.get("use_llm_deductive_judge", True)),
             ),
         ),
         hypothesis_manager=HypothesisManager(

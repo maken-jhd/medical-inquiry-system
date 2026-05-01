@@ -39,7 +39,7 @@ from frontend.ui_adapter import (
     load_demo_replay,
     normalize_backend_turn,
     score_to_progress,
-    translate_existence,
+    translate_polarity,
     translate_resolution,
 )
 
@@ -577,7 +577,7 @@ def _render_decision_panel(turn: dict[str, Any] | None) -> None:
     _render_a1_card(turn.get("a1", {}))
     _render_a2_card(turn.get("a2", {}))
     _render_a3_card(turn.get("a3", {}))
-    _render_a4_card(turn.get("a4", {}))
+    _render_pending_action_card(turn.get("pending_action_result", {}))
     _render_search_card(turn.get("search", {}))
     _render_safety_card(turn.get("safety", {}))
 
@@ -739,24 +739,31 @@ def _render_a3_card(a3: dict[str, Any]) -> None:
             st.caption("证据标签：" + "、".join(str(item) for item in tags))
 
 
-def _render_a4_card(a4: dict[str, Any]) -> None:
-    """展示 A4 回答解释与路由。"""
+def _render_pending_action_card(pending_action_result: dict[str, Any]) -> None:
+    """展示上一轮动作解释与路由。"""
 
     with st.container(border=True):
-        st.markdown("### A4 回答解释与路由")
-        st.caption("系统把上一轮患者回答解释成存在 / 不存在 / 不确定，并决定下一步路由。")
+        st.markdown("### 上一轮回答解释与路由")
+        st.caption("系统围绕上一轮问题解释本轮患者回答，并决定下一步路由。")
         col_a, col_b, col_c = st.columns(3)
-        col_a.metric("证据状态", a4.get("existence_label") or translate_existence(a4.get("existence")))
-        col_b.metric("回答清晰度", a4.get("resolution_label") or translate_resolution(a4.get("resolution")))
-        col_c.metric("路由结果", a4.get("route_label", "暂无"))
-        st.markdown(f"**解释：** {a4.get('reasoning', '暂无 A4 解释')}")
+        col_a.metric(
+            "目标结论",
+            pending_action_result.get("polarity_label") or translate_polarity(pending_action_result.get("polarity")),
+        )
+        col_b.metric(
+            "回答清晰度",
+            pending_action_result.get("resolution_label")
+            or translate_resolution(pending_action_result.get("resolution")),
+        )
+        col_c.metric("路由结果", pending_action_result.get("route_label", "暂无"))
+        st.markdown(f"**解释：** {pending_action_result.get('reasoning', '暂无解释')}")
 
         family_bits = []
-        if a4.get("evidence_families"):
-            family_bits.append("证据 family：" + "、".join(a4.get("evidence_families", [])))
-        if a4.get("entered_confirmed_family"):
+        if pending_action_result.get("evidence_families"):
+            family_bits.append("证据 family：" + "、".join(pending_action_result.get("evidence_families", [])))
+        if pending_action_result.get("entered_confirmed_family"):
             family_bits.append("已进入 confirmed family")
-        if a4.get("provisional_family_candidate"):
+        if pending_action_result.get("provisional_family_candidate"):
             family_bits.append("进入 provisional family 候选")
         if family_bits:
             st.caption("；".join(family_bits))

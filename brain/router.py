@@ -1,4 +1,4 @@
-"""负责根据 A4 演绎结果决定下一步进入的推理阶段。"""
+"""负责根据上一轮动作解释结果决定下一步进入的推理阶段。"""
 
 from __future__ import annotations
 
@@ -6,9 +6,9 @@ from dataclasses import dataclass
 from typing import Optional
 
 from .types import (
-    A4DeductiveResult,
-    DeductiveDecision,
     MctsAction,
+    PendingActionDecision,
+    PendingActionResult,
     RouteDecision,
     SessionState,
     SimulationOutcome,
@@ -17,14 +17,14 @@ from .types import (
 
 @dataclass
 class RouterConfig:
-    """保存 A4 路由阶段的基础策略开关。"""
+    """保存上一轮动作路由阶段的基础策略开关。"""
 
     prefer_reverify_on_hedged: bool = True
     fallback_fail_count: int = 2
 
 
 class ReasoningRouter:
-    """根据状态与演绎分析结果在 A1-A4 阶段之间切换。"""
+    """根据状态与上一轮动作解释结果在 A1/A2/A3 间切换。"""
 
     # 初始化路由器配置。
     def __init__(self, config: RouterConfig | None = None) -> None:
@@ -40,39 +40,44 @@ class ReasoningRouter:
 
         return RouteDecision(stage="A3", reason="已有假设，可进入 A3 选择验证动作。")
 
-    # 在 A4 演绎分析后，根据存在性与回答清晰度做阶段路由。
-    def route_after_question_answer(
+    # 在上一轮动作解释后，根据 polarity 与回答清晰度做阶段路由。
+    def route_after_pending_action(
         self,
-        deductive_result: A4DeductiveResult,
+        pending_action_result: PendingActionResult,
         action: Optional[MctsAction],
         session_state: SessionState,
     ) -> RouteDecision:
         if session_state.fail_count >= self.config.fallback_fail_count:
             return RouteDecision(stage="FALLBACK", reason="失败计数达到阈值，进入兜底流程。")
 
-        deductive_decision = self.build_deductive_decision(deductive_result, action, session_state)
-        return self.decide_next_stage(deductive_decision, session_state)
+        pending_action_decision = self.build_pending_action_decision(
+            pending_action_result,
+            action,
+            session_state,
+        )
+        return self.decide_next_stage(pending_action_decision, session_state)
 
-    # 根据 A4 结果构造更适合代码路由的演绎决策对象。
-    def build_deductive_decision(
+    # 根据上一轮动作结果构造更适合代码路由的决策对象。
+    def build_pending_action_decision(
         self,
-        deductive_result: A4DeductiveResult,
+        pending_action_result: PendingActionResult,
         action: Optional[MctsAction],
         session_state: SessionState,
-    ) -> DeductiveDecision:
+    ) -> PendingActionDecision:
         # action 里携带的是“当前到底在验证哪个 hypothesis/feature/topic”，
         # 先抽出来放进 metadata，后续路由和 audit 都会继续使用。
         hypothesis_id = action.hypothesis_id if action is not None else None
         topic_id = action.topic_id if action is not None else None
         contradicted_feature = action.target_node_id if action is not None else None
         contradicted_feature_name = action.target_node_name if action is not None else None
+        polarity = self._result_polarity(pending_action_result)
 
         # 明确阳性：支持当前主假设；若 hypothesis margin 已足够大，可以给出 STOP 倾向。
-        if deductive_result.existence == "exist" and deductive_result.resolution == "clear":
+        if polarity == "present" and pending_action_result.resolution == "clear":
             next_stage = "STOP" if self._hypothesis_margin_is_sufficient(session_state) else "A3"
-            return DeductiveDecision(
-                existence=deductive_result.existence,
-                resolution=deductive_result.resolution,
+            return PendingActionDecision(
+                polarity=polarity,
+                resolution=pending_action_result.resolution,
                 decision_type="confirm_hypothesis",
                 diagnostic_rationale="验证结果为明确存在，支持当前假设。",
                 next_stage=next_stage,
@@ -84,14 +89,15 @@ class ReasoningRouter:
                     "path_terminal": next_stage == "STOP",
                     "confirmed_feature": contradicted_feature,
                     "confirmed_feature_name": contradicted_feature_name,
+                    "polarity": polarity,
                 },
             )
 
         # 明确阴性：当前验证点与主假设直接矛盾，优先切回 A2 重整候选。
-        if deductive_result.existence == "non_exist" and deductive_result.resolution == "clear":
-            return DeductiveDecision(
-                existence=deductive_result.existence,
-                resolution=deductive_result.resolution,
+        if polarity == "absent" and pending_action_result.resolution == "clear":
+            return PendingActionDecision(
+                polarity=polarity,
+                resolution=pending_action_result.resolution,
                 decision_type="exclude_hypothesis",
                 contradiction_explanation="验证结果为明确不存在，该证据与当前主假设直接矛盾，需要切回 A2 重整假设。",
                 diagnostic_rationale="关键验证点被明确否定。",
@@ -105,14 +111,15 @@ class ReasoningRouter:
                     "contradicted_feature_name": contradicted_feature_name,
                     "need_contradiction_analysis": False,
                     "path_terminal": False,
+                    "polarity": polarity,
                 },
             )
 
         # 模糊阳性：倾向继续 A3 复核，而不是过早切回 A2。
-        if deductive_result.existence == "exist" and deductive_result.resolution == "hedged":
-            return DeductiveDecision(
-                existence=deductive_result.existence,
-                resolution=deductive_result.resolution,
+        if polarity == "present" and pending_action_result.resolution == "hedged":
+            return PendingActionDecision(
+                polarity=polarity,
+                resolution=pending_action_result.resolution,
                 decision_type="reverify_hypothesis",
                 diagnostic_rationale="验证点倾向存在，但回答仍带保留，需继续细化确认。",
                 next_stage="A3" if self.config.prefer_reverify_on_hedged else "A2",
@@ -123,14 +130,15 @@ class ReasoningRouter:
                     "next_hypothesis_id": hypothesis_id,
                     "next_topic_id_hint": contradicted_feature,
                     "path_terminal": False,
+                    "polarity": polarity,
                 },
             )
 
         # 模糊阴性：先保留矛盾分析空间，避免把轻症/表达模糊误当成强反证。
-        if deductive_result.existence == "non_exist" and deductive_result.resolution == "hedged":
-            return DeductiveDecision(
-                existence=deductive_result.existence,
-                resolution=deductive_result.resolution,
+        if polarity in {"absent", "unclear"} and pending_action_result.resolution == "hedged":
+            return PendingActionDecision(
+                polarity=polarity,
+                resolution=pending_action_result.resolution,
                 decision_type="need_more_information",
                 contradiction_explanation=(
                     f"“{contradicted_feature_name or '当前验证点'}”目前呈现弱否定。"
@@ -147,13 +155,14 @@ class ReasoningRouter:
                     "contradicted_feature": contradicted_feature,
                     "contradicted_feature_name": contradicted_feature_name,
                     "path_terminal": False,
+                    "polarity": polarity,
                 },
             )
 
         # 其余情况统一视作“当前证据不足以维持原路径”，回上游重新整理。
-        return DeductiveDecision(
-            existence=deductive_result.existence,
-            resolution=deductive_result.resolution,
+        return PendingActionDecision(
+            polarity=polarity,
+            resolution=pending_action_result.resolution,
             decision_type="switch_hypothesis",
             diagnostic_rationale="当前证据不足以支持既有假设，建议回到上游重新整理线索。",
             next_stage="A1",
@@ -165,27 +174,32 @@ class ReasoningRouter:
                 "contradicted_feature": contradicted_feature,
                 "contradicted_feature_name": contradicted_feature_name,
                 "path_terminal": False,
+                "polarity": polarity,
             },
         )
 
     # 根据演绎决策决定下一步应进入的阶段。
     def decide_next_stage(
         self,
-        deductive_decision: DeductiveDecision,
+        pending_action_decision: PendingActionDecision,
         session_state: SessionState,
     ) -> RouteDecision:
         if session_state.fail_count >= self.config.fallback_fail_count:
             return RouteDecision(stage="FALLBACK", reason="失败计数达到阈值，进入兜底流程。")
 
         return RouteDecision(
-            stage=deductive_decision.next_stage,
-            reason=deductive_decision.diagnostic_rationale or deductive_decision.contradiction_explanation or "已根据 A4 结果更新下一阶段。",
-            next_topic_id=deductive_decision.metadata.get("next_topic_id"),
-            next_hypothesis_id=deductive_decision.metadata.get("next_hypothesis_id"),
+            stage=pending_action_decision.next_stage,
+            reason=(
+                pending_action_decision.diagnostic_rationale
+                or pending_action_decision.contradiction_explanation
+                or "已根据上一轮动作解释结果更新下一阶段。"
+            ),
+            next_topic_id=pending_action_decision.metadata.get("next_topic_id"),
+            next_hypothesis_id=pending_action_decision.metadata.get("next_hypothesis_id"),
             metadata={
-                **dict(deductive_decision.metadata),
-                "should_terminate_current_path": deductive_decision.should_terminate_current_path,
-                "should_spawn_alternative_hypotheses": deductive_decision.should_spawn_alternative_hypotheses,
+                **dict(pending_action_decision.metadata),
+                "should_terminate_current_path": pending_action_decision.should_terminate_current_path,
+                "should_spawn_alternative_hypotheses": pending_action_decision.should_spawn_alternative_hypotheses,
             },
         )
 
@@ -217,3 +231,11 @@ class ReasoningRouter:
 
         ranked = sorted(session_state.candidate_hypotheses, key=lambda item: (-item.score, item.name))
         return ranked[0].score - ranked[1].score >= 1.0
+
+    def _result_polarity(self, pending_action_result: PendingActionResult) -> str:
+        if pending_action_result.polarity in {"present", "absent", "unclear"}:
+            return pending_action_result.polarity
+        metadata_polarity = str(pending_action_result.metadata.get("polarity") or "").strip()
+        if metadata_polarity in {"present", "absent", "unclear"}:
+            return metadata_polarity
+        return "unclear"

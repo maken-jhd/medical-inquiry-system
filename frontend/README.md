@@ -3,7 +3,7 @@
 本目录提供一个面向中期检查的前后端一体演示界面。目标是快速、稳定地展示当前第二阶段问诊系统的核心能力：
 
 - 多轮问诊对话
-- A1 / A2 / A3 / A4 阶段结果
+- A1 / A2 / A3 / 上一轮回答解释
 - 候选诊断排序
 - 下一问选择与 repair action
 - 搜索摘要
@@ -57,7 +57,7 @@ conda run -n GraduationDesign streamlit run frontend/app.py --browser.gatherUsag
 - 不依赖 DashScope / OpenAI API Key
 - 不调用真实 LLM
 - 直接加载本地 JSON demo
-- 可以逐轮查看问诊对话、A1-A4、搜索摘要和安全机制
+- 可以逐轮查看问诊对话、A1/A2/A3、上一轮回答解释、搜索摘要和安全机制
 
 当前内置两个示例：
 
@@ -176,12 +176,12 @@ test_outputs/simulator_replay/
 - `focused_metrics.json` / `ablation_metrics.json` / `benchmark_summary.json`：实验指标汇总
 - `profile_summary.tsv`：acceptance profile 对比汇总
 - `status.json` / `run.log`：运行状态和日志尾部
-- `a4_evidence_audit.jsonl` / `guarded_gate_audit.jsonl`：A4 证据记录与安全闸门审计
+- `pending_action_audit.jsonl` / `guarded_gate_audit.jsonl`：上一轮动作审计与安全闸门审计
 
 页面中会新增“实验复盘模式”：
 
 - 左侧仍按轮次展示问诊对话或实验摘要
-- 右侧继续复用 A1 / A2 / A3 / A4、搜索摘要和安全机制卡片
+- 右侧继续复用 A1 / A2 / A3 / 上一轮回答解释、搜索摘要和安全机制卡片
 - 顶部额外展示实验目录、识别到的文件、病例数、正确接受、错误接受、正确但被拒停、repair 轮数、语义重复轮数和闸门拒绝次数
 - 可以通过“刷新实验索引”按钮重新扫描新生成的输出目录
 - 若某条病例只有 1 轮记录，页面会直接提示“无需切换轮次”，不会渲染轮次 slider
@@ -213,6 +213,7 @@ frontend/
 后端不同运行路径返回的字段可能不完全一致。前端通过 `ui_adapter.py` 做了轻量降级：
 
 - 如果没有 `a1.key_features`，A1 卡片显示“本轮暂无新的关键线索”
+- 如果没有 `pending_action_result`，上一轮回答解释卡片显示“暂无上一轮回答”
 - 如果没有 `a2.primary_hypothesis`，优先从 `final_report.candidate_hypotheses` 或 `search_report.final_answer_scores` 补候选诊断
 - 如果没有 `search_report.tree_node_count`，搜索摘要显示“暂无”
 - 如果没有 `guarded_acceptance` 信息，安全模块显示“未阻止”或“暂无”

@@ -40,10 +40,19 @@ class MctsEngine:
         hypothesis_id: Optional[str] = None,
     ) -> str:
         positive_slots = sorted(
-            f"{slot.node_id}:{slot.resolution}" for slot in session_state.slots.values() if slot.status == "true"
+            f"{slot.node_id}:{slot.effective_polarity()}:{slot.resolution}"
+            for slot in session_state.slots.values()
+            if slot.effective_polarity() == "present"
         )
         negative_slots = sorted(
-            f"{slot.node_id}:{slot.resolution}" for slot in session_state.slots.values() if slot.status == "false"
+            f"{slot.node_id}:{slot.effective_polarity()}:{slot.resolution}"
+            for slot in session_state.slots.values()
+            if slot.effective_polarity() == "absent"
+        )
+        unclear_slots = sorted(
+            f"{slot.node_id}:{slot.effective_polarity()}:{slot.resolution}"
+            for slot in session_state.slots.values()
+            if slot.effective_polarity() == "unclear"
         )
         active_topics = sorted(session_state.active_topics)
         payload = "|".join(
@@ -51,6 +60,7 @@ class MctsEngine:
                 f"H={hypothesis_id or 'NONE'}",
                 f"P={';'.join(positive_slots)}",
                 f"N={';'.join(negative_slots)}",
+                f"U={';'.join(unclear_slots)}",
                 f"T={';'.join(active_topics)}",
                 f"Q={session_state.metadata.get('pending_action_id', '')}",
             ]

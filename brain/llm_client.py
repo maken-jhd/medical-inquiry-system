@@ -151,6 +151,27 @@ class LlmClient:
         # 这里集中维护所有结构化 prompt 模板；
         # 各业务模块只传入 prompt_name，避免 prompt 文本散落在整个 brain 目录。
         prompt_blocks = {
+            "turn_interpreter": (
+                "请把患者本轮回答统一解释为一组临床提及项 mentions。"
+                "不要区分这是自由描述还是在回答上一轮问题；如果提供了 previous_question_text 或 pending_target_name，"
+                "它们只用于帮助你理解短答、省略回答和指代，不要单独输出 pending_answer 对象。"
+                "你必须严格输出一个 JSON object，且只允许包含以下字段：mentions、reasoning_summary。"
+                "mentions 必须始终是对象数组；没有内容时也必须返回 []，不要返回 null。"
+                "每个 mention 对象只允许包含：name、polarity、evidence_span、reasoning。"
+                "name 必须是中文医学提及项名称，可以是症状、风险因素、人群属性、既往史、检查名、检查结果或病原体。"
+                "不要额外输出 category、general_info、certainty、resolution、pending_answer、exam_context 等字段。"
+                "polarity 只能精确取 present、unclear、absent 之一；绝对不要输出 true、false、null、中文枚举或其他字符串。"
+                "present 表示患者本轮表达支持该项存在；"
+                "absent 表示患者本轮表达支持该项不存在或未做过该检查；"
+                "unclear 表示患者本轮无法明确支持或否定该项。"
+                "evidence_span 和 reasoning 必须始终是字符串；没有内容时返回空字符串，不要返回 null。"
+                "如果患者只回答“有 / 没有 / 不太确定 / 没太注意 / 记不太清 / 不好说”，"
+                "且同时给了 previous_question_text 或 pending_target_name，必须把这条短答展开成目标提及项。"
+                "示例1：问“有没有咳嗽？”，答“没有”，则 mentions 至少包含 {name:\"咳嗽\", polarity:\"absent\"}。"
+                "示例2：答“没太注意有没有乏力，不过最近一直咳嗽”，则 mentions 应包含 {name:\"乏力\", polarity:\"unclear\"} 和 {name:\"咳嗽\", polarity:\"present\"}。"
+                "示例3：答“胸部CT没做过”，则 mentions 应包含 {name:\"胸部CT\", polarity:\"absent\"}。"
+                "不要根据患者回答去推断未直接提到的新疾病结论。"
+            ),
             "med_extractor": (
                 "请从患者原话中提取一般信息 P 和患者提及项 C。"
                 "输出字段必须包含 general_info 与 clinical_features。"
@@ -190,33 +211,6 @@ class LlmClient:
                 "请根据患者一般信息、临床特征和图谱候选疾病生成主假设与备选假设。"
                 "输出字段必须包含 primary_hypothesis、alternatives、reasoning、"
                 "supporting_features、conflicting_features、why_primary_beats_alternatives、recommended_next_evidence。"
-            ),
-            "a4_deductive_judge": (
-                "请根据目标验证点、患者回答、当前主假设和备选假设，给出诊断性演绎判断。"
-                "输出字段必须包含 existence、resolution、decision_type、next_stage、"
-                "diagnostic_rationale、contradiction_explanation、"
-                "should_terminate_current_path、should_spawn_alternative_hypotheses、reasoning。"
-            ),
-            "a4_target_answer_interpretation": (
-                "请围绕当前目标验证点，解释患者本轮回答对该目标证据的支持情况。"
-                "你必须严格输出一个 JSON object，且只允许包含以下字段："
-                "existence、resolution、supporting_span、negation_span、uncertain_span、reasoning。"
-                "existence 只能精确取 exist、non_exist、unknown 之一；"
-                "绝对不要输出 true、false、null、中文枚举或其他字符串。"
-                "如果回答明确肯定目标证据，existence=exist；"
-                "如果回答明确否定目标证据，existence=non_exist；"
-                "如果回答是不确定、没注意、记不清、答非所问或信息不足，existence=unknown。"
-                "resolution 只能精确取 clear、hedged、unknown 之一；"
-                "绝对不要输出 true、false、null、confident、doubt 或其他值。"
-                "如果回答结论明确，resolution=clear；"
-                "如果回答带保留、模糊、可能、好像、不太确定，resolution=hedged；"
-                "只有在完全无法判断回答清晰度时，resolution=unknown。"
-                "supporting_span、negation_span、uncertain_span、reasoning 必须始终存在，且都必须是字符串；"
-                "没有对应片段时返回空字符串，不要返回 null。"
-                "你只能围绕当前 target_node_name 解释，不要把回答里提到的其他症状当成本轮目标结论。"
-                "示例1：患者回答“有。”，则 existence=exist，resolution=clear。"
-                "示例2：患者回答“没有。”，则 existence=non_exist，resolution=clear。"
-                "示例3：患者回答“这个我不太确定，没专门注意过。”，则 existence=unknown，resolution=hedged。"
             ),
             "exam_context_interpretation": (
                 "请根据本轮患者回答，解析检查是否做过、提到过哪些检查名、有哪些结果、"

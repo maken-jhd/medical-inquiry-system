@@ -158,7 +158,7 @@ def test_service_exam_context_done_with_result_updates_slot_and_state() -> None:
         ),
     )
 
-    a4_result, _, route_after_a4, updates = brain.update_from_pending_action(
+    pending_action_result, _, route_after_pending_action, updates = brain.update_from_pending_action(
         "s_exam_result",
         PatientContext(raw_text="做过 CD4，结果 150。"),
         "做过 CD4，结果 150。",
@@ -166,9 +166,9 @@ def test_service_exam_context_done_with_result_updates_slot_and_state() -> None:
     )
 
     state = tracker.get_session("s_exam_result")
-    assert a4_result is not None
-    assert a4_result.existence == "exist"
-    assert route_after_a4.stage == "A3"
+    assert pending_action_result is not None
+    assert pending_action_result.polarity == "present"
+    assert route_after_pending_action.stage == "A3"
     assert state.exam_context["general"].availability == "done"
     assert state.exam_context["lab"].availability == "done"
     assert len(updates) == 1
@@ -231,7 +231,7 @@ def test_service_exam_context_not_done_records_state_without_followup() -> None:
         ),
     )
 
-    a4_result, _, _, updates = brain.update_from_pending_action(
+    pending_action_result, _, _, updates = brain.update_from_pending_action(
         "s_exam_not_done",
         PatientContext(raw_text="最近没有做过这些化验。"),
         "最近没有做过这些化验。",
@@ -239,8 +239,8 @@ def test_service_exam_context_not_done_records_state_without_followup() -> None:
     )
 
     state = tracker.get_session("s_exam_not_done")
-    assert a4_result is not None
-    assert a4_result.existence == "non_exist"
+    assert pending_action_result is not None
+    assert pending_action_result.polarity == "absent"
     assert updates == []
     assert state.exam_context["general"].availability == "not_done"
     assert state.exam_context["lab"].availability == "not_done"

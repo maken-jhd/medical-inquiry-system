@@ -7,10 +7,11 @@ from typing import Any, Dict, List, Literal, Optional
 
 
 MentionState = Literal["present", "absent", "unclear"]
+MentionPolarity = MentionState
 SlotTruthValue = Literal["true", "false", "unknown"]
 Resolution = Literal["clear", "hedged", "unknown"]
 EvidenceExistence = Literal["exist", "non_exist", "unknown"]
-ReasoningStage = Literal["A1", "A2", "A3", "A4", "STOP", "FALLBACK"]
+ReasoningStage = Literal["A1", "A2", "A3", "STOP", "FALLBACK"]
 ExamKind = Literal["general", "lab", "imaging", "pathogen"]
 ExamAvailability = Literal["unknown", "done", "not_done"]
 A1SelectionDecision = Literal["selected", "none_salient"]
@@ -40,23 +41,48 @@ class PatientGeneralInfo:
 
 @dataclass
 class ClinicalFeatureItem:
-    """表示 MedExtractor 输出的一条患者提及项。"""
+    """表示统一提及抽取器输出的一条患者提及项。"""
 
     name: str
     normalized_name: str
-    category: str
+    category: str = ""
     mention_state: MentionState = "present"
     evidence_text: str = ""
+    node_id: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def polarity(self) -> MentionPolarity:
+        return self.mention_state
+
+    @polarity.setter
+    def polarity(self, value: MentionPolarity) -> None:
+        self.mention_state = value
+
+
+MentionItem = ClinicalFeatureItem
 
 
 @dataclass
 class PatientContext:
-    """表示 MedExtractor 输出的结构化患者上下文。"""
+    """表示当前轮患者输入的统一结构化上下文。"""
 
     general_info: PatientGeneralInfo = field(default_factory=PatientGeneralInfo)
     clinical_features: List[ClinicalFeatureItem] = field(default_factory=list)
     raw_text: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def mentions(self) -> List[MentionItem]:
+        return self.clinical_features
+
+
+@dataclass
+class TurnInterpretationResult:
+    """表示统一提及抽取器对单轮患者输入的解析结果。"""
+
+    mentions: List[MentionItem] = field(default_factory=list)
+    reasoning: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -79,11 +105,21 @@ class SlotState:
 
     node_id: str
     status: SlotTruthValue = "unknown"
+    polarity: MentionPolarity = "unclear"
     resolution: Resolution = "unknown"
     value: Optional[Any] = None
     evidence: List[str] = field(default_factory=list)
     source_turns: List[int] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def effective_polarity(self) -> MentionPolarity:
+        if self.polarity in {"present", "absent"}:
+            return self.polarity
+        if self.status == "true":
+            return "present"
+        if self.status == "false":
+            return "absent"
+        return "unclear"
 
 
 @dataclass
@@ -91,9 +127,32 @@ class EvidenceState:
     """表示单个证据节点在演绎分析后的状态。"""
 
     node_id: str
+    polarity: MentionPolarity = "unclear"
     existence: EvidenceExistence = "unknown"
     resolution: Resolution = "unknown"
     reasoning: str = ""
+    source_turns: List[int] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def effective_polarity(self) -> MentionPolarity:
+        if self.polarity in {"present", "absent"}:
+            return self.polarity
+        if self.existence == "exist":
+            return "present"
+        if self.existence == "non_exist":
+            return "absent"
+        return "unclear"
+
+
+@dataclass
+class MentionContextItem:
+    """表示会话级合并后的提及项上下文。"""
+
+    normalized_name: str
+    node_id: Optional[str] = None
+    display_name: str = ""
+    polarity: MentionPolarity = "unclear"
+    evidence: List[str] = field(default_factory=list)
     source_turns: List[int] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -312,6 +371,7 @@ class SessionState:
     session_id: str
     turn_index: int = 0
     active_topics: List[str] = field(default_factory=list)
+    mention_context: Dict[str, MentionContextItem] = field(default_factory=dict)
     slots: Dict[str, SlotState] = field(default_factory=dict)
     evidence_states: Dict[str, EvidenceState] = field(default_factory=dict)
     exam_context: Dict[str, ExamContextState] = field(default_factory=default_exam_context)
@@ -330,6 +390,7 @@ class SlotUpdate:
 
     node_id: str
     status: SlotTruthValue
+    polarity: MentionPolarity = "unclear"
     resolution: Resolution = "unknown"
     value: Optional[Any] = None
     evidence: Optional[str] = None
@@ -338,10 +399,13 @@ class SlotUpdate:
 
 
 @dataclass
-class A4DeductiveResult:
-    """表示 A4 演绎分析阶段的结构化判断结果。"""
+class PendingActionResult:
+    """表示系统对“上一轮待处理动作回答”的统一解释结果。"""
 
-    existence: EvidenceExistence = "unknown"
+    action_type: str = ""
+    target_node_id: str = ""
+    target_node_name: str = ""
+    polarity: MentionPolarity = "unclear"
     resolution: Resolution = "unknown"
     reasoning: str = ""
     supporting_span: str = ""
@@ -351,10 +415,10 @@ class A4DeductiveResult:
 
 
 @dataclass
-class DeductiveDecision:
-    """表示 A4 后用于驱动代码路由的诊断决策。"""
+class PendingActionDecision:
+    """表示基于上一轮动作解释结果生成的代码级路由决策。"""
 
-    existence: EvidenceExistence = "unknown"
+    polarity: MentionPolarity = "unclear"
     resolution: Resolution = "unknown"
     decision_type: Literal[
         "confirm_hypothesis",

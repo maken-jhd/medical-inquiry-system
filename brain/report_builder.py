@@ -26,6 +26,7 @@ class ReportBuilder:
                 {
                     "node_id": slot.node_id,
                     "status": slot.status,
+                    "polarity": slot.effective_polarity(),
                     "resolution": slot.resolution,
                     "value": slot.value,
                     "evidence": slot.evidence,
@@ -49,6 +50,7 @@ class ReportBuilder:
             "stop_reason": stop_decision.reason,
             "stop_confidence": stop_decision.confidence,
             "confirmed_slots": confirmed_slots,
+            "mention_context": self._build_public_mention_context(session_state),
             "candidate_hypotheses": hypotheses,
             "active_topics": list(session_state.active_topics),
             "trajectory_count": len(session_state.trajectories),
@@ -235,6 +237,23 @@ class ReportBuilder:
                 public_metadata[key] = sanitized
 
         return public_metadata
+
+    def _build_public_mention_context(self, session_state: SessionState) -> list[dict]:
+        values: list[dict] = []
+
+        for item in session_state.mention_context.values():
+            values.append(
+                {
+                    "normalized_name": item.normalized_name,
+                    "display_name": item.display_name or item.normalized_name,
+                    "node_id": item.node_id,
+                    "polarity": item.polarity,
+                    "evidence": list(item.evidence),
+                    "source_turns": list(item.source_turns),
+                }
+            )
+
+        return sorted(values, key=lambda item: (str(item.get("normalized_name") or ""), str(item.get("display_name") or "")))
 
     # 将轻量 metadata 递归裁剪为 JSON 友好结构，避免把运行时对象原样带入最终结果。
     def _sanitize_lightweight_metadata_value(

@@ -23,6 +23,7 @@ class HypothesisManagerConfig:
     positive_hedged_bonus: float = 0.4
     negative_clear_penalty: float = 1.0
     negative_hedged_penalty: float = 0.4
+    unclear_penalty: float = 0.18
     expand_top_k_hypotheses: int = 3
     unique_evidence_bonus: float = 0.18
     overlap_penalty: float = 0.10
@@ -218,18 +219,22 @@ class HypothesisManager:
     def _score_delta_from_evidence(self, evidence_state: EvidenceState) -> float:
         relation_type = str(evidence_state.metadata.get("relation_type", ""))
         relation_multiplier = self._relation_multiplier(relation_type)
+        polarity = evidence_state.effective_polarity()
 
-        if evidence_state.existence == "exist" and evidence_state.resolution == "clear":
+        if polarity == "present" and evidence_state.resolution == "clear":
             return self.config.positive_clear_bonus * relation_multiplier
 
-        if evidence_state.existence == "exist" and evidence_state.resolution == "hedged":
+        if polarity == "present" and evidence_state.resolution == "hedged":
             return self.config.positive_hedged_bonus * relation_multiplier
 
-        if evidence_state.existence == "non_exist" and evidence_state.resolution == "clear":
+        if polarity == "absent" and evidence_state.resolution == "clear":
             return -self.config.negative_clear_penalty * relation_multiplier
 
-        if evidence_state.existence == "non_exist" and evidence_state.resolution == "hedged":
+        if polarity == "absent" and evidence_state.resolution == "hedged":
             return -self.config.negative_hedged_penalty * relation_multiplier
+
+        if polarity == "unclear":
+            return -self.config.unclear_penalty * relation_multiplier
 
         return 0.0
 

@@ -32,9 +32,6 @@ a3:
   use_discriminative_gain: true
   validation_limit: 10
 
-a4:
-  use_llm_deductive_judge: true
-
 repair:
   enable_verifier_hypothesis_reshuffle: true
   enable_best_repair_action: true

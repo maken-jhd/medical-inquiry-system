@@ -262,7 +262,7 @@ def _run_variant(args: argparse.Namespace, variant: str, cases: list, output_roo
     metrics = _augment_metrics(_summarize_focused_rows(focused_rows, ablation_flags), focused_rows)
     metrics["case_concurrency"] = case_concurrency
     _write_guarded_gate_audit(variant_output_root / "guarded_gate_audit.jsonl", metrics)
-    _write_a4_evidence_audit(variant_output_root / "a4_evidence_audit.jsonl", metrics)
+    _write_pending_action_audit(variant_output_root / "pending_action_audit.jsonl", metrics)
     with (variant_output_root / "focused_metrics.json").open("w", encoding="utf-8") as handle:
         handle.write(json.dumps(metrics, ensure_ascii=False, indent=2))
 
@@ -501,9 +501,9 @@ def _write_combined_outputs(output_root: Path, all_rows: list[dict], all_metrics
             for record in metrics.get("guarded_gate_audit_records", []):
                 handle.write(json.dumps({"variant": variant, **record}, ensure_ascii=False) + "\n")
 
-    with (output_root / "a4_evidence_audit.jsonl").open("w", encoding="utf-8") as handle:
+    with (output_root / "pending_action_audit.jsonl").open("w", encoding="utf-8") as handle:
         for variant, metrics in all_metrics.items():
-            for record in metrics.get("a4_evidence_audit_records", []):
+            for record in metrics.get("pending_action_audit_records", []):
                 handle.write(json.dumps({"variant": variant, **record}, ensure_ascii=False) + "\n")
 
 
@@ -513,9 +513,9 @@ def _write_guarded_gate_audit(path: Path, metrics: dict) -> None:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def _write_a4_evidence_audit(path: Path, metrics: dict) -> None:
+def _write_pending_action_audit(path: Path, metrics: dict) -> None:
     with path.open("w", encoding="utf-8") as handle:
-        for record in metrics.get("a4_evidence_audit_records", []):
+        for record in metrics.get("pending_action_audit_records", []):
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 

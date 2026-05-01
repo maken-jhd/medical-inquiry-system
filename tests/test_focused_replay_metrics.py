@@ -37,11 +37,11 @@ def test_focused_replay_summarizes_acceptance_categories() -> None:
                         "target_node_name": "CD4+ T淋巴细胞计数 < 200/μL",
                         "evidence_tags": ["immune_status", "type:lab"],
                     },
-                    "a4_evidence_audit": {
+                    "pending_action_audit": {
                         "turn_index": 1,
                         "target_node_name": "CD4+ T淋巴细胞计数 < 200/μL",
                         "patient_answer": "有。",
-                        "existence": "exist",
+                        "polarity": "present",
                         "resolution": "clear",
                         "evidence_tags": ["immune_status", "type:lab"],
                         "evidence_families": ["immune_status"],
@@ -136,13 +136,13 @@ def test_focused_replay_summarizes_acceptance_categories() -> None:
     assert metrics["strong_alternative_block_count"] == 0
     assert metrics["weak_alternative_allowed_count"] == 0
     assert metrics["combo_satisfied_but_alternative_blocked_count"] == 0
-    assert metrics["a4_evidence_audit_record_count"] == 1
-    assert metrics["a4_confirmed_family_candidate_count"] == 1
-    assert metrics["a4_provisional_family_candidate_count"] == 0
+    assert metrics["pending_action_audit_record_count"] == 1
+    assert metrics["pending_action_confirmed_family_candidate_count"] == 1
+    assert metrics["pending_action_provisional_family_candidate_count"] == 0
     assert metrics["provisional_family_used_count"] == 0
     assert metrics["provisional_combo_satisfied_count"] == 0
     assert metrics["accepted_with_provisional_combo_count"] == 0
-    assert metrics["a4_evidence_audit_records"][0]["target_node_name"] == "CD4+ T淋巴细胞计数 < 200/μL"
+    assert metrics["pending_action_audit_records"][0]["target_node_name"] == "CD4+ T淋巴细胞计数 < 200/μL"
     assert metrics["missing_family_first_selected_count"] == 0
     assert metrics["missing_family_repair_turn_count"] == 0
     assert metrics["combo_anchor_selected_before_turn3_count"] == 1

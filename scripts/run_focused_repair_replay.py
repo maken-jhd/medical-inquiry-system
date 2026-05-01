@@ -126,10 +126,10 @@ def _extract_turn_summary(output: dict, previous_question_node_id: str | None = 
     repair_selected_action = _compact_action(search_report.get("repair_selected_action"))
     pending_action = _compact_action(output.get("pending_action"))
     final_report = output.get("final_report") or {}
-    evidence_audit = output.get("evidence_audit") or {}
+    pending_action_audit = output.get("pending_action_audit") or {}
 
-    if not isinstance(evidence_audit, dict):
-        evidence_audit = {}
+    if not isinstance(pending_action_audit, dict):
+        pending_action_audit = {}
 
     best_final_answer = final_report.get("best_final_answer") or {}
     best_answer_id = str(search_report.get("best_answer_id") or best_final_answer.get("answer_id") or "")
@@ -188,7 +188,7 @@ def _extract_turn_summary(output: dict, previous_question_node_id: str | None = 
         "root_best_action": root_best_action,
         "repair_selected_action": repair_selected_action,
         "pending_action": pending_action,
-        "route_after_a4_stage": (output.get("route_after_a4") or {}).get("stage"),
+        "route_after_pending_action_stage": (output.get("route_after_pending_action") or {}).get("stage"),
         "best_answer_id": best_answer_id,
         "best_answer_name": best_answer_name,
         "best_answer_verifier_mode": verifier_mode,
@@ -312,7 +312,7 @@ def _extract_turn_summary(output: dict, previous_question_node_id: str | None = 
             else {}
         ),
         "stop_reason": final_report.get("stop_reason"),
-        "a4_evidence_audit": evidence_audit,
+        "pending_action_audit": pending_action_audit,
         "same_question_as_previous": (
             previous_question_node_id is not None
             and current_question_node_id is not None
@@ -392,10 +392,10 @@ def _summarize_focused_rows(focused_rows: list[dict], ablation_flags: dict) -> d
     strong_alternative_block_count = 0
     weak_alternative_allowed_count = 0
     combo_satisfied_but_alternative_blocked_count = 0
-    a4_evidence_audit_records: list[dict] = []
-    a4_evidence_audit_record_count = 0
-    a4_confirmed_family_candidate_count = 0
-    a4_provisional_family_candidate_count = 0
+    pending_action_audit_records: list[dict] = []
+    pending_action_audit_record_count = 0
+    pending_action_confirmed_family_candidate_count = 0
+    pending_action_provisional_family_candidate_count = 0
     provisional_family_used_count = 0
     provisional_combo_satisfied_count = 0
     accepted_with_provisional_combo_count = 0
@@ -496,11 +496,11 @@ def _summarize_focused_rows(focused_rows: list[dict], ablation_flags: dict) -> d
             ):
                 weak_alternative_allowed_count += 1
 
-            evidence_audit = turn_summary.get("a4_evidence_audit", {})
+            evidence_audit = turn_summary.get("pending_action_audit", {})
 
             if isinstance(evidence_audit, dict) and len(evidence_audit) > 0:
-                a4_evidence_audit_record_count += 1
-                a4_evidence_audit_records.append(
+                pending_action_audit_record_count += 1
+                pending_action_audit_records.append(
                     {
                         "case_id": row.get("case_id"),
                         **evidence_audit,
@@ -508,10 +508,10 @@ def _summarize_focused_rows(focused_rows: list[dict], ablation_flags: dict) -> d
                 )
 
                 if bool(evidence_audit.get("confirmed_family_candidate", False)):
-                    a4_confirmed_family_candidate_count += 1
+                    pending_action_confirmed_family_candidate_count += 1
 
                 if bool(evidence_audit.get("provisional_family_candidate", False)):
-                    a4_provisional_family_candidate_count += 1
+                    pending_action_provisional_family_candidate_count += 1
 
             if len(_string_set(turn_summary.get("best_answer_guarded_provisional_key_evidence_families", []))) > 0:
                 provisional_family_used_count += 1
@@ -609,13 +609,13 @@ def _summarize_focused_rows(focused_rows: list[dict], ablation_flags: dict) -> d
         "strong_alternative_block_count": strong_alternative_block_count,
         "weak_alternative_allowed_count": weak_alternative_allowed_count,
         "combo_satisfied_but_alternative_blocked_count": combo_satisfied_but_alternative_blocked_count,
-        "a4_evidence_audit_record_count": a4_evidence_audit_record_count,
-        "a4_confirmed_family_candidate_count": a4_confirmed_family_candidate_count,
-        "a4_provisional_family_candidate_count": a4_provisional_family_candidate_count,
+        "pending_action_audit_record_count": pending_action_audit_record_count,
+        "pending_action_confirmed_family_candidate_count": pending_action_confirmed_family_candidate_count,
+        "pending_action_provisional_family_candidate_count": pending_action_provisional_family_candidate_count,
         "provisional_family_used_count": provisional_family_used_count,
         "provisional_combo_satisfied_count": provisional_combo_satisfied_count,
         "accepted_with_provisional_combo_count": accepted_with_provisional_combo_count,
-        "a4_evidence_audit_records": a4_evidence_audit_records,
+        "pending_action_audit_records": pending_action_audit_records,
         "missing_family_first_selected_count": missing_family_first_selected_count,
         "missing_family_repair_turn_count": missing_family_repair_turn_count,
         "combo_anchor_selected_before_turn3_count": combo_anchor_selected_before_turn3_count,
@@ -1202,8 +1202,8 @@ def main() -> int:
     with (output_root / "guarded_gate_audit.jsonl").open("w", encoding="utf-8") as handle:
         for record in metrics.get("guarded_gate_audit_records", []):
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-    with (output_root / "a4_evidence_audit.jsonl").open("w", encoding="utf-8") as handle:
-        for record in metrics.get("a4_evidence_audit_records", []):
+    with (output_root / "pending_action_audit.jsonl").open("w", encoding="utf-8") as handle:
+        for record in metrics.get("pending_action_audit_records", []):
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     print(

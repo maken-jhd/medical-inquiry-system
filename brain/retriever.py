@@ -622,21 +622,33 @@ class GraphRetriever:
         evidence_state = session_state.evidence_states.get(node_id)
 
         if evidence_state is not None:
-            if evidence_state.existence == "exist":
+            polarity = evidence_state.effective_polarity()
+
+            if polarity == "present":
                 return {
                     "status": "matched",
                     "status_label": "已命中",
+                    "polarity": polarity,
                     "resolution": evidence_state.resolution,
                     "evidence_text": evidence_state.reasoning,
                 }
 
-            if evidence_state.existence == "non_exist":
+            if polarity == "absent":
                 return {
                     "status": "negative",
                     "status_label": "已否定",
+                    "polarity": polarity,
                     "resolution": evidence_state.resolution,
                     "evidence_text": evidence_state.reasoning,
                 }
+
+            return {
+                "status": "unknown",
+                "status_label": "待复核",
+                "polarity": polarity,
+                "resolution": evidence_state.resolution,
+                "evidence_text": evidence_state.reasoning,
+            }
 
         # 若 evidence_state 里没有，再退回到 slot 匹配：
         # 兼容早期 A1/A4 写槽位但还没形成完整 evidence_state 的情况。
@@ -651,25 +663,38 @@ class GraphRetriever:
             if len(matched_keys & slot_keys) == 0:
                 continue
 
-            if slot.status == "true":
+            polarity = slot.effective_polarity()
+
+            if polarity == "present":
                 return {
                     "status": "matched",
                     "status_label": "已命中",
+                    "polarity": polarity,
                     "resolution": slot.resolution,
                     "evidence_text": "；".join(slot.evidence),
                 }
 
-            if slot.status == "false":
+            if polarity == "absent":
                 return {
                     "status": "negative",
                     "status_label": "已否定",
+                    "polarity": polarity,
                     "resolution": slot.resolution,
                     "evidence_text": "；".join(slot.evidence),
                 }
+
+            return {
+                "status": "unknown",
+                "status_label": "待复核",
+                "polarity": polarity,
+                "resolution": slot.resolution,
+                "evidence_text": "；".join(slot.evidence),
+            }
 
         return {
             "status": "unknown",
             "status_label": "待验证",
+            "polarity": "unclear",
             "resolution": "unknown",
             "evidence_text": "",
         }
