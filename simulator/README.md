@@ -48,7 +48,7 @@
   - 当前首轮输入不再直接依赖 `chief_complaint`，而是优先由 `patient_agent.open_case(case)` 基于骨架生成 opening text。
   - 已支持批量运行多个病例、输出回放结果，并在结果里记录实际首轮 opening text。
   - 当前耗时统计会先累计原始浮点耗时，再在落盘前统一 round，降低毫秒级病例里 `brain_turn_seconds_total` 被累计 round 放大的误导。
-  - 若单病例在 `brain` 内部触发 `BrainDomainError`，当前会把该病例记为 `status=failed`，同时把结构化 `error` 一并落盘，而不会伪装成正常完成。
+  - 若单病例在 `brain` 内部触发 `BrainDomainError` 或其他未预期运行时异常，当前都会把该病例记为 `status=failed`，同时把结构化 `error` 一并落盘，而不会伪装成正常完成。
 
 - [benchmark.py](/Users/loki/Workspace/GraduationDesign/simulator/benchmark.py)
   - 负责汇总自动对战结果。
@@ -103,6 +103,7 @@
   - 当前启动日志会直接写出 `llm_available=true/false`；若为 `false`，批量回放会在启动前直接失败，不再静默退回规则链路。
   - 当前会在每个病例完成后立即追加写入 `replay_results.jsonl`，并同步刷新 `benchmark_summary.json`、`status.json` 和 `run.log`。
   - 当前 `replay_results.jsonl` / `status.json` / `benchmark_summary.json` / `run.log` 都已支持 `failed` 病例语义；失败病例会保留 `error.code / error.stage / error.prompt_name / error.message / error.attempts`。
+  - 当前 batch runner 也补了一层单病例异常保护；即使某个 worker 内部抛出普通 Python 异常，也会尽量把该病例转成 `failed` 结果继续整批运行，而不是直接让整个 smoke 异常终止。
   - 当前默认支持断点续跑；如果输出目录里已有完成病例，会自动跳过这些病例，只继续未完成部分。若需要强制重跑，可使用 `--no-resume`。
   - 当前会记录病例级耗时拆分：`opening_seconds`、`initial_brain_seconds`、逐轮 `patient_answer_seconds / brain_turn_seconds`、`finalize_seconds` 与 `total_seconds`，并把聚合摘要写入 `benchmark_summary.json` / `status.json`；运行日志对亚秒级耗时会保留更高精度。
   - 当前续跑读取历史 `replay_results.jsonl` 时也会保留逐轮 `patient_answer_seconds / brain_turn_seconds / total_seconds`，便于后续继续做 turn 级复盘。

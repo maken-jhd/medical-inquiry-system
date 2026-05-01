@@ -10,6 +10,56 @@
 - `phase2_execution_checklist.md` 更偏“路线设计与待办清单”
 - 本文更偏“已经发生过哪些阶段性变化、分别解决了什么问题”
 
+## 近期更新：2026-04-30 `ClinicalFeatureItem.status` 回归修复与 batch 单病例异常保护
+
+### 本次目标
+
+- 修复 `certainty -> resolution / mention_state` 重构后遗留的字段兼容 bug
+- 避免未来再出现“某个病例抛了普通 Python 异常，整批 replay 直接异常终止”的问题
+
+### 本次改动
+
+- [brain/entity_linker.py](/Users/loki/Workspace/GraduationDesign/brain/entity_linker.py)
+  - 将 `link_clinical_features()` 中残留的 `item.status == "exist"` 改为新语义 `item.mention_state == "present"`
+- [simulator/replay_engine.py](/Users/loki/Workspace/GraduationDesign/simulator/replay_engine.py)
+  - `run_case()` 现在除了继续捕获 `BrainDomainError`，也会把普通运行时异常转成单病例 `status=failed`
+  - 新增 `unexpected_runtime_error` 结构化错误负载，统一记录 `code / stage / prompt_name / message / attempts / error_type`
+- [scripts/run_batch_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_batch_replay.py)
+  - 新增 batch runner 级别的 `_run_single_case_guarded()`
+  - 即使 `_run_single_case()` 或 worker future 内部抛出普通异常，也会尽量把该病例转成 `ReplayResult(status="failed")`，继续整批运行
+- 测试补充：
+  - [tests/test_entity_linker.py](/Users/loki/Workspace/GraduationDesign/tests/test_entity_linker.py)
+  - [tests/test_replay_engine.py](/Users/loki/Workspace/GraduationDesign/tests/test_replay_engine.py)
+  - [tests/test_run_batch_replay.py](/Users/loki/Workspace/GraduationDesign/tests/test_run_batch_replay.py)
+
+### 解决的问题
+
+- 真实 `smoke10` 中曾出现：
+  - `AttributeError: 'ClinicalFeatureItem' object has no attribute 'status'`
+- 根因不是病例本身失败，而是：
+  - `entity_linker` 里还有旧字段访问
+  - `ReplayEngine` 只把 `BrainDomainError` 降成单病例 `failed`
+  - `run_batch_replay.py` 在 `future.result()` 处拿到普通异常后，直接把整批 run 标成 `failed`
+- 本次修复后：
+  - 语义重构后的 `ClinicalFeatureItem` 能正常进入实体链接
+  - 普通代码异常也会尽量落成单病例失败，不再轻易拖死整批并发回放
+
+### 影响范围
+
+- 影响 `brain` 的实体链接入口、`simulator` 的单病例回放引擎、`scripts/run_batch_replay.py` 的并发调度保护层
+- 外部可见行为变化：
+  - 某个病例若再出现未预期运行时异常，`run.log` 中应优先表现为该病例 `status=failed`
+  - 整批 `status.json` 不会因为单个普通异常而直接停在 `completed_cases=0`
+
+### 验证结果
+
+- 已执行针对性回归：
+  - `conda run -n GraduationDesign python -m pytest tests/test_entity_linker.py tests/test_replay_engine.py tests/test_run_batch_replay.py -q`
+- 结果 `19 passed`
+- 已执行全量回归：
+  - `conda run -n GraduationDesign python -m pytest -q`
+- 结果 `163 passed`
+
 ## 近期更新：2026-04-30 LLM-first 抽取与解释链路重构
 
 ### 本次目标
@@ -2497,3 +2547,192 @@ python -m py_compile brain/service.py
 
 - 人工核对 [AGENTS.md](/Users/loki/Workspace/GraduationDesign/AGENTS.md) 中“工作原则”小节，新增规则已写入
 - 本次为文档规则更新，未涉及代码逻辑与测试执行
+
+## 三十一、2026-04-30：修复单轮病例导致前端 slider 崩溃
+
+### 本次目标
+
+- 修复 Streamlit 前端在展示“只有 1 轮”的 demo / replay 病例时抛出：
+  - `StreamlitAPIException: Slider min_value must be less than the max_value`
+- 保持修复范围只在前端展示层，不改后端 replay 数据结构
+
+### 本次实现
+
+- 更新：
+  - [frontend/app.py](/Users/loki/Workspace/GraduationDesign/frontend/app.py)
+  - [frontend/README.md](/Users/loki/Workspace/GraduationDesign/frontend/README.md)
+- 具体改动：
+  - 演示回放模式中，只有 `len(turns) > 1` 时才渲染“回放轮次” slider
+  - 实验复盘模式中，只有 `len(turns) > 1` 时才渲染“复盘轮次” slider
+  - 当病例仅有 1 轮记录时，改为显示“无需切换轮次”的提示文案
+
+### 结果影响
+
+- 单轮病例不再因为前端控件边界条件直接导致整页报错
+- 该问题被明确收敛为前端渲染 bug，而不是 replay 结果文件格式异常
+
+### 验证
+
+- 执行：
+
+```bash
+python -m py_compile frontend/app.py
+```
+
+- 结果：
+  - `py_compile` 通过
+
+## 三十二、2026-04-30：修复 replay 复盘对话缺失后续系统提问
+
+### 本次目标
+
+- 修复实验复盘页面中 `replay_results.jsonl` 对话区只显示首轮系统问题、后续轮次只剩患者回答的问题
+- 让自动 replay 的问答顺序与真实执行顺序一致，避免前端把问题漏掉或重复展示
+
+### 本次实现
+
+- 更新：
+  - [frontend/output_browser.py](/Users/loki/Workspace/GraduationDesign/frontend/output_browser.py)
+  - [frontend/ui_adapter.py](/Users/loki/Workspace/GraduationDesign/frontend/ui_adapter.py)
+  - [frontend/app.py](/Users/loki/Workspace/GraduationDesign/frontend/app.py)
+  - [frontend/README.md](/Users/loki/Workspace/GraduationDesign/frontend/README.md)
+  - [tests/test_output_browser.py](/Users/loki/Workspace/GraduationDesign/tests/test_output_browser.py)
+- 具体改动：
+  - 为前端对话结构增加 `chat_order` 语义，区分：
+    - `patient_then_system`
+    - `system_then_patient`
+  - `replay_results.jsonl` 的 `initial_output` 继续展示“患者 opening -> 系统首问”
+  - 后续 replay turn 改为按“系统先问 -> 患者再答”渲染
+  - 当 `initial_output` 已经显示首轮问题时，自动抑制 turn 1 的重复 `question_text`
+
+### 结果影响
+
+- 复盘页面现在能正确展示第 2 轮及之后的系统追问
+- 首轮系统问题不会被重复展示两次
+- focused repair summary 与 replay results 的对话顺序更接近真实执行语义
+
+### 验证
+
+- 执行：
+
+```bash
+python -m pytest tests/test_output_browser.py tests/test_frontend_ui_adapter.py -q
+python -m py_compile frontend/app.py frontend/output_browser.py frontend/ui_adapter.py
+```
+
+- 结果：
+  - 通过
+
+## 三十三、2026-04-30：修复实验复盘下拉框切换不灵敏
+
+### 本次目标
+
+- 修复实验复盘模式中“选择病例记录”经常需要点两下才真正切换的问题
+- 统一 Streamlit widget 状态与 `experiment_run_key / experiment_case_index` 的来源，减少交互迟滞
+
+### 本次实现
+
+- 更新：
+  - [frontend/app.py](/Users/loki/Workspace/GraduationDesign/frontend/app.py)
+  - [frontend/README.md](/Users/loki/Workspace/GraduationDesign/frontend/README.md)
+- 具体改动：
+  - 为实验输出目录与病例记录下拉框增加显式 `session_state` key
+  - 下拉框选项值改为稳定的整数 index，而不再依赖长字符串 label 反查
+  - 在 `_load_experiment_run()` / `_load_experiment_case()` 中同步回写对应 widget 状态
+  - 刷新实验索引或当前 run key 失效时，重置下拉框状态，避免旧值残留
+
+### 结果影响
+
+- 实验复盘模式中的病例切换更接近单击即生效
+- 前端不再同时维护“widget 当前选项”和“手动 case index”两套容易打架的状态
+
+### 验证
+
+- 执行：
+
+```bash
+python -m py_compile frontend/app.py
+```
+
+- 结果：
+  - `py_compile` 通过
+
+## 三十四、2026-04-30：修复实验病例下拉框的 Streamlit session_state 写回异常
+
+### 本次目标
+
+- 修复实验复盘模式切换病例时出现：
+  - `st.session_state.experiment_case_select cannot be modified after the widget with key experiment_case_select is instantiated`
+- 保留上一轮的下拉框同步策略，但消除对 Streamlit widget 生命周期的违规写入
+
+### 本次实现
+
+- 更新：
+  - [frontend/app.py](/Users/loki/Workspace/GraduationDesign/frontend/app.py)
+  - [frontend/README.md](/Users/loki/Workspace/GraduationDesign/frontend/README.md)
+- 具体改动：
+  - 删除 `_load_experiment_case()` 中对 `EXPERIMENT_CASE_SELECT_KEY` 的重复回写
+  - 保留在 widget 创建前的初始化 / reset / run 切换时同步 key 的逻辑
+
+### 结果影响
+
+- 切换病例时不再因同轮回写已实例化 widget key 而直接报错
+- 实验复盘下拉框的状态同步改为更符合 Streamlit 生命周期约束的方式
+
+### 验证
+
+- 执行：
+
+```bash
+python -m py_compile frontend/app.py
+```
+
+- 结果：
+  - `py_compile` 通过
+
+## 三十五、2026-04-30：增强实验复盘中的病例切换与终态展示
+
+### 本次目标
+
+- 为“选择病例记录”补充“上一条病例 / 下一条病例”按钮，降低连续复盘时的切换成本
+- 让前端直接展示当前病例是：
+  - 圆满结束
+  - 达到最大轮次停止
+  - 异常出错结束
+- 当病例异常失败时，前端可直接查看错误原因与结构化错误详情
+
+### 本次实现
+
+- 更新：
+  - [frontend/app.py](/Users/loki/Workspace/GraduationDesign/frontend/app.py)
+  - [frontend/output_browser.py](/Users/loki/Workspace/GraduationDesign/frontend/output_browser.py)
+  - [frontend/README.md](/Users/loki/Workspace/GraduationDesign/frontend/README.md)
+  - [tests/test_output_browser.py](/Users/loki/Workspace/GraduationDesign/tests/test_output_browser.py)
+- 具体改动：
+  - 在实验复盘的病例下拉框上方新增“上一条病例 / 下一条病例”按钮
+  - `summarize_case_record()` 现在会整理：
+    - `run_status`
+    - `run_status_label`
+    - `error_code / error_stage / error_prompt_name / error_message / error_attempts`
+  - 当前病例摘要新增“运行结果”字段
+  - 当病例 `failed` 时，页面会额外展示错误摘要、错误字段表，以及可展开的结构化错误 JSON
+
+### 结果影响
+
+- 连续翻看病例时不再只能依赖长下拉框逐个点选
+- replay / smoke 输出中的失败病例不再只存在于 JSONL 文件里，而能在前端直接看见失败原因
+- “停止原因”和“运行结果”被明确区分：
+  - 运行结果回答“这条病例是怎么结束的”
+  - 停止原因继续保留后端原始 stop reason 语义
+
+### 验证
+
+- 执行：
+
+```bash
+python -m pytest tests/test_output_browser.py tests/test_frontend_ui_adapter.py -q
+python -m py_compile frontend/app.py frontend/output_browser.py
+```
+
+- 结果：
+  - 通过

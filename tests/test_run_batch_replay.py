@@ -104,6 +104,30 @@ def test_run_cases_reports_progress(monkeypatch) -> None:
     assert len(reported) == 3
 
 
+# 验证单病例普通异常不会中断整批运行，而是被转成 failed 结果继续返回。
+def test_run_cases_parallel_marks_unexpected_case_exception_as_failed(monkeypatch) -> None:
+    cases = [
+        SimpleNamespace(case_id="case1", title="病例1"),
+        SimpleNamespace(case_id="case2", title="病例2"),
+    ]
+
+    def fake_run_single_case(case, max_turns: int):
+        _ = max_turns
+        if case.case_id == "case1":
+            raise AttributeError("'ClinicalFeatureItem' object has no attribute 'status'")
+        return ReplayResult(case_id=case.case_id, case_title=case.title, status="completed")
+
+    monkeypatch.setattr(run_batch_replay, "_run_single_case", fake_run_single_case)
+
+    results = run_batch_replay._run_cases(cases, max_turns=8, case_concurrency=2)
+
+    assert len(results) == 2
+    assert results[0].status == "failed"
+    assert results[0].error["code"] == "unexpected_runtime_error"
+    assert results[0].error["stage"] == "batch_runner"
+    assert results[1].status == "completed"
+
+
 def test_format_heartbeat_line_reports_oldest_active_case(monkeypatch) -> None:
     monkeypatch.setattr(run_batch_replay, "time", lambda: 130.0)
 

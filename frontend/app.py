@@ -52,6 +52,10 @@ st.set_page_config(
 )
 
 
+EXPERIMENT_RUN_SELECT_KEY = "experiment_run_select"
+EXPERIMENT_CASE_SELECT_KEY = "experiment_case_select"
+
+
 # 页面样式尽量克制：突出中期检查需要看的关键信息，而不是做花哨效果。
 st.markdown(
     """
@@ -202,6 +206,8 @@ def _ensure_session_defaults() -> None:
     st.session_state.setdefault("experiment_replay", None)
     st.session_state.setdefault("experiment_turn_index", 0)
     st.session_state.setdefault("experiment_error", "")
+    st.session_state.setdefault(EXPERIMENT_RUN_SELECT_KEY, 0)
+    st.session_state.setdefault(EXPERIMENT_CASE_SELECT_KEY, 0)
 
     if st.session_state.demo_replay is None:
         _load_demo(st.session_state.demo_key)
@@ -297,7 +303,7 @@ def _render_replay_controls() -> None:
             args=(selected_demo.key,),
         )
 
-    if turns:
+    if len(turns) > 1:
         st.slider(
             "回放轮次",
             min_value=1,
@@ -306,6 +312,8 @@ def _render_replay_controls() -> None:
             on_change=_sync_demo_slider,
             args=(slider_key, max_index),
         )
+    elif len(turns) == 1:
+        st.caption("该示例病例只有 1 轮，无需切换回放轮次。")
 
 
 def _render_live_controls() -> None:
@@ -344,6 +352,8 @@ def _render_experiment_controls() -> None:
         st.session_state.experiment_run_key = ""
         st.session_state.experiment_replay = None
         st.session_state.experiment_case_records = []
+        st.session_state[EXPERIMENT_RUN_SELECT_KEY] = 0
+        st.session_state[EXPERIMENT_CASE_SELECT_KEY] = 0
         st.rerun()
 
     runs = _cached_output_runs()
@@ -352,10 +362,23 @@ def _render_experiment_controls() -> None:
         return
 
     current_key = st.session_state.experiment_run_key
+    if current_key not in {run.key for run in runs}:
+        _load_experiment_run(runs[0].key, runs[0].path)
+        st.session_state[EXPERIMENT_RUN_SELECT_KEY] = 0
+        current_key = st.session_state.experiment_run_key
+
     current_index = next((idx for idx, run in enumerate(runs) if run.key == current_key), 0)
     labels = [run.label for run in runs]
-    selected_label = st.selectbox("选择实验输出目录", labels, index=current_index)
-    selected_run = runs[labels.index(selected_label)]
+    run_select_value = st.session_state.get(EXPERIMENT_RUN_SELECT_KEY, current_index)
+    if not isinstance(run_select_value, int) or run_select_value < 0 or run_select_value >= len(runs):
+        st.session_state[EXPERIMENT_RUN_SELECT_KEY] = current_index
+    st.selectbox(
+        "选择实验输出目录",
+        options=list(range(len(runs))),
+        format_func=lambda idx: labels[idx],
+        key=EXPERIMENT_RUN_SELECT_KEY,
+    )
+    selected_run = runs[int(st.session_state[EXPERIMENT_RUN_SELECT_KEY])]
 
     if selected_run.key != current_key:
         _load_experiment_run(selected_run.key, selected_run.path)
@@ -371,8 +394,33 @@ def _render_experiment_controls() -> None:
 
     case_labels = [case_record_label(record) for record in records]
     current_case_index = min(st.session_state.experiment_case_index, len(records) - 1)
-    selected_case_label = st.selectbox("选择病例记录", case_labels, index=current_case_index)
-    selected_case_index = case_labels.index(selected_case_label)
+    case_select_value = st.session_state.get(EXPERIMENT_CASE_SELECT_KEY, current_case_index)
+    if not isinstance(case_select_value, int) or case_select_value < 0 or case_select_value >= len(records):
+        st.session_state[EXPERIMENT_CASE_SELECT_KEY] = current_case_index
+    nav_prev_col, nav_next_col = st.columns(2)
+    with nav_prev_col:
+        st.button(
+            "上一条病例",
+            use_container_width=True,
+            disabled=current_case_index <= 0,
+            on_click=_shift_experiment_case,
+            args=(-1,),
+        )
+    with nav_next_col:
+        st.button(
+            "下一条病例",
+            use_container_width=True,
+            disabled=current_case_index >= len(records) - 1,
+            on_click=_shift_experiment_case,
+            args=(1,),
+        )
+    st.selectbox(
+        "选择病例记录",
+        options=list(range(len(records))),
+        format_func=lambda idx: case_labels[idx],
+        key=EXPERIMENT_CASE_SELECT_KEY,
+    )
+    selected_case_index = int(st.session_state[EXPERIMENT_CASE_SELECT_KEY])
     if selected_case_index != st.session_state.experiment_case_index or st.session_state.experiment_replay is None:
         _load_experiment_case(selected_case_index)
 
@@ -406,7 +454,7 @@ def _render_experiment_controls() -> None:
             args=(1, max_index, slider_key),
         )
 
-    if turns:
+    if len(turns) > 1:
         st.slider(
             "复盘轮次",
             min_value=1,
@@ -415,6 +463,8 @@ def _render_experiment_controls() -> None:
             on_change=_sync_experiment_slider,
             args=(slider_key, max_index),
         )
+    elif len(turns) == 1:
+        st.caption("该实验病例只有 1 轮，无需切换复盘轮次。")
 
 
 def _render_chat_panel(turns: list[dict[str, Any]]) -> None:
@@ -429,29 +479,52 @@ def _render_chat_panel(turns: list[dict[str, Any]]) -> None:
         turn_index = turn.get("turn_index", 0)
         patient_text = turn.get("patient_text", "")
         system_question = turn.get("system_question", "")
+        chat_order = str(turn.get("chat_order") or "patient_then_system")
         final_answer = turn.get("final_answer", {})
 
-        if patient_text:
-            st.markdown(
-                f"""
-                <div class="chat-card patient-card">
-                  <div class="small-muted">第 {turn_index} 轮 · 患者回答</div>
-                  <div>{patient_text}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+        if chat_order == "system_then_patient":
+            if system_question:
+                st.markdown(
+                    f"""
+                    <div class="chat-card system-card">
+                      <div class="small-muted">第 {turn_index} 轮 · 系统下一问</div>
+                      <div>{system_question}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+            if patient_text:
+                st.markdown(
+                    f"""
+                    <div class="chat-card patient-card">
+                      <div class="small-muted">第 {turn_index} 轮 · 患者回答</div>
+                      <div>{patient_text}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+        else:
+            if patient_text:
+                st.markdown(
+                    f"""
+                    <div class="chat-card patient-card">
+                      <div class="small-muted">第 {turn_index} 轮 · 患者回答</div>
+                      <div>{patient_text}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
-        if system_question:
-            st.markdown(
-                f"""
-                <div class="chat-card system-card">
-                  <div class="small-muted">第 {turn_index} 轮 · 系统下一问</div>
-                  <div>{system_question}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+            if system_question:
+                st.markdown(
+                    f"""
+                    <div class="chat-card system-card">
+                      <div class="small-muted">第 {turn_index} 轮 · 系统下一问</div>
+                      <div>{system_question}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
         if turn.get("is_final"):
             answer_name = final_answer.get("answer_name", "暂无结论")
@@ -791,21 +864,24 @@ def _render_experiment_overview_card() -> None:
         if records:
             case_summary = summarize_case_record(records[st.session_state.experiment_case_index])
             st.markdown("**当前病例摘要**")
-            st.table(
-                [
-                    {"指标": "病例 ID", "值": case_summary.get("case_id", "")},
-                    {"指标": "真实诊断", "值": "、".join(case_summary.get("true_conditions", [])) or "未标注"},
-                    {"指标": "最终答案", "值": case_summary.get("best_answer", "") or "暂无"},
-                    {"指标": "停止原因", "值": case_summary.get("stop_reason", "") or "暂无"},
-                    {"指标": "接受分类", "值": case_summary.get("acceptance_category", "") or "未标注"},
-                    {
-                        "指标": "是否正确",
-                        "值": boolean_label(case_summary.get("is_best_answer_correct"))
-                        if case_summary.get("is_best_answer_correct") is not None
-                        else "未标注",
-                    },
-                ]
-            )
+            summary_rows = [
+                {"指标": "病例 ID", "值": case_summary.get("case_id", "")},
+                {"指标": "真实诊断", "值": "、".join(case_summary.get("true_conditions", [])) or "未标注"},
+                {"指标": "运行结果", "值": case_summary.get("run_status_label", "未记录")},
+                {"指标": "最终答案", "值": case_summary.get("best_answer", "") or "暂无"},
+                {"指标": "停止原因", "值": case_summary.get("stop_reason", "") or "暂无"},
+                {"指标": "接受分类", "值": case_summary.get("acceptance_category", "") or "未标注"},
+                {
+                    "指标": "是否正确",
+                    "值": boolean_label(case_summary.get("is_best_answer_correct"))
+                    if case_summary.get("is_best_answer_correct") is not None
+                    else "未标注",
+                },
+            ]
+            if case_summary.get("error_message"):
+                summary_rows.append({"指标": "错误摘要", "值": case_summary.get("error_message", "")})
+            st.table(summary_rows)
+            _render_experiment_case_terminal_status(case_summary)
 
         if overview.get("profile_summary"):
             with st.expander("查看 profile_summary.tsv", expanded=False):
@@ -902,6 +978,7 @@ def _load_experiment_run(run_key: str, run_path: Path) -> None:
     st.session_state.experiment_case_index = 0
     st.session_state.experiment_turn_index = 0
     st.session_state.experiment_replay = None
+    st.session_state[EXPERIMENT_CASE_SELECT_KEY] = 0
     try:
         st.session_state.experiment_overview = load_run_overview(run_path)
         st.session_state.experiment_case_records = list_case_records(run_path)
@@ -940,6 +1017,17 @@ def _change_experiment_turn(delta: int, max_index: int, slider_key: str) -> None
     next_index = max(0, min(max_index, int(st.session_state.experiment_turn_index) + delta))
     st.session_state.experiment_turn_index = next_index
     st.session_state[slider_key] = next_index + 1
+
+
+def _shift_experiment_case(delta: int) -> None:
+    """通过上一条 / 下一条按钮切换当前实验病例。"""
+
+    records = st.session_state.experiment_case_records or []
+    if not records:
+        return
+    current_index = int(st.session_state.get(EXPERIMENT_CASE_SELECT_KEY, st.session_state.experiment_case_index) or 0)
+    next_index = max(0, min(len(records) - 1, current_index + delta))
+    st.session_state[EXPERIMENT_CASE_SELECT_KEY] = next_index
 
 
 def _safe_widget_key(value: str) -> str:
@@ -1025,6 +1113,34 @@ def _format_live_error(exc: Exception) -> str:
         "实时模式暂时不可用，可能是 Neo4j、LLM API Key 或依赖环境未配置。"
         f"请切换到演示回放模式继续展示。错误摘要：{detail}"
     )
+
+
+def _render_experiment_case_terminal_status(case_summary: dict[str, Any]) -> None:
+    """展示当前实验病例的结束状态与错误详情。"""
+
+    run_status = str(case_summary.get("run_status") or "")
+    run_status_label = case_summary.get("run_status_label", "未记录")
+    stop_reason = case_summary.get("stop_reason", "") or "未记录"
+    if run_status == "completed":
+        st.success(f"该病例已圆满结束。停止原因：{stop_reason}")
+        return
+    if run_status == "max_turn_reached":
+        st.warning(f"该病例达到最大轮次后停止。停止原因：{stop_reason}")
+        return
+    if run_status == "failed":
+        st.error(f"该病例因异常出错结束。错误原因：{case_summary.get('error_message') or '未记录'}")
+        st.table(
+            [
+                {"字段": "错误码", "值": case_summary.get("error_code", "") or "未记录"},
+                {"字段": "阶段", "值": case_summary.get("error_stage", "") or "未记录"},
+                {"字段": "Prompt", "值": case_summary.get("error_prompt_name", "") or "未记录"},
+                {"字段": "重试次数", "值": case_summary.get("error_attempts", "未记录")},
+            ]
+        )
+        with st.expander("查看结构化错误详情", expanded=False):
+            st.json(case_summary.get("error", {}))
+        return
+    st.info(f"该病例运行结果：{run_status_label}。停止原因：{stop_reason}")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 """测试实体链接器能否将特征名称对齐到图谱节点。"""
 
 from brain.entity_linker import EntityLinker
+from brain.types import ClinicalFeatureItem
 
 
 class FakeNeo4jClient:
@@ -35,3 +36,18 @@ def test_entity_linker_returns_trusted_match() -> None:
     assert results[0].canonical_name == "发热"
     assert results[0].is_trusted is True
     assert results[0].metadata["top_matches"][0]["canonical_name"] == "发热"
+
+
+# 验证临床特征链接只消费 mention_state=present 的提及项。
+def test_entity_linker_links_only_present_clinical_features() -> None:
+    linker = EntityLinker(FakeNeo4jClient())
+
+    results = linker.link_clinical_features(
+        [
+            ClinicalFeatureItem(name="发烧", normalized_name="发热", category="symptom", mention_state="present"),
+            ClinicalFeatureItem(name="无发热", normalized_name="发热", category="symptom", mention_state="absent"),
+        ]
+    )
+
+    assert len(results) == 1
+    assert results[0].mention == "发热"

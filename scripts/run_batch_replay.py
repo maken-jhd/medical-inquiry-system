@@ -88,6 +88,46 @@ def _run_single_case(case, max_turns: int):
         _close_brain(brain)
 
 
+def _build_unexpected_case_failure_result(case, exc: Exception, *, stage: str) -> ReplayResult:
+    return ReplayResult(
+        case_id=str(getattr(case, "case_id", "")),
+        case_title=str(getattr(case, "title", "")),
+        status="failed",
+        final_report={},
+        timing={
+            "started_at": _timestamp(),
+            "finished_at": _timestamp(),
+            "opening_seconds": 0.0,
+            "initial_brain_seconds": 0.0,
+            "patient_answer_seconds_total": 0.0,
+            "brain_turn_seconds_total": 0.0,
+            "finalize_seconds": 0.0,
+            "total_seconds": 0.0,
+            "max_patient_answer_seconds": 0.0,
+            "max_brain_turn_seconds": 0.0,
+            "slowest_turn_index": 0,
+            "slowest_turn_total_seconds": 0.0,
+            "turn_count": 0,
+        },
+        error={
+            "code": "unexpected_runtime_error",
+            "stage": stage,
+            "prompt_name": "",
+            "message": f"{type(exc).__name__}: {exc}",
+            "attempts": 1,
+            "error_type": type(exc).__name__,
+        },
+    )
+
+
+def _run_single_case_guarded(case, max_turns: int):
+    try:
+        return _run_single_case(case, max_turns)
+    except Exception as exc:
+        # batch runner 再兜一层：即使单病例出现普通运行时异常，也只把该病例记为 failed。
+        return _build_unexpected_case_failure_result(case, exc, stage="batch_runner")
+
+
 def _format_progress_line(completed: int, total: int) -> str:
     bar_width = 24
     if total <= 0:
@@ -220,7 +260,7 @@ def _run_cases_streaming(
         for index, case in enumerate(cases, start=1):
             if on_case_start is not None:
                 on_case_start(case, index, total)
-            result = _run_single_case(case, max_turns)
+            result = _run_single_case_guarded(case, max_turns)
             if on_result is not None:
                 on_result(result, case, index, total)
             callback(index, total, finished=index == total)
@@ -244,12 +284,15 @@ def _run_cases_streaming(
             started += 1
             if on_case_start is not None:
                 on_case_start(case, started, total)
-            futures[executor.submit(_run_single_case, case, max_turns)] = case
+            futures[executor.submit(_run_single_case_guarded, case, max_turns)] = case
 
         while futures:
             for future in as_completed(list(futures.keys())):
                 case = futures.pop(future)
-                result = future.result()
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    result = _build_unexpected_case_failure_result(case, exc, stage="batch_runner_future")
                 completed += 1
                 if on_result is not None:
                     on_result(result, case, completed, total)
@@ -263,7 +306,7 @@ def _run_cases_streaming(
                     started += 1
                     if on_case_start is not None:
                         on_case_start(next_case, started, total)
-                    futures[executor.submit(_run_single_case, next_case, max_turns)] = next_case
+                    futures[executor.submit(_run_single_case_guarded, next_case, max_turns)] = next_case
                 break
     except KeyboardInterrupt:
         interrupted = True

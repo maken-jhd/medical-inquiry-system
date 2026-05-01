@@ -135,6 +135,7 @@ def normalize_backend_turn(result: dict[str, Any]) -> dict[str, Any]:
         "turn_index": result.get("turn_index", 0),
         "patient_text": result.get("patient_text", ""),
         "system_question": result.get("next_question") or "",
+        "chat_order": "patient_then_system",
         "is_final": bool(final_report),
         "final_answer": _extract_final_answer(final_report, search_report),
         "state": {
@@ -169,6 +170,7 @@ def _normalize_demo_turn(turn: dict[str, Any]) -> dict[str, Any]:
         "turn_index": turn.get("turn_index", 0),
         "patient_text": turn.get("patient_text", ""),
         "system_question": turn.get("system_question", ""),
+        "chat_order": turn.get("chat_order", "patient_then_system"),
         "is_final": bool(turn.get("is_final", False)),
         "final_answer": _as_dict(turn.get("final_answer")),
         "state": _as_dict(turn.get("state")),

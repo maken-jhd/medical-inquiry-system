@@ -224,3 +224,33 @@ def test_replay_engine_marks_case_failed_on_domain_error() -> None:
     assert result.error["code"] == "llm_output_invalid"
     assert result.error["stage"] == "a1_key_symptom_extraction"
     assert result.error["attempts"] == 2
+
+
+# 验证普通运行时异常也会被转成单病例 failed，而不是直接炸出 replay。
+def test_replay_engine_marks_case_failed_on_unexpected_runtime_error() -> None:
+    class CrashingBrain:
+        def start_session(self, session_id: str) -> None:
+            self.session_id = session_id
+
+        def process_turn(self, session_id: str, patient_text: str) -> dict:
+            _ = session_id, patient_text
+            raise AttributeError("'ClinicalFeatureItem' object has no attribute 'status'")
+
+        def finalize(self, session_id: str) -> dict:
+            _ = session_id
+            raise AssertionError("failed 病例不应再进入 finalize")
+
+    engine = ReplayEngine(CrashingBrain(), VirtualPatientAgent())
+    case = VirtualPatientCase(
+        case_id="runtime_failed_case",
+        title="runtime-failed",
+        slot_truth_map={"发热": SlotTruth(node_id="发热", value=True, aliases=["发热"], reveal_only_if_asked=False)},
+    )
+
+    result = engine.run_case(case)
+
+    assert result.status == "failed"
+    assert result.final_report == {}
+    assert result.error["code"] == "unexpected_runtime_error"
+    assert result.error["stage"] == "replay_engine"
+    assert result.error["error_type"] == "AttributeError"

@@ -50,7 +50,7 @@ class EntityLinker:
 
     # 将临床特征直接转换为链接实体，便于后续 R1 调用。
     def link_clinical_features(self, features: Iterable[ClinicalFeatureItem]) -> List[LinkedEntity]:
-        mentions = [item.normalized_name for item in features if item.status == "exist"]
+        mentions = [item.normalized_name for item in features if item.mention_state == "present"]
         return self.link_mentions(mentions)
 
     # 判断当前链接结果是否整体可信。

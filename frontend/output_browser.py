@@ -170,6 +170,8 @@ def build_case_replay(record: dict[str, Any]) -> dict[str, Any]:
 def summarize_case_record(record: dict[str, Any]) -> dict[str, Any]:
     """提取病例级指标，用于复盘面板。"""
 
+    run_status = _record_terminal_status(record)
+    error = _as_dict(record.get("error"))
     return {
         "case_id": record.get("case_id", ""),
         "case_title": record.get("case_title") or record.get("title", ""),
@@ -177,6 +179,8 @@ def summarize_case_record(record: dict[str, Any]) -> dict[str, Any]:
         "true_disease_phase": record.get("true_disease_phase", ""),
         "best_answer": record.get("final_best_answer_name") or record.get("best_answer_name") or _final_report_answer(record),
         "stop_reason": record.get("final_stop_reason") or record.get("stop_reason") or record.get("status", ""),
+        "run_status": run_status,
+        "run_status_label": _terminal_status_label(run_status),
         "acceptance_category": record.get("acceptance_category", ""),
         "is_best_answer_correct": record.get("is_best_answer_correct"),
         "first_correct_best_answer_turn": record.get("first_correct_best_answer_turn"),
@@ -185,6 +189,12 @@ def summarize_case_record(record: dict[str, Any]) -> dict[str, Any]:
         "repair_turns": record.get("repair_turns", _count_repair_turns(record.get("turn_summaries", []))),
         "semantic_repeat_turns": record.get("semantic_repeat_turns", _count_semantic_repeats(record.get("turn_summaries", []))),
         "source_file": record.get("_source_file", ""),
+        "error": error,
+        "error_code": str(error.get("code") or ""),
+        "error_stage": str(error.get("stage") or ""),
+        "error_prompt_name": str(error.get("prompt_name") or ""),
+        "error_message": str(error.get("message") or ""),
+        "error_attempts": error.get("attempts"),
     }
 
 
@@ -258,6 +268,7 @@ def _focused_turn_to_ui(turn: dict[str, Any], record: dict[str, Any], is_last: b
         "turn_index": turn.get("turn_index", 0),
         "patient_text": turn.get("answer_text") or a4_audit.get("patient_answer", ""),
         "system_question": _question_from_action(selected_action),
+        "chat_order": "system_then_patient",
         "is_final": is_final,
         "final_answer": {
             "answer_name": record.get("final_best_answer_name") or best_answer_name,
@@ -315,10 +326,15 @@ def _replay_result_turn_to_ui(turn: dict[str, Any], record: dict[str, Any], is_l
     final_report = _as_dict(record.get("final_report"))
     is_final = is_last and bool(final_report)
     question_text = turn.get("question_text", "")
+    has_initial_question = bool(_as_dict(record.get("initial_output")).get("next_question"))
+    turn_index = int(turn.get("turn_index", 0) or 0)
+    # `initial_output` 已经展示了开场后的首个系统问题，避免 turn 1 再重复显示一次。
+    system_question = "" if has_initial_question and turn_index == 1 else question_text
     return {
-        "turn_index": turn.get("turn_index", 0),
+        "turn_index": turn_index,
         "patient_text": turn.get("answer_text", ""),
-        "system_question": "",
+        "system_question": system_question,
+        "chat_order": "system_then_patient",
         "is_final": is_final,
         "final_answer": {
             "answer_name": _final_report_answer(record),
@@ -630,6 +646,27 @@ def _final_report_answer(record: dict[str, Any]) -> str:
     final_report = _as_dict(record.get("final_report"))
     best = _as_dict(final_report.get("best_final_answer"))
     return best.get("answer_name", "")
+
+
+def _record_terminal_status(record: dict[str, Any]) -> str:
+    raw_status = str(record.get("status") or "").strip()
+    if raw_status:
+        return raw_status
+    if _as_dict(record.get("error")):
+        return "failed"
+    if _as_dict(record.get("final_report")):
+        return "completed"
+    return "unknown"
+
+
+def _terminal_status_label(value: str) -> str:
+    return {
+        "completed": "圆满结束",
+        "max_turn_reached": "达到最大轮次停止",
+        "failed": "异常出错结束",
+        "pending": "尚未完成",
+        "unknown": "未记录",
+    }.get(value, value or "未记录")
 
 
 def _correctness_label(value: Any) -> str:

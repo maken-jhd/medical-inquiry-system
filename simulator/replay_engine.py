@@ -75,7 +75,6 @@ class ReplayEngine:
         session_id = f"replay::{case.case_id}"
         started_at = self._now_iso()
         case_started = perf_counter()
-        self.brain.start_session(session_id)
         result = ReplayResult(
             case_id=case.case_id,
             case_title=case.title,
@@ -98,6 +97,7 @@ class ReplayEngine:
             },
         )
         try:
+            self.brain.start_session(session_id)
             opening_started = perf_counter()
             opening = self.patient_agent.open_case(case)
             result.timing["opening_seconds"] = perf_counter() - opening_started
@@ -168,6 +168,11 @@ class ReplayEngine:
             result.status = "failed"
             result.error = exc.to_dict()
             result.final_report = {}
+        except Exception as exc:
+            # 普通 Python 异常也按单病例失败落盘，避免直接中断整批 replay。
+            result.status = "failed"
+            result.error = self._build_unexpected_error_payload(exc)
+            result.final_report = {}
         self._finalize_timing(result, case_started)
         return result
 
@@ -197,6 +202,16 @@ class ReplayEngine:
 
     def _now_iso(self) -> str:
         return datetime.now().isoformat(timespec="seconds")
+
+    def _build_unexpected_error_payload(self, exc: Exception) -> dict:
+        return {
+            "code": "unexpected_runtime_error",
+            "stage": "replay_engine",
+            "prompt_name": "",
+            "message": f"{type(exc).__name__}: {exc}",
+            "attempts": 1,
+            "error_type": type(exc).__name__,
+        }
 
 
 # 将批量回放结果写入 JSONL，便于后续复盘分析。
