@@ -121,10 +121,12 @@ NEO4J_DATABASE=neo4j
 OPENAI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 OPENAI_MODEL=qwen3-max
 OPENAI_ENABLE_THINKING=false
-BRAIN_ACCEPTANCE_PROFILE=guarded_lenient
+BRAIN_ACCEPTANCE_PROFILE=anchor_controlled
 TRAJECTORY_VERIFIER_ACCEPTANCE_PROFILE=guarded_lenient
 BRAIN_AGENT_EVAL_MODE=llm_verifier
 ```
+
+说明：`BRAIN_ACCEPTANCE_PROFILE` 控制结构化 stop gate，当前默认使用 `anchor_controlled`；`TRAJECTORY_VERIFIER_ACCEPTANCE_PROFILE` 只控制轨迹 verifier prompt，默认仍保留 `guarded_lenient` 以便由 observed anchor gate 做最终验收。
 
 真实 API Key 不建议写入版本库。请复制本机私密配置模板：
 

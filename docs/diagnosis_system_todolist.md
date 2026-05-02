@@ -24,6 +24,8 @@
 - 长文本抽取与解释坚持 `LLM-first`，不再恢复“大规则词典兜底”的旧路线
 - 确定性规则层只保留极薄能力，主要用于短答识别，如“有 / 没有 / 不太清楚”
 - normalization 独立成层，位置固定为“LLM 输出之后、Neo4j / candidate mapping 之前”
+- rollout 只作为候选推理路径，不作为真实患者已确认事实；最终是否可接受优先由真实 `observed anchor` 与证据 family 覆盖约束控制
+- `guarded_lenient` 保留为消融 baseline；默认诊断链路转向 `anchor_controlled`，避免 repair / stop gate 继续堆叠过细的疾病专门规则
 - `EntityLinker` 目前继续沿用 lexical 方案，不在当前阶段引入 embedding / cosine 相似度
 - batch replay 对单病例 LLM 失败采用 `status=failed` 并继续整批运行
 - 实时前端对 LLM 领域错误采用显式报错停止，不再偷偷降级
@@ -188,19 +190,22 @@
 - [ ] 常见 HIV 相关检查语句能稳定映射回正确 evidence 节点
 - [ ] 误命中多个候选节点的情况下降
 
-### 5.4 verifier / stop 仍有进一步统一空间
+### 5.4 verifier / stop 已开始向 observed-anchor 收敛，仍需继续评测
 
 现状：
 
-- 当前 `A1 + A4 verify_evidence + exam_context` 已经切到 LLM-first
-- 但 `trajectory_evaluator.py` 中的 verifier 仍保留了一部分 fallback 推断和 schema 兼容逻辑
+- 当前 `turn_interpreter + pending_action + exam_context` 已经切到 LLM-first
+- 已新增 [brain/evidence_anchor.py](/Users/loki/Workspace/GraduationDesign/brain/evidence_anchor.py)，用真实 `slots / evidence_states` 计算 `strong_anchor / provisional_anchor / background_supported / negative_anchor`
+- `configs/brain.yaml` 默认 `acceptance_profile=anchor_controlled`，最终接受会先检查真实强锚点、anchored alternative 和 clear negative definition evidence
+- repair 主控制原因已收敛到 `missing_required_anchor / anchored_alternative_exists / insufficient_evidence_family_coverage`，原 guarded 细粒度原因保留在 metadata 里做审计和 ablation
+- 检查、病原、影像和数值型 detail 的“没做过 / 没听说 / 没注意 / 不记得”已统一后处理为 `unclear`，避免误写 hard negative
 
 待办：
 
-- [ ] 明确 verifier 未来是否也要进一步朝“更纯的显式错误传播”收敛
-- [ ] 继续减少 schema 不合规时的隐式推断空间
-- [ ] 复盘 verifier、guarded gate、repair 三者的职责边界，避免彼此重叠
-- [ ] 补充“答案已基本正确但 verifier 持续拒停”的 focused case
+- [ ] 复跑 smoke10 / 全量病例，统计 `accepted_wrong / max_turn_reached / anchored_candidate_hit_rate / anchor_controlled_block_reason`
+- [ ] 为 `minimum_evidence_groups` 接入真实疾病 catalog 后，检查 `insufficient_evidence_family_coverage` 是否能稳定指向下一问缺口
+- [ ] 继续减少 verifier schema 不合规时的隐式推断空间，让 verifier 更像 path factuality evaluator
+- [ ] 补充“答案已基本正确但 verifier 持续拒停”和“rollout 模拟阳性导致错误接受”的 focused case
 
 完成信号：
 

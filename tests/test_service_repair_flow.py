@@ -5,7 +5,7 @@ from brain.hypothesis_manager import HypothesisManager
 from brain.mcts_engine import MctsEngine
 from brain.service import BrainDependencies, ConsultationBrain, RepairPolicyConfig
 from brain.state_tracker import StateTracker
-from brain.types import HypothesisScore, MctsAction, SearchResult, SessionState
+from brain.types import HypothesisScore, MctsAction, PendingActionResult, SearchResult, SessionState
 
 
 class RepairFakeRetriever:
@@ -507,6 +507,78 @@ def test_service_can_switch_to_alternative_hypothesis_action_when_verifier_reque
     assert any(item["name"] == "新冠核酸阳性" for item in action.metadata["exam_candidate_evidence"])
 
 
+# 验证 anchor gate 指出真实强锚点属于备选诊断时，repair 直接围绕 anchored alternative 取动作。
+def test_service_anchor_controlled_repair_switches_to_anchored_alternative() -> None:
+    tracker = StateTracker()
+    state = tracker.create_session("s_anchor_alt")
+    state.candidate_hypotheses = [
+        HypothesisScore(node_id="tb", label="Disease", name="活动性结核病", score=1.4),
+        HypothesisScore(
+            node_id="vzv",
+            label="Disease",
+            name="水痘-带状疱疹病毒感染",
+            score=1.1,
+            metadata={"anchor_tier": "strong_anchor", "observed_anchor_score": 0.7},
+        ),
+    ]
+    rows = {
+        "tb": [
+            {
+                "node_id": "lab_mtb",
+                "label": "LabFinding",
+                "name": "MTB培养阳性",
+                "relation_type": "DIAGNOSED_BY",
+                "relation_weight": 0.9,
+                "node_weight": 1.0,
+                "similarity_confidence": 1.0,
+                "contradiction_priority": 0.98,
+                "question_type_hint": "lab",
+                "priority": 3.0,
+                "is_red_flag": False,
+                "topic_id": "Disease",
+            }
+        ],
+        "vzv": [
+            {
+                "node_id": "path_vzv",
+                "label": "Pathogen",
+                "name": "水痘-带状疱疹病毒",
+                "relation_type": "HAS_PATHOGEN",
+                "relation_weight": 0.95,
+                "node_weight": 1.0,
+                "similarity_confidence": 1.0,
+                "contradiction_priority": 1.0,
+                "question_type_hint": "pathogen",
+                "priority": 2.0,
+                "is_red_flag": False,
+                "topic_id": "Disease",
+            }
+        ],
+    }
+    brain = _build_brain(rows, tracker)
+
+    action = brain._choose_repair_action(
+        "s_anchor_alt",
+        SearchResult(best_answer_id="tb"),
+        {
+            "reject_reason": "anchored_alternative_exists",
+            "current_answer_id": "tb",
+            "alternative_candidates": [
+                {
+                    "answer_id": "vzv",
+                    "answer_name": "水痘-带状疱疹病毒感染",
+                    "strength": "strong",
+                    "reason": "真实会话中已有 VZV strong anchor。",
+                }
+            ],
+        },
+    )
+
+    assert action is not None
+    assert action.hypothesis_id == "vzv"
+    assert any(item["name"] == "水痘-带状疱疹病毒" for item in action.metadata["exam_candidate_evidence"])
+
+
 # 验证 guarded 的 strong_unresolved_alternative_candidates 保留细粒度原因后，仍走竞争诊断动作池。
 def test_service_strong_unresolved_alternative_reason_uses_alternative_pool() -> None:
     tracker = StateTracker()
@@ -744,6 +816,63 @@ def test_service_trajectory_insufficient_penalizes_same_evidence_family() -> Non
 
     assert action is not None
     assert action.target_node_name == "胸部CT磨玻璃影"
+
+
+# 验证检查/测量类 no-result 回答会被后处理为 unclear，而不是 hard negative。
+def test_service_normalizes_no_result_for_measurement_to_unclear() -> None:
+    tracker = StateTracker()
+    tracker.create_session("s_no_result")
+    brain = _build_brain([], tracker)
+    action = MctsAction(
+        action_id="verify::obesity::bmi",
+        action_type="verify_evidence",
+        target_node_id="bmi_high",
+        target_node_label="ClinicalAttribute",
+        target_node_name="BMI >= 30",
+        metadata={"question_type_hint": "detail", "evidence_cost": "low"},
+    )
+    result = PendingActionResult(
+        action_type="verify_evidence",
+        target_node_id="bmi_high",
+        target_node_name="BMI >= 30",
+        polarity="absent",
+        resolution="clear",
+        negation_span="没做过这个测量",
+    )
+
+    normalized = brain._normalize_no_result_pending_action_result(action, "没做过这个测量。", result)
+
+    assert normalized.polarity == "unclear"
+    assert normalized.resolution == "hedged"
+    assert normalized.metadata["no_result_normalized_to_unclear"] is True
+
+
+# 验证真正的阴性/未检出结果仍然保留为 absent。
+def test_service_preserves_explicit_negative_result_for_exam() -> None:
+    tracker = StateTracker()
+    tracker.create_session("s_negative_result")
+    brain = _build_brain([], tracker)
+    action = MctsAction(
+        action_id="verify::hiv::rna",
+        action_type="verify_evidence",
+        target_node_id="hiv_rna",
+        target_node_label="LabFinding",
+        target_node_name="HIV RNA阳性",
+        metadata={"question_type_hint": "lab", "acquisition_mode": "needs_lab_test", "evidence_cost": "high"},
+    )
+    result = PendingActionResult(
+        action_type="verify_evidence",
+        target_node_id="hiv_rna",
+        target_node_name="HIV RNA阳性",
+        polarity="absent",
+        resolution="clear",
+        negation_span="HIV RNA 未检出",
+    )
+
+    normalized = brain._normalize_no_result_pending_action_result(action, "HIV RNA 未检出。", result)
+
+    assert normalized.polarity == "absent"
+    assert "no_result_normalized_to_unclear" not in normalized.metadata
 
 
 # 验证关闭 verifier-driven reshuffle 后，repair 只记录上下文，不应改写 hypothesis 分数。

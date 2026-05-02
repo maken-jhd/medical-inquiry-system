@@ -30,7 +30,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "enable_thinking": False,
     },
     "brain": {
-        "acceptance_profile": "guarded_lenient",
+        "acceptance_profile": "anchor_controlled",
         "verifier_acceptance_profile": "guarded_lenient",
         "agent_eval_mode": "llm_verifier",
     },
@@ -64,7 +64,7 @@ def apply_config_to_environment(config: dict[str, Any]) -> None:
     _set_env_if_present("OPENAI_TIMEOUT_SECONDS", llm.get("timeout_seconds"))
     _set_env_if_present("OPENAI_ENABLE_THINKING", llm.get("enable_thinking"))
 
-    acceptance_profile = str(brain.get("acceptance_profile") or "guarded_lenient")
+    acceptance_profile = str(brain.get("acceptance_profile") or "anchor_controlled")
     verifier_profile = str(brain.get("verifier_acceptance_profile") or acceptance_profile)
     agent_eval_mode = str(brain.get("agent_eval_mode") or "llm_verifier")
 
@@ -77,7 +77,7 @@ def build_brain_config_overrides(config: dict[str, Any]) -> dict[str, Any]:
     """把前端配置转换成 ConsultationBrain 的 config_overrides。"""
 
     brain = _as_dict(config.get("brain"))
-    acceptance_profile = str(brain.get("acceptance_profile") or "guarded_lenient")
+    acceptance_profile = str(brain.get("acceptance_profile") or "anchor_controlled")
     agent_eval_mode = str(brain.get("agent_eval_mode") or "llm_verifier")
     return {
         "stop": {

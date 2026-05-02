@@ -1,7 +1,7 @@
 """测试真实 verifier 和早停门槛如何抑制过早终止。"""
 
 from brain.stop_rules import StopRuleConfig, StopRuleEngine
-from brain.types import EvidenceState, FinalAnswerScore, SessionState
+from brain.types import EvidenceState, FinalAnswerScore, HypothesisScore, SessionState
 
 
 # 验证 turn 太早时，即使分数够高也不会直接接受最终答案。
@@ -57,6 +57,140 @@ def _accepted_answer_score() -> FinalAnswerScore:
             "verifier_accept_reason": "key_support_sufficient",
         },
     )
+
+
+def test_anchor_controlled_accepts_real_strong_anchor(monkeypatch) -> None:
+    monkeypatch.delenv("BRAIN_ACCEPTANCE_PROFILE", raising=False)
+    engine = StopRuleEngine(StopRuleConfig(acceptance_profile="anchor_controlled"))
+    answer_score = FinalAnswerScore(
+        answer_id="vzv",
+        answer_name="水痘-带状疱疹病毒感染",
+        consistency=0.9,
+        diversity=0.4,
+        agent_evaluation=0.9,
+        final_score=0.8,
+        metadata={"trajectory_count": 3, "verifier_mode": "llm_verifier", "verifier_should_accept": True},
+    )
+    state = SessionState(session_id="anchor_stop", turn_index=3)
+    state.candidate_hypotheses = [
+        HypothesisScore(
+            node_id="vzv",
+            label="Disease",
+            name="水痘-带状疱疹病毒感染",
+            score=1.0,
+            metadata={
+                "anchor_tier": "strong_anchor",
+                "observed_anchor_score": 0.63,
+                "anchor_supporting_evidence": [{"node_id": "path_vzv", "name": "水痘-带状疱疹病毒"}],
+            },
+        )
+    ]
+
+    decision = engine.should_accept_final_answer(answer_score, state)
+
+    assert decision.should_stop is True
+    assert decision.reason == "final_answer_accepted"
+    assert answer_score.metadata["anchor_tier"] == "strong_anchor"
+
+
+def test_anchor_controlled_blocks_rollout_only_or_missing_anchor(monkeypatch) -> None:
+    monkeypatch.delenv("BRAIN_ACCEPTANCE_PROFILE", raising=False)
+    engine = StopRuleEngine(StopRuleConfig(acceptance_profile="anchor_controlled"))
+    answer_score = FinalAnswerScore(
+        answer_id="tb",
+        answer_name="活动性结核病",
+        consistency=0.9,
+        diversity=0.4,
+        agent_evaluation=0.9,
+        final_score=0.8,
+        metadata={"trajectory_count": 3, "verifier_mode": "llm_verifier", "verifier_should_accept": True},
+    )
+    state = SessionState(session_id="anchor_stop", turn_index=3)
+    state.candidate_hypotheses = [
+        HypothesisScore(
+            node_id="tb",
+            label="Disease",
+            name="活动性结核病",
+            score=1.0,
+            metadata={"anchor_tier": "speculative", "observed_anchor_score": 0.0},
+        )
+    ]
+
+    decision = engine.should_accept_final_answer(answer_score, state)
+
+    assert decision.should_stop is False
+    assert decision.reason == "anchor_controlled_rejected"
+    assert decision.metadata["repair_reject_reason"] == "missing_required_anchor"
+
+
+def test_stop_profile_is_not_overridden_by_verifier_prompt_profile(monkeypatch) -> None:
+    monkeypatch.delenv("BRAIN_ACCEPTANCE_PROFILE", raising=False)
+    monkeypatch.setenv("TRAJECTORY_VERIFIER_ACCEPTANCE_PROFILE", "guarded_lenient")
+    engine = StopRuleEngine(StopRuleConfig(acceptance_profile="anchor_controlled"))
+    answer_score = FinalAnswerScore(
+        answer_id="tb",
+        answer_name="活动性结核病",
+        consistency=0.9,
+        diversity=0.4,
+        agent_evaluation=0.9,
+        final_score=0.8,
+        metadata={"trajectory_count": 3, "verifier_mode": "llm_verifier", "verifier_should_accept": True},
+    )
+    state = SessionState(session_id="anchor_stop", turn_index=3)
+    state.candidate_hypotheses = [
+        HypothesisScore(
+            node_id="tb",
+            label="Disease",
+            name="活动性结核病",
+            score=1.0,
+            metadata={"anchor_tier": "speculative", "observed_anchor_score": 0.0},
+        )
+    ]
+
+    decision = engine.should_accept_final_answer(answer_score, state)
+
+    assert decision.reason == "anchor_controlled_rejected"
+
+
+def test_anchor_controlled_blocks_when_stronger_anchor_alternative_exists(monkeypatch) -> None:
+    monkeypatch.delenv("BRAIN_ACCEPTANCE_PROFILE", raising=False)
+    engine = StopRuleEngine(StopRuleConfig(acceptance_profile="anchor_controlled"))
+    answer_score = FinalAnswerScore(
+        answer_id="ks",
+        answer_name="卡波西肉瘤",
+        consistency=0.9,
+        diversity=0.4,
+        agent_evaluation=0.9,
+        final_score=0.8,
+        metadata={"trajectory_count": 3, "verifier_mode": "llm_verifier", "verifier_should_accept": True},
+    )
+    state = SessionState(session_id="anchor_stop", turn_index=3)
+    state.candidate_hypotheses = [
+        HypothesisScore(
+            node_id="ks",
+            label="Disease",
+            name="卡波西肉瘤",
+            score=1.2,
+            metadata={"anchor_tier": "background_supported", "observed_anchor_score": 0.0},
+        ),
+        HypothesisScore(
+            node_id="cmv",
+            label="Disease",
+            name="巨细胞病毒感染",
+            score=1.0,
+            metadata={
+                "anchor_tier": "strong_anchor",
+                "observed_anchor_score": 0.7,
+                "anchor_supporting_evidence": [{"node_id": "cmv_path", "name": "巨细胞病毒"}],
+            },
+        ),
+    ]
+
+    decision = engine.should_accept_final_answer(answer_score, state)
+
+    assert decision.should_stop is False
+    assert decision.metadata["repair_reject_reason"] == "anchored_alternative_exists"
+    assert decision.metadata["anchor_stronger_alternative_candidates"][0]["answer_id"] == "cmv"
 
 
 def test_guarded_lenient_requires_confirmed_key_evidence_for_early_accept() -> None:

@@ -48,5 +48,5 @@ stop:
   min_agent_eval_score: 0.72
   min_final_score: 0.6
   require_verifier_accept_flag: true
-  acceptance_profile: baseline
+  acceptance_profile: anchor_controlled
   guarded_lenient_early_turn_index: 2

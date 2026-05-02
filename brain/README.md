@@ -88,6 +88,11 @@
   - 当前已为 rollout / reroot 提供轻量状态快照，避免把 `search_tree`、`last_search_result` 等重量级运行时对象一并 deepcopy。
   - 当前还会维护 `mention_context`，并按 `present > unclear > absent` 的优先级合并跨轮次提及项。
 
+- [evidence_anchor.py](/Users/loki/Workspace/GraduationDesign/brain/evidence_anchor.py)
+  - 新增 observed anchor 计算层，只消费真实会话中的 `slots / evidence_states`。
+  - 会把 `Pathogen / LabFinding / ImagingFinding / LabTest / 定义性 detail` 的阳性证据分为 `strong_anchor / provisional_anchor`，把 HIV、CD4、发热、免疫抑制等高连接证据降为 `background_supported`。
+  - 会过滤 rollout / simulation 来源的模拟阳性证据，并把明确否定的定义性检查结果标为 `negative_anchor`，供 A2 排序、repair 和 stop gate 共用。
+
 - [session_dag.py](/Users/loki/Workspace/GraduationDesign/brain/session_dag.py)
   - 负责维护单个患者会话的内存 DAG。
   - 当前主要承担主题分支管理与节点开闭状态维护，不再是唯一调度器。
@@ -115,6 +120,8 @@
 
 - [stop_rules.py](/Users/loki/Workspace/GraduationDesign/brain/stop_rules.py)
   - 定义何时可以终止问诊、何时需要停止 rollout、何时接受最终答案。
+  - 当前新增 `acceptance_profile=anchor_controlled`：最终接受需要真实 observed strong anchor，或显式最低证据 family 覆盖达标；若存在更强 anchored alternative 或 clear negative definition evidence，会拒停并把原因交给 repair。
+  - 结构化 stop gate 读取 `BRAIN_ACCEPTANCE_PROFILE` 或 [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml)，不再被 verifier prompt 的 `TRAJECTORY_VERIFIER_ACCEPTANCE_PROFILE` 覆盖。
 
 - [report_builder.py](/Users/loki/Workspace/GraduationDesign/brain/report_builder.py)
   - 用于生成结构化阶段报告、搜索报告和最终报告。
@@ -129,8 +136,10 @@
   - 当前会先把可信实体链接回填到 `mention.node_id / normalized_name`，再派生 `PatientContext` 和 `A1`，保证 opening 证据、slot 更新、R1 和 mention_context 使用同一图谱锚点。
   - 当前会把 `exam_context` 回答中的检查名与结果原文再次送入实体链接；可信命中 `LabFinding / ImagingFinding / Pathogen` 时直接写入 slot/evidence_state，且不再围绕 `__exam_context__::general` 重复追问。
   - 当前病原体阳性、影像/化验阳性、CD4 低值等强证据进入后，会设置 `force_a2_refresh` 和 `force_tree_refresh`，促使下一步重新执行 A2 并围绕新强证据收束。
-  - 当前 verifier / guarded repair 会区分 `hard_negative_key_evidence` 与 `strong_unresolved_alternative_candidates`：前者优先围绕当前答案的推荐锚点化解硬反证，后者才进入竞争诊断动作池。
+  - 当前会在 A2、repair、stop 前刷新 `observed_anchor_index`，让真实病原体/检查强锚点稳定进入候选排序和拒停原因；rollout 模拟阳性只保留为路径推演，不再污染真实 confirmed evidence。
+  - 当前 verifier / repair 的主控制原因已收敛到 `missing_required_anchor / anchored_alternative_exists / insufficient_evidence_family_coverage`；`hard_negative_key_evidence`、`strong_unresolved_alternative_candidates` 等细粒度原因继续保存在 metadata 中供复盘和消融使用。
   - 当前 verifier 上下文会携带累计真实会话证据 `observed_session_evidence`，避免把 rollout 模拟路径里的阳性检查当作患者已经确认的事实。
+  - 当前会把检查、病原、影像、数值型 detail 的“没做过 / 没听说 / 没注意 / 不记得”统一后处理为 `unclear`；只有“阴性 / 未检出 / 未见异常 / 医生排除”等结果性否定才写成 `absent`。
   - 当 rollout 没有形成具体最终答案、或只形成 `UNKNOWN` 答案组时，当前会从 A2 候选态生成保守 `FinalAnswerScore`，避免 top hypothesis 已存在但 `best_answer=None`。
 
 ### 3. 核心解释与决策模块
@@ -161,7 +170,7 @@
   - 负责整理由图谱检索得到的候选疾病，并维护主假设与备选假设。
   - 当前已能结合患者上下文和证据类型做轻量重排。
   - 若启用 LLM 排序，还会把 `supporting_features / conflicting_features / recommended_next_evidence` 写入 metadata。
-  - 当前 repair 重排能识别 guarded 细粒度拒停原因，对硬反证、强备选未排除、关键支持缺失分别施加不同分数调整。
+  - 当前 repair 重排能识别 anchor-controlled 与 guarded 两套拒停原因，对缺少真实锚点、anchored alternative、证据 family 覆盖不足、硬反证和关键支持缺失分别施加不同分数调整。
 
 - [action_builder.py](/Users/loki/Workspace/GraduationDesign/brain/action_builder.py)
   - 对应 `A3` 证据验证的动作生成层。

@@ -173,11 +173,19 @@ class HypothesisManager:
 
             # 当前被 verifier 拒停的答案会按 reject_reason 受到不同幅度的下调。
             if current_answer_id and hypothesis.node_id == current_answer_id:
-                if reject_reason in {"strong_alternative_not_ruled_out", "strong_unresolved_alternative_candidates"}:
+                if reject_reason in {
+                    "strong_alternative_not_ruled_out",
+                    "strong_unresolved_alternative_candidates",
+                    "anchored_alternative_exists",
+                }:
                     score_delta -= self.config.verifier_hedged_penalty
                 elif reject_reason == "hard_negative_key_evidence":
                     score_delta -= self.config.verifier_hard_negative_penalty
-                elif reject_reason == "missing_key_support":
+                elif reject_reason in {
+                    "missing_key_support",
+                    "missing_required_anchor",
+                    "insufficient_evidence_family_coverage",
+                }:
                     score_delta -= self.config.verifier_missing_support_penalty
                 elif reject_reason == "trajectory_insufficient":
                     score_delta -= self.config.verifier_trajectory_penalty
