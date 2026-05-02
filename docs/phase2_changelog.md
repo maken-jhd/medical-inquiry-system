@@ -10,6 +10,391 @@
 - `phase2_execution_checklist.md` 更偏“路线设计与待办清单”
 - 本文更偏“已经发生过哪些阶段性变化、分别解决了什么问题”
 
+## 近期更新：2026-05-02 verifier 真实证据隔离与答案聚合兜底
+
+### 本次目标
+
+- 修复 completed 但答案错误时暴露的关键问题：verifier 不能把 rollout 模拟路径中的阳性检查当成患者真实已确认事实
+- 修复 top hypothesis 已经正确但 `best_answer=None / no_answer_score` 的断层
+- 本轮只实现方案 1 和方案 3，不调整候选重排权重、guarded acceptance 或更激进的 stop 规则
+
+### 本次改动
+
+- [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - `_build_verifier_patient_context()` 会把累计 slot 与 evidence state 整理成 `observed_session_evidence`
+  - `trajectory_agent_verifier` 看到的是累计真实会话证据，而不是只看最新一句患者回答
+  - 当轨迹聚合没有具体最终答案、或只产出 `UNKNOWN` 答案组时，改用当前 A2 候选态生成保守 `FinalAnswerScore`
+- [brain/trajectory_evaluator.py](/Users/loki/Workspace/GraduationDesign/brain/trajectory_evaluator.py)
+  - verifier prompt 输入中显式区分 `observed_session_evidence` 和 `simulated_trajectory_evidence`
+  - 新增真实证据 guard：如果接受信号只依赖 rollout 模拟阳性强证据，而真实会话没有当前答案的特异支持，则强制改为 `missing_key_support` 拒停
+  - 新增 `score_candidate_hypotheses_without_trajectories()`，在轨迹答案聚合断层时把现有候选疾病转成低分兜底 answer score
+- [brain/llm_client.py](/Users/loki/Workspace/GraduationDesign/brain/llm_client.py)
+  - `trajectory_agent_verifier` prompt 明确要求不能把 `simulated_trajectory_evidence` 当成 confirmed evidence
+- [tests/test_trajectory_evaluator.py](/Users/loki/Workspace/GraduationDesign/tests/test_trajectory_evaluator.py)、[tests/test_service_stop_flow.py](/Users/loki/Workspace/GraduationDesign/tests/test_service_stop_flow.py)
+  - 覆盖“rollout 模拟阳性不能触发接受”和“UNKNOWN 答案组需要候选态兜底”的行为
+
+### 影响范围
+
+- `kg_ordinary_0950b716_001` 这类错误 completed 场景中，若结核阳性只来自 rollout 模拟路径而非患者真实回答，应被 verifier guard 拦下
+- `kg_competitive_0950b716_vs_b247711a_001` 这类 top hypothesis 已正确但轨迹答案聚合为空的场景，不再直接落到 `best_answer=None`
+- 兜底 answer score 的 `trajectory_count=0`，仍会被 stop rule 的轨迹数量门槛拦住，因此它主要服务 repair / 下一问，不会单独造成提前停诊
+
+### 验证结果
+
+- 已执行：
+
+```bash
+conda run -n GraduationDesign python -m pytest tests/test_trajectory_evaluator.py tests/test_llm_client_profiles.py tests/test_service_stop_flow.py tests/test_service_repair_flow.py -q
+```
+
+- 结果：
+  - `39 passed`
+
+## 近期更新：2026-05-02 repair 细粒度分流与推荐证据硬引导
+
+### 本次目标
+
+- 修复 guarded repair 中 `hard_negative_key_evidence` 与 `strong_unresolved_alternative_candidates` 都被压成 `strong_alternative_not_ruled_out` 的问题
+- 让 `recommended_next_evidence` 在 `missing_key_support` 和硬反证修复场景下更接近“硬引导”，而不是轻量软加分
+- 不改病例骨架，不放宽 stop/verifier/guarded acceptance，只修 repair 分流和动作落地排序
+
+### 本次改动
+
+- [brain/stop_rules.py](/Users/loki/Workspace/GraduationDesign/brain/stop_rules.py)
+  - guarded block reason 到 repair reason 的映射保留细粒度原因
+  - `hard_negative_key_evidence` 与 `strong_unresolved_alternative_candidates` 不再统一写成 `strong_alternative_not_ruled_out`
+- [brain/hypothesis_manager.py](/Users/loki/Workspace/GraduationDesign/brain/hypothesis_manager.py)
+  - `apply_verifier_repair()` 识别 guarded 细粒度 repair reason
+  - 对硬反证引入独立下调幅度，对强备选未排除继续支持 alternative boost
+- [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - `hard_negative_key_evidence` 优先围绕当前答案和 verifier 推荐证据修复，避免被误导到普通竞争诊断动作
+  - `strong_unresolved_alternative_candidates` 继续进入竞争诊断动作池
+  - `missing_key_support / hard_negative_key_evidence` 下提高推荐证据命中分权重，推荐锚点可以压过高先验泛化症状
+- [brain/action_builder.py](/Users/loki/Workspace/GraduationDesign/brain/action_builder.py)
+  - 高成本检查聚合成 `collect_general_exam_context` 时，把 `recommended_match_score / verifier_recommended_match_score / joint_recommended_match_score / discriminative_gain` 等字段同步到动作顶层
+  - 修复 repair scorer 只能在候选 payload 里看到推荐命中、但最终排序读不到的问题
+
+### 影响范围
+
+- 硬反证不再自动等价于“强备选未排除”，repair 下一问会优先补当前答案的确认性锚点
+- 强备选未排除仍会拉入 alternative hypothesis 动作池，保留鉴别诊断能力
+- 检查上下文类动作能真实继承 verifier 推荐证据的排序优势
+
+### 验证结果
+
+- 已执行：
+
+```bash
+conda run -n GraduationDesign python -m pytest tests/test_stop_rules.py tests/test_service_repair_flow.py tests/test_hypothesis_manager.py tests/test_action_builder.py -q
+conda run -n GraduationDesign python -m pytest tests/test_evidence_parser.py tests/test_llm_client_profiles.py tests/test_patient_agent.py tests/test_retriever.py tests/test_service_stop_flow.py tests/test_exam_context_flow.py tests/test_report_builder.py -q
+```
+
+- 结果：
+  - `46 passed`
+  - `57 passed`
+
+## 近期更新：2026-05-02 no-match 语义与强证据 A2 重排
+
+### 本次目标
+
+- 对 `lab / imaging / pathogen`、高成本检查和疾病定义性证据，避免虚拟病人缺槽位时默认生成明确阴性
+- 让病原体阳性、HIV RNA 阳性、CD4 低值等强图谱证据进入后，触发更强的 A2 refresh 和后续收束
+- 不改病例骨架，不放宽 stop/verifier/guarded acceptance
+
+### 本次改动
+
+- [brain/llm_client.py](/Users/loki/Workspace/GraduationDesign/brain/llm_client.py)
+  - `patient_slot_semantic_match` prompt 区分普通症状 no-match 与高成本检查/疾病定义性证据 no-match
+  - 高成本检查/病原/检查结果缺槽位时，鼓励回答“没做过这项检查 / 没听医生提过 / 报告里没注意到”，不默认写成“没有相关情况”
+  - `turn_interpreter` prompt 明确要求把“未检查/没听说”解析为 `unclear`，只有明确阴性结果或医生明确排除时才解析为 `absent`
+- [simulator/patient_agent.py](/Users/loki/Workspace/GraduationDesign/simulator/patient_agent.py)
+  - LLM no-match 未返回话术时，默认回退为不确定/未听医生提过，而不是明确阴性
+- [brain/evidence_parser.py](/Users/loki/Workspace/GraduationDesign/brain/evidence_parser.py)
+  - `turn_interpreter` 输入补充 `pending_target_label / acquisition_mode / evidence_cost / relation_type`，让 prompt 能判断当前是否是高成本检查或定义性证据
+  - 对高成本检查/定义性证据的负向短答，不再直接走 deterministic absent 短路，而是交回 `turn_interpreter` prompt 结合问题语境判断
+- [brain/retriever.py](/Users/loki/Workspace/GraduationDesign/brain/retriever.py)
+  - R1 候选新增 `disease_specific_anchor_score`
+  - R1 查询会保留证据名称、标签和关系类型的 payload，病原体、疾病名强相关证据和定义性检查会获得额外语义加权，CD4/HIV 背景等共享泛证据不再同等推动所有机会感染/肿瘤候选
+- [brain/hypothesis_manager.py](/Users/loki/Workspace/GraduationDesign/brain/hypothesis_manager.py)
+  - A2 竞争重排阶段消费 `disease_specific_anchor_score`
+  - 提高病原/定义性证据的正向反馈倍率，让强证据进入后更容易影响下一轮主假设排序
+- [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - 强阳性图谱证据写入后设置 `force_a2_refresh / force_tree_refresh`
+  - 触发来源包括 `turn_interpreter`、`exam_context` 和普通 pending action 的强检查/病原证据
+
+### 影响范围
+
+- 缺槽位导致的检查类 no-match 不再轻易变成 hard negative
+- 病原学和疾病特异证据进入后，更容易把 A2 从泛 HIV/CD4 背景候选拉回目标病
+- 本次仍不改变 stop/verifier 的验收口径，只改善进入验收层之前的证据语义和候选排序
+
+### 验证结果
+
+- 已执行：
+
+```bash
+conda run -n GraduationDesign python -m pytest tests/test_llm_client_profiles.py tests/test_patient_agent.py tests/test_evidence_parser.py tests/test_retriever.py tests/test_hypothesis_manager.py tests/test_service_stop_flow.py tests/test_exam_context_flow.py -q
+```
+
+- 结果：
+  - `56 passed`
+
+## 近期更新：2026-05-02 修复虚拟病人到 Brain 的证据对接
+
+### 本次目标
+
+- 只修“证据进入 brain”和“检查上下文重复问”两件事
+- 不改病例骨架，不调整候选重排权重、guarded acceptance、stop/verifier
+- 让虚拟病人的 opening 与 `__exam_context__::general` 回答能更稳定落到图谱节点和 evidence state
+
+### 本次改动
+
+- [brain/normalization.py](/Users/loki/Workspace/GraduationDesign/brain/normalization.py)
+  - 新增 `expand_graph_mentions()`，把患者口语表达扩展为多个图谱候选 surface form
+  - 覆盖 CD4 低值、HIV RNA 阳性、下肢/双足发麻、药物使用、腹型肥胖等通用接口层表达
+- [brain/entity_linker.py](/Users/loki/Workspace/GraduationDesign/brain/entity_linker.py)
+  - 单个 mention 会查询扩展候选并统一排序
+  - metadata 记录 `expanded_mentions / matched_mention / link_source / template_match`
+- [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - 可信链接成功后回填 `mention.node_id`，并把 `mention.normalized_name` 更新为图谱 canonical name
+  - `process_turn()` 改为先完成实体链接回填，再派生 `PatientContext / A1`
+  - `exam_context` 中的 `mentioned_tests` 与 `mentioned_results.raw_text` 会再走实体链接，可信命中 `LabFinding / ImagingFinding / Pathogen` 时写入 slot/evidence_state
+  - 增加 selected action 可问性过滤，防止 `__exam_context__::general` 和已问节点重复发问
+- [brain/action_builder.py](/Users/loki/Workspace/GraduationDesign/brain/action_builder.py)
+  - `general` 检查上下文已回答后，不再生成 `collect_general_exam_context`
+  - 若 general 已问过但仍 unknown，只允许退到具体 `lab / imaging / pathogen` 检查入口
+- [simulator/patient_agent.py](/Users/loki/Workspace/GraduationDesign/simulator/patient_agent.py)
+  - LLM 生成 opening 时会校验检查类关键锚点；锚点丢失时退回规则模板
+- [brain/llm_client.py](/Users/loki/Workspace/GraduationDesign/brain/llm_client.py)
+  - `patient_opening_generation` prompt 明确要求保留数值阈值、阳性/阴性/升高/降低、具体病原体名和影像异常名
+
+### 影响范围
+
+- 本次只增强虚拟病人自然语言到 `brain` 图谱证据的接口层
+- 不改变疾病生成算法，不改变 R1/R2 权重，不放宽 stop/verifier，也不把疾病诊断同义词硬塞进推理规则
+- 预期改善：
+  - opening 中的 CD4 低值、HIV RNA 阳性、病原体名等更容易进入 `linked_entities / evidence_states`
+  - `__exam_context__::general` 已回答后不再在同一个抽象入口上连续追问
+
+### 验证结果
+
+- 已执行：
+
+```bash
+conda run -n GraduationDesign python -m pytest tests/test_entity_linker.py tests/test_exam_context_flow.py tests/test_action_builder.py tests/test_patient_agent.py tests/test_llm_client_profiles.py tests/test_replay_engine.py -q
+```
+
+- 结果：
+  - `43 passed`
+
+## 近期更新：2026-05-02 Neo4j 疾病-症状证据族目录
+
+### 本次目标
+
+- 在把最低证据组全面接入虚拟病例生成前，先从当前 Neo4j 导出一个只包含 `Disease` 与 `ClinicalFinding` 的中间检查文件
+- 避免继续靠少数疾病名称规则手写 family requirement，先让症状节点统一归类，再为每个疾病生成 symptom-only 的最低证据组建议
+- 给后续“每个疾病都有可解释 benchmark 约束”提供可人工复核的数据底稿
+
+### 本次改动
+
+- [simulator/evidence_family_catalog.py](/Users/loki/Workspace/GraduationDesign/simulator/evidence_family_catalog.py)
+  - 新增症状节点证据族分类规则，覆盖呼吸、神经、全身、消化、皮肤黏膜、口腔耳鼻咽喉、淋巴、泌尿生殖、肌肉骨骼、心血管、血液/出血、眼部、代谢、精神心理、免疫状态、病情恶化和重症线索等 family
+  - 根据疾病关联症状的 family coverage，生成每个疾病的 `minimum_evidence_groups` 建议
+- [scripts/export_disease_symptom_family_catalog.py](/Users/loki/Workspace/GraduationDesign/scripts/export_disease_symptom_family_catalog.py)
+  - 连接当前 Neo4j，导出 `Disease` - `MANIFESTS_AS` - `ClinicalFinding` 关系
+  - 同时输出完整 catalog、症状节点清单和疾病最低症状证据组清单
+- [tests/test_evidence_family_catalog.py](/Users/loki/Workspace/GraduationDesign/tests/test_evidence_family_catalog.py)
+  - 覆盖常见症状分类、最低组优先级和疾病级聚合
+
+### 新输出
+
+- 新目录：
+  - `test_outputs/evidence_family/disease_symptom_catalog_20260502/`
+- 生成结果：
+  - `disease_count = 80`
+  - `symptom_node_count = 204`
+  - `disease_symptom_edge_count = 405`
+  - `unclassified_symptom_node_count = 8`
+- 关键文件：
+  - `disease_symptom_family_catalog.md`
+  - `disease_symptom_family_catalog.json`
+  - `symptom_family_nodes.json`
+  - `disease_minimum_symptom_groups.json`
+
+### 影响范围
+
+- 当前只是生成可检查的中间层，不直接改变病例生成器、`brain` 检索、MCTS 或 stop/verifier
+- 后续可以把 `disease_minimum_symptom_groups.json` 作为全疾病 minimum evidence requirement 的基础，再叠加 lab / imaging / pathogen family，形成完整 benchmark QC
+
+### 验证结果
+
+- 已执行：
+  - `conda run -n GraduationDesign python -m pytest tests/test_evidence_family_catalog.py -q`
+- 结果 `3 passed`
+- 已执行 Neo4j 导出：
+  - `conda run -n GraduationDesign python scripts/export_disease_symptom_family_catalog.py --output-root test_outputs/evidence_family/disease_symptom_catalog_20260502`
+- 结果 `status=ok`
+
+## 近期更新：2026-05-02 Neo4j 疾病-全证据族目录
+
+### 本次目标
+
+- 在 symptom-only catalog 基础上，把 `lab / imaging / pathogen / risk / detail` 一起纳入 family catalog
+- 让每个疾病都能看到 symptom、risk、detail、lab、imaging、pathogen 六个证据大组下的 family coverage 和最低证据组建议
+- 为后续把 full-evidence requirement 接入 `graph_case_generator.py` 提供可复核的中间产物
+
+### 本次改动
+
+- [simulator/evidence_family_catalog.py](/Users/loki/Workspace/GraduationDesign/simulator/evidence_family_catalog.py)
+  - 保留 symptom-only catalog 能力
+  - 新增 full-evidence 分类：`ClinicalFinding / RiskFactor / PopulationGroup / ClinicalAttribute / LabFinding / LabTest / ImagingFinding / Pathogen`
+  - 新增 lab family：CD4/免疫状态、viral load、oxygenation、fungal marker、CNS lab、disease-specific lab、serology、blood count、liver/renal function、metabolic definition、pathology 等
+  - 新增 imaging family：pulmonary / CNS / abdominal / lymph node / cardiovascular / bone imaging
+  - 新增 pathogen family：fungal / mycobacterial / viral / parasitic / bacterial pathogen
+  - 新增 risk/detail family：underlying infection、ART/reconstitution、exposure risk、medication risk、comorbidity risk、population risk、onset timing、severity、treatment response、location detail
+- [scripts/export_disease_evidence_family_catalog.py](/Users/loki/Workspace/GraduationDesign/scripts/export_disease_evidence_family_catalog.py)
+  - 连接当前 Neo4j，导出 Disease 与全类型证据节点的核心关系
+  - 输出 full catalog、证据节点清单和疾病最低证据组清单
+- [tests/test_evidence_family_catalog.py](/Users/loki/Workspace/GraduationDesign/tests/test_evidence_family_catalog.py)
+  - 新增非 symptom 证据分类测试
+  - 新增 full-evidence 疾病聚合测试
+
+### 新输出
+
+- 新目录：
+  - `test_outputs/evidence_family/disease_evidence_catalog_20260502/`
+- 生成结果：
+  - `disease_count = 80`
+  - `evidence_node_count = 850`
+  - `disease_evidence_edge_count = 1562`
+  - `unclassified_evidence_node_count = 76`
+- 关键文件：
+  - `disease_evidence_family_catalog.md`
+  - `disease_evidence_family_catalog.json`
+  - `evidence_family_nodes.json`
+  - `disease_minimum_evidence_groups.json`
+
+### 影响范围
+
+- 当前仍是可检查中间层，不直接改变病例生成器或 `brain` 行为
+- full catalog 已能为 PCP 等疾病给出跨组建议，例如 symptom/risk/lab/imaging/pathogen/detail 各组的最低 evidence family
+- 后续适合把 `disease_minimum_evidence_groups.json` 接入病例生成器，作为全疾病 QC 约束来源；同时保留 disease-family 专属规则作为覆盖不足时的兜底
+
+### 验证结果
+
+- 已执行：
+  - `conda run -n GraduationDesign python -m pytest tests/test_evidence_family_catalog.py -q`
+- 结果 `5 passed`
+- 已执行 Neo4j 导出：
+  - `conda run -n GraduationDesign python scripts/export_disease_evidence_family_catalog.py --output-root test_outputs/evidence_family/disease_evidence_catalog_20260502`
+- 结果 `status=ok`
+
+## 近期更新：2026-05-02 病例生成器接入 full-evidence catalog 约束
+
+### 本次目标
+
+- 将 `test_outputs/evidence_family/disease_evidence_catalog_20260502/disease_minimum_evidence_groups.json` 接入 [simulator/graph_case_generator.py](/Users/loki/Workspace/GraduationDesign/simulator/graph_case_generator.py)
+- 让每个疾病优先按 catalog 中的最低 evidence family 生成病例，而不是只依赖少数疾病大类的内置规则
+- 保留内置 PCP / IRIS / CNS / 代谢类规则作为 catalog 缺失或 disease_id 未命中时的兜底
+
+### 本次改动
+
+- [simulator/graph_case_generator.py](/Users/loki/Workspace/GraduationDesign/simulator/graph_case_generator.py)
+  - `GraphCaseGeneratorConfig` 新增 `minimum_evidence_groups_file` 和 `minimum_evidence_group_match_by_name`
+  - 生成器初始化时读取 full-evidence catalog，并按 disease_id 解析每个疾病的 `minimum_evidence_groups`
+  - `ordinary / low_cost / exam_driven / competitive` 的阳性槽位选择都会优先尝试覆盖 catalog family
+  - 病例 metadata 新增或扩展：
+    - `benchmark_requirement_source`
+    - `benchmark_catalog_required_family_groups`
+    - `benchmark_catalog_required_family_groups_by_evidence_group`
+    - `benchmark_catalog_unavailable_family_groups`
+  - catalog 来自全 Neo4j，而病例生成输入来自 disease audit 证据池；如果 catalog family 在当前 audit 证据池中不可选，会记录为 unavailable，不作为 QC 缺失项
+  - `POSITIVE_SLOT_LIMIT` 从 6 调整为 8，以承接 full catalog 默认最多 8 个最低证据组
+- [scripts/generate_graph_virtual_patients.py](/Users/loki/Workspace/GraduationDesign/scripts/generate_graph_virtual_patients.py)
+  - 新增 `--minimum-evidence-groups-file`
+  - 新增 `--minimum-evidence-group-match-by-name`
+- [tests/test_graph_case_generator.py](/Users/loki/Workspace/GraduationDesign/tests/test_graph_case_generator.py)
+  - 新增 catalog minimum evidence group 接入测试
+
+### 新输出
+
+- 新病例集目录：
+  - `test_outputs/simulator_cases/graph_cases_20260502_catalog_qc/`
+- 生成结果：
+  - `generated_case_count = 227`
+  - `generated_case_count_by_type = {"ordinary": 66, "low_cost": 49, "exam_driven": 61, "competitive": 51}`
+  - `minimum_evidence_requirement_catalog.requirement_count_by_id = 80`
+  - `benchmark_qc_count_by_status = {"eligible": 175, "ineligible": 52}`
+  - `benchmark_eligible_count_by_type = {"ordinary": 63, "low_cost": 3, "exam_driven": 60, "competitive": 49}`
+
+### 影响范围
+
+- 影响后续图谱驱动虚拟病人的证据槽位选择和 benchmark QC metadata
+- 不改变 `brain` 检索、MCTS、stop/verifier 或实时问诊逻辑
+- 新目录 `graph_cases_20260502_catalog_qc` 可作为 full-evidence catalog 约束版病例集；旧目录 `graph_cases_20260502_family_qc` 可作为内置 family-QC 版对照
+
+### 验证结果
+
+- 已执行：
+  - `conda run -n GraduationDesign python -m pytest tests/test_graph_case_generator.py tests/test_evidence_family_catalog.py -q`
+- 结果 `30 passed`
+- 已执行新病例生成：
+  - `conda run -n GraduationDesign python scripts/generate_graph_virtual_patients.py --output-file test_outputs/simulator_cases/graph_cases_20260502_catalog_qc/cases.jsonl --output-json-file test_outputs/simulator_cases/graph_cases_20260502_catalog_qc/cases.json --manifest-file test_outputs/simulator_cases/graph_cases_20260502_catalog_qc/manifest.json --summary-file test_outputs/simulator_cases/graph_cases_20260502_catalog_qc/summary.md`
+- 结果 `status=ok`
+
+## 近期更新：2026-05-02 图谱虚拟病人生成器 evidence-family QC
+
+### 本次目标
+
+- 为毕业论文 benchmark 准备更稳定、可解释、可复现的虚拟病人病例集
+- 不围绕 smoke10 个别样本手工补洞，而是在病例生成算法里加入“证据族覆盖”与“竞争负例冲突过滤”
+- 保留旧病例集作为无 family-QC baseline，重新生成一版 benchmark-quality 候选集
+
+### 本次改动
+
+- [simulator/graph_case_generator.py](/Users/loki/Workspace/GraduationDesign/simulator/graph_case_generator.py)
+  - 新增 evidence-family 分类，将证据统一映射到 `respiratory_symptom / neurologic_symptom / immune_status / art_or_reconstitution / worsening / imaging / oxygenation / fungal_marker / pathogen / metabolic_definition` 等可审计证据族
+  - 新增 benchmark QC metadata：
+    - `benchmark_qc_status`
+    - `benchmark_required_family_groups`
+    - `benchmark_missing_family_groups`
+    - `evidence_family_coverage`
+    - `negative_evidence_family_coverage`
+  - 对 PCP、IRIS、中枢感染、代谢类疾病定义最低可判定证据族
+  - `ordinary / exam_driven / competitive` 的阳性证据选择改为先覆盖 required family，再按原 priority / specificity 补满
+  - `competitive` 的阴性证据会过滤与目标病名称、目标病核心定义或阳性互斥 family 冲突的项目，避免出现“目标病主诉阳性但目标病槽位阴性”
+  - manifest / summary 新增 benchmark QC 统计
+- [tests/test_graph_case_generator.py](/Users/loki/Workspace/GraduationDesign/tests/test_graph_case_generator.py)
+  - 新增 PCP 竞争病例证据族覆盖测试
+  - 新增竞争负例过滤目标病核心定义冲突测试
+- [simulator/README.md](/Users/loki/Workspace/GraduationDesign/simulator/README.md)
+  - 同步记录 evidence-family QC 与新病例输出目录
+
+### 新输出
+
+- 新病例集目录：
+  - `test_outputs/simulator_cases/graph_cases_20260502_family_qc/`
+- 生成结果：
+  - `generated_case_count = 227`
+  - `generated_case_count_by_type = {"ordinary": 66, "low_cost": 49, "exam_driven": 61, "competitive": 51}`
+  - `benchmark_qc_count_by_status = {"eligible": 200, "ineligible": 27}`
+  - `benchmark_eligible_count_by_type = {"ordinary": 60, "low_cost": 38, "exam_driven": 54, "competitive": 48}`
+
+### 影响范围
+
+- 影响图谱驱动虚拟病人的后续生成逻辑和 benchmark 病例质量
+- 不改变 `brain` 的检索、MCTS、stop/verifier 或实时问诊逻辑
+- 旧病例集 `graph_cases_20260426_final` 不被覆盖，可继续作为无 evidence-family QC 的对照 baseline
+
+### 验证结果
+
+- 已执行生成器单测：
+  - `conda run -n GraduationDesign python -m pytest tests/test_graph_case_generator.py -q`
+- 结果 `24 passed`
+- 已执行新病例生成：
+  - `conda run -n GraduationDesign python scripts/generate_graph_virtual_patients.py --output-file test_outputs/simulator_cases/graph_cases_20260502_family_qc/cases.jsonl --output-json-file test_outputs/simulator_cases/graph_cases_20260502_family_qc/cases.json --manifest-file test_outputs/simulator_cases/graph_cases_20260502_family_qc/manifest.json --summary-file test_outputs/simulator_cases/graph_cases_20260502_family_qc/summary.md`
+- 结果 `status=ok`
+
 ## 近期更新：2026-05-01 虚拟病人检查上下文与候选内语义匹配
 
 ### 本次目标

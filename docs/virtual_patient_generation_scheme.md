@@ -13,12 +13,14 @@
 
 本文档描述的是当前仓库内已经实现并可运行的方案，而不是纯粹的未来设想。
 
-截至当前版本，图谱病例生成器已经包含一轮面向病例质量的小范围修复：
+截至当前版本，图谱病例生成器已经从早期的局部质量修复，升级为“全证据族 catalog 约束 + 病例 QC”的生成方式：
 
-- 对同一指标的互斥阈值阳性证据做去重，只保留一条
-- 重点覆盖了 `CD4`、`HIV RNA / 病毒载量`、`BMI`、`LDL`、`HDL`、`甘油三酯`、`总胆固醇`、`eGFR` 等指标的去冗余
-- 对 opening slots 做 patient-friendly 过滤，避免把 `LabTest`、`Pathogen`、`ClinicalAttribute` 以及预后/疗效/统计类 finding 主动暴露给首轮开场
-- 保留被过滤证据在 `slot_truth_map` 中的真值，只改变其是否主动暴露
+- 基于当前 Neo4j 图谱导出 `symptom / risk / detail / lab / imaging / pathogen` 六类证据族目录
+- full-evidence catalog 当前覆盖 `80` 个疾病、`850` 个证据节点和 `1562` 条 disease-evidence 边
+- 每个疾病优先读取 `disease_minimum_evidence_groups.json` 中的最低证据组，按 evidence family 选择病例阳性槽位
+- catalog 中某个 family 如果在当前疾病审计证据池中不可选，会记录到病例元数据，不计入病例 QC 缺失项
+- 继续保留 `CD4`、`HIV RNA / 病毒载量`、`BMI`、血脂、`eGFR` 等互斥指标去冗余
+- 继续对 opening slots 做 patient-friendly 过滤，避免把纯检查项目、纯病原体名或结构化属性主动暴露给首轮开场
 
 ## 2. 总体定位
 
@@ -75,7 +77,8 @@ test_outputs/graph_audit/all_diseases_20260420_disease_aliases_only/
 ```text
 搜索专用知识图谱
     -> 疾病级图谱审计
-    -> 图谱病例骨架生成
+    -> evidence family catalog 导出
+    -> catalog 约束下的图谱病例骨架生成
     -> 病人代理开场/回答
     -> 问诊大脑自动对战
     -> replay / benchmark / ablation
@@ -87,7 +90,10 @@ test_outputs/graph_audit/all_diseases_20260420_disease_aliases_only/
   - [simulator/graph_audit.py](/Users/loki/Workspace/GraduationDesign/simulator/graph_audit.py)
   - [scripts/audit_disease_ego_graphs.py](/Users/loki/Workspace/GraduationDesign/scripts/audit_disease_ego_graphs.py)
 - 图谱病例生成：
+  - [simulator/evidence_family_catalog.py](/Users/loki/Workspace/GraduationDesign/simulator/evidence_family_catalog.py)
   - [simulator/graph_case_generator.py](/Users/loki/Workspace/GraduationDesign/simulator/graph_case_generator.py)
+  - [scripts/export_disease_symptom_family_catalog.py](/Users/loki/Workspace/GraduationDesign/scripts/export_disease_symptom_family_catalog.py)
+  - [scripts/export_disease_evidence_family_catalog.py](/Users/loki/Workspace/GraduationDesign/scripts/export_disease_evidence_family_catalog.py)
   - [scripts/generate_graph_virtual_patients.py](/Users/loki/Workspace/GraduationDesign/scripts/generate_graph_virtual_patients.py)
   - [scripts/sample_graph_virtual_patients.py](/Users/loki/Workspace/GraduationDesign/scripts/sample_graph_virtual_patients.py)
 - 病例 schema：
@@ -123,6 +129,17 @@ test_outputs/graph_audit/all_diseases_20260420_disease_aliases_only/
 ### 5.4 允许降级运行
 
 病人代理在有可用 LLM 时使用受约束生成；没有可用 LLM 时自动退回规则模板，因此整个链路不会因为模型不可用而无法运行。
+
+### 5.5 用 evidence family 做算法约束，而不是给样本打补丁
+
+当前最低证据覆盖不是针对某 10 个 smoke 病例手写补丁，而是先把图谱中的证据节点归入 family，再为每个疾病生成最低证据组。
+
+这样做的意义是：
+
+- 约束对象是疾病-证据结构，而不是某个 replay 失败样本
+- 同一类医学线索可以复用同一套 family，例如 `immune_status`、`respiratory_symptom`、`pulmonary_imaging`、`fungal_marker`
+- 病例生成时优先满足 family 覆盖，再用原始 `priority / relation_specificity` 补足槽位
+- 后续新增图谱节点后，只要能被归入 family，就能自然进入同一套生成约束
 
 ## 6. 病例类型设计
 
@@ -283,6 +300,52 @@ competitor_only_negative >= 1
 
 这一设计的目的，是避免把“图谱字段不完整”误判成“病例模板不适配”。
 
+### 7.1 全证据族 catalog 约束
+
+当前病例生成器默认会读取：
+
+```text
+test_outputs/evidence_family/disease_evidence_catalog_20260502/disease_minimum_evidence_groups.json
+```
+
+这个文件由 [scripts/export_disease_evidence_family_catalog.py](/Users/loki/Workspace/GraduationDesign/scripts/export_disease_evidence_family_catalog.py) 基于 Neo4j 导出，分类逻辑位于 [simulator/evidence_family_catalog.py](/Users/loki/Workspace/GraduationDesign/simulator/evidence_family_catalog.py)。
+
+full-evidence catalog 当前包含：
+
+- `disease_count = 80`
+- `evidence_node_count = 850`
+- `disease_evidence_edge_count = 1562`
+- evidence group 覆盖 `detail / imaging / lab / pathogen / risk / symptom`
+
+证据大组规模如下：
+
+| evidence_group | evidence_node_count |
+| --- | ---: |
+| `detail` | 39 |
+| `imaging` | 117 |
+| `lab` | 294 |
+| `pathogen` | 41 |
+| `risk` | 150 |
+| `symptom` | 209 |
+
+`disease_minimum_evidence_groups.json` 不是“为每个疾病手写病例”，而是给每个疾病列出若干最低 evidence family，例如：
+
+- PCP 倾向覆盖 `immune_status / respiratory_symptom / pulmonary_imaging / oxygenation / fungal_marker / pathogen`
+- IRIS 倾向覆盖 `underlying_infection / art_or_reconstitution / worsening / lab 或 imaging`
+- 中枢感染倾向覆盖 `neurologic_symptom / pathogen 或 lab / cns_imaging`
+- 代谢类疾病倾向覆盖 `metabolic_definition / metabolic_symptom / comorbidity_risk`
+
+生成病例时，`graph_case_generator.py` 的策略是：
+
+1. 先根据疾病 `disease_id` 命中 catalog 中的 minimum evidence groups
+2. 在当前疾病审计证据池内，为每个 required family 选择可用证据
+3. 如果某个 required family 在该疾病的审计证据池里没有候选，写入 `benchmark_catalog_unavailable_family_groups`
+4. 对可用 family 尽量补齐阳性槽位，并写入 `benchmark_required_family_groups`
+5. 再按原有 `priority / relation_specificity` 规则补足病例容量
+6. 如果 catalog 缺失或 disease_id 不命中，才回退到内置 PCP / IRIS / CNS / 代谢类规则
+
+这层约束只作用于虚拟病人病例生成，不修改 `brain` 的 KG 检索、entity linker、stop rule 或 verifier。
+
 ## 8. 病例骨架数据结构
 
 ### 8.1 SlotTruth
@@ -347,10 +410,12 @@ competitor_only_negative >= 1
 1. 读取审计目录中的疾病 JSON
 2. 解析为 `DiseaseAuditRecord`
 3. 构造 `DiseaseProfile`
-4. 按模板分别尝试生成 `ordinary / low_cost / exam_driven / competitive`
-5. 形成 `VirtualPatientCase`
-6. 写出 `cases.jsonl`、`cases.json`、`manifest.json`、`summary.md`
-7. 按病例类型重新抽样，写出人工复核用的 `sampled_cases_4x5.json` 与 `sampled_cases_4x5.md`
+4. 读取 full-evidence catalog 中的最低 evidence family 约束
+5. 按模板分别尝试生成 `ordinary / low_cost / exam_driven / competitive`
+6. 在每个病例内优先满足 catalog family 覆盖，再补充高优先级证据
+7. 形成 `VirtualPatientCase`
+8. 写出 `cases.jsonl`、`cases.json`、`manifest.json`、`summary.md`
+9. 按需要再生成小样本 smoke 文件或按类型抽样文件
 
 ### 9.1 DiseaseProfile 中缓存的关键证据池
 
@@ -602,7 +667,7 @@ Replay 结果中已经新增：
 
 ## 13. 输出文件设计
 
-图谱病例生成当前输出四类文件：
+图谱病例生成当前输出基础病例文件、审计摘要文件和辅助抽样文件：
 
 ### 13.1 `cases.jsonl`
 
@@ -654,12 +719,21 @@ Replay 结果中已经新增：
 - 便于直接检查 `opening_slot_names`、`selected_positive_slots`、`selected_negative_slots`
 - 便于发现 opening 不自然、正向证据互斥、竞争病例区分度不足等问题
 
+### 13.7 `smoke10/`
+
+用途：
+
+- 从完整病例集中抽取 `10` 个病例，作为快速 replay smoke 输入
+- 当前抽样按 `ordinary=3 / low_cost=2 / exam_driven=3 / competitive=2` 做类型均衡
+- 每类优先选择 `benchmark_qc_status=eligible` 的病例，再按 `case_id` 稳定排序
+- 输出 `cases.jsonl`、`cases.json`、`manifest.json` 和 `summary.md`
+
 ## 14. 当前一轮实际输出
 
-截至当前版本，已经基于当前疾病审计目录生成一轮完整图谱病例：
+截至当前版本，已经基于 full-evidence catalog 约束重新生成一轮完整图谱病例：
 
 ```text
-test_outputs/simulator_cases/graph_cases_20260426_final/
+test_outputs/simulator_cases/graph_cases_20260502_catalog_qc/
 ```
 
 其中包含：
@@ -668,8 +742,6 @@ test_outputs/simulator_cases/graph_cases_20260426_final/
 - `cases.json`
 - `manifest.json`
 - `summary.md`
-- `sampled_cases_4x5.json`
-- `sampled_cases_4x5.md`
 
 该轮结果共生成：
 
@@ -679,11 +751,60 @@ test_outputs/simulator_cases/graph_cases_20260426_final/
 - `competitive = 51`
 - 总数 `227`
 
-在当前这轮小范围质量修复后，病例总数没有变化，但抽样质量有所改善，主要体现在：
+该轮使用的最低证据组约束来自：
+
+```text
+test_outputs/evidence_family/disease_evidence_catalog_20260502/disease_minimum_evidence_groups.json
+```
+
+full-evidence catalog 的规模为：
+
+- 疾病数：`80`
+- 证据节点数：`850`
+- disease-evidence 边数：`1562`
+- evidence group：`detail / imaging / lab / pathogen / risk / symptom`
+
+当前病例集的 benchmark QC 摘要为：
+
+- `eligible = 175`
+- `ineligible = 52`
+
+按病例类型拆分的 eligible 数量为：
+
+| case_type | eligible_count |
+| --- | ---: |
+| `ordinary` | 63 |
+| `low_cost` | 3 |
+| `exam_driven` | 60 |
+| `competitive` | 49 |
+
+本轮还生成了新的 `10` 例 smoke 输入：
+
+```text
+test_outputs/simulator_cases/graph_cases_20260502_catalog_qc/smoke10/
+```
+
+其中包含：
+
+- `cases.jsonl`
+- `cases.json`
+- `manifest.json`
+- `summary.md`
+
+该 smoke10 抽样全部为 `benchmark_qc_status=eligible`，类型分布为：
+
+- `ordinary = 3`
+- `low_cost = 2`
+- `exam_driven = 3`
+- `competitive = 2`
+
+在当前 catalog-QC 版本中，病例质量改善主要体现在：
 
 - opening 中出现 `LabTest`、`Pathogen`、`ClinicalAttribute` 的概率明显下降
 - `BMI` 与 `CD4` 的多阈值并列问题已被显著压缩
 - `selected_positive_slots` 更接近“可并列成立的事实集合”，而不是同一指标不同分层的堆叠
+- 每个疾病优先按自身 minimum evidence family 选择阳性证据，减少“病例骨架本身不可判”的情况
+- 不可从当前审计证据池中选择的 catalog family 会被显式记录，便于区分“图谱缺证据”和“生成器没选上”
 
 这个数量来自当前图谱与当前模板规则，并不是固定值；只要图谱或模板阈值改变，重新生成后病例数量会变化。
 
@@ -799,6 +920,19 @@ test_outputs/simulator_cases/graph_cases_20260426_final/
 
 这些可以作为下一阶段增强方向。
 
+### 16.6 catalog 覆盖不等于每批病例覆盖全部证据节点
+
+full-evidence catalog 已覆盖当前 Neo4j 中 `850` 个证据节点，但单次生成的病例骨架不会、也不应该机械覆盖全部节点。
+
+当前机制的含义是：
+
+- 所有疾病都有可查看的最低证据组建议
+- 病例生成时优先从这些 family 中选证据
+- 每个病例仍受 `POSITIVE_SLOT_LIMIT`、病例类型、opening 可读性和正负证据冲突过滤约束
+- 因此 catalog 是“候选证据空间与最低充分性约束”，不是“每批病例必须穷尽所有证据节点”的覆盖率目标
+
+如果论文实验需要追求证据节点覆盖率，后续应增加专门的 dataset sampler，例如按疾病、证据 family 和未覆盖节点进行迭代补样，而不是把单个病例塞满。
+
 ## 17. 论文写作建议
 
 如果后续要写论文方法章节，建议按下面顺序组织。
@@ -838,19 +972,20 @@ test_outputs/simulator_cases/graph_cases_20260426_final/
 ```bash
 conda run -n GraduationDesign python scripts/generate_graph_virtual_patients.py \
   --audit-root test_outputs/graph_audit/all_diseases_20260420_disease_aliases_only \
-  --output-file test_outputs/simulator_cases/graph_cases_20260426_final/cases.jsonl \
-  --output-json-file test_outputs/simulator_cases/graph_cases_20260426_final/cases.json \
-  --manifest-file test_outputs/simulator_cases/graph_cases_20260426_final/manifest.json \
-  --summary-file test_outputs/simulator_cases/graph_cases_20260426_final/summary.md
+  --minimum-evidence-groups-file test_outputs/evidence_family/disease_evidence_catalog_20260502/disease_minimum_evidence_groups.json \
+  --output-file test_outputs/simulator_cases/graph_cases_20260502_catalog_qc/cases.jsonl \
+  --output-json-file test_outputs/simulator_cases/graph_cases_20260502_catalog_qc/cases.json \
+  --manifest-file test_outputs/simulator_cases/graph_cases_20260502_catalog_qc/manifest.json \
+  --summary-file test_outputs/simulator_cases/graph_cases_20260502_catalog_qc/summary.md
 ```
 
 ### 18.2 重新按病例类型抽样做人工检查
 
 ```bash
 conda run -n GraduationDesign python scripts/sample_graph_virtual_patients.py \
-  --cases-file test_outputs/simulator_cases/graph_cases_20260426_final/cases.json \
-  --output-file test_outputs/simulator_cases/graph_cases_20260426_final/sampled_cases_4x5.json \
-  --summary-file test_outputs/simulator_cases/graph_cases_20260426_final/sampled_cases_4x5.md \
+  --cases-file test_outputs/simulator_cases/graph_cases_20260502_catalog_qc/cases.json \
+  --output-file test_outputs/simulator_cases/graph_cases_20260502_catalog_qc/sampled_cases_4x5.json \
+  --summary-file test_outputs/simulator_cases/graph_cases_20260502_catalog_qc/sampled_cases_4x5.md \
   --sample-size-per-type 5 \
   --seed 42
 ```
@@ -872,10 +1007,12 @@ conda run -n GraduationDesign python scripts/sample_graph_virtual_patients.py \
 ### 18.3 用生成病例跑 replay
 
 ```bash
-NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/run_batch_replay.py \
-  --cases-file test_outputs/simulator_cases/graph_cases_20260426_final/cases.json \
+conda run --no-capture-output -n GraduationDesign python scripts/run_batch_replay.py \
+  --cases-file test_outputs/simulator_cases/graph_cases_20260502_catalog_qc/smoke10/cases.jsonl \
+  --output-root test_outputs/simulator_replay/graph_cases_20260502_catalog_qc_smoke10 \
   --max-turns 8 \
-  --case-concurrency 4
+  --case-concurrency 4 \
+  --limit 10
 ```
 
 注意：当前 `run_batch_replay.py` 既支持 `cases.jsonl`，也支持 `cases.json`，并支持病例级并发；并发时每个病例使用独立 brain 实例，避免共享会话状态。
@@ -885,6 +1022,8 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/run_bat
 ### 19.1 方法与实现
 
 - [simulator/graph_case_generator.py](/Users/loki/Workspace/GraduationDesign/simulator/graph_case_generator.py)
+- [simulator/evidence_family_catalog.py](/Users/loki/Workspace/GraduationDesign/simulator/evidence_family_catalog.py)
+- [scripts/export_disease_evidence_family_catalog.py](/Users/loki/Workspace/GraduationDesign/scripts/export_disease_evidence_family_catalog.py)
 - [scripts/generate_graph_virtual_patients.py](/Users/loki/Workspace/GraduationDesign/scripts/generate_graph_virtual_patients.py)
 - [scripts/sample_graph_virtual_patients.py](/Users/loki/Workspace/GraduationDesign/scripts/sample_graph_virtual_patients.py)
 - [simulator/case_schema.py](/Users/loki/Workspace/GraduationDesign/simulator/case_schema.py)
@@ -894,12 +1033,14 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/run_bat
 
 ### 19.2 当前实验输出
 
-- [cases.json](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260426_final/cases.json)
-- [cases.jsonl](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260426_final/cases.jsonl)
-- [manifest.json](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260426_final/manifest.json)
-- [summary.md](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260426_final/summary.md)
-- [sampled_cases_4x5.json](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260426_final/sampled_cases_4x5.json)
-- [sampled_cases_4x5.md](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260426_final/sampled_cases_4x5.md)
+- [disease_minimum_evidence_groups.json](/Users/loki/Workspace/GraduationDesign/test_outputs/evidence_family/disease_evidence_catalog_20260502/disease_minimum_evidence_groups.json)
+- [disease_evidence_family_catalog.md](/Users/loki/Workspace/GraduationDesign/test_outputs/evidence_family/disease_evidence_catalog_20260502/disease_evidence_family_catalog.md)
+- [cases.json](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260502_catalog_qc/cases.json)
+- [cases.jsonl](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260502_catalog_qc/cases.jsonl)
+- [manifest.json](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260502_catalog_qc/manifest.json)
+- [summary.md](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260502_catalog_qc/summary.md)
+- [smoke10 cases.jsonl](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260502_catalog_qc/smoke10/cases.jsonl)
+- [smoke10 summary.md](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260502_catalog_qc/smoke10/summary.md)
 
 ### 19.3 配套说明
 

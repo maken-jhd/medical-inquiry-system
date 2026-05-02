@@ -309,7 +309,7 @@ class VirtualPatientAgent:
         if len(matched_node_id) > 0 and matched_node_id in case.slot_truth_map:
             return case.slot_truth_map[matched_node_id], None
 
-        return None, no_match_answer or "没有相关情况。"
+        return None, no_match_answer or "这个我不太确定，没听医生提过。"
 
     # 将槽位真值渲染成自然语言形式的回答。
     def _render_truth(self, question_text: str, truth: SlotTruth, behavior_style: str) -> PatientReply:
@@ -400,7 +400,76 @@ class VirtualPatientAgent:
             return None
 
         opening_text = str(getattr(draft, "opening_text", "") or "").strip()
+        if not self._opening_preserves_critical_anchors(opening_text, truths):
+            return None
         return opening_text or None
+
+    # LLM 开场语必须保留检查/病原类槽位的关键医学锚点，否则退回确定性模板。
+    def _opening_preserves_critical_anchors(self, opening_text: str, truths: list[SlotTruth]) -> bool:
+        if len(opening_text.strip()) == 0:
+            return True
+
+        normalized_opening = self._normalize_anchor_text(opening_text)
+
+        for truth in truths:
+            anchor_groups = self._opening_anchor_groups(truth)
+
+            for anchor_group in anchor_groups:
+                if not any(anchor in normalized_opening for anchor in anchor_group):
+                    return False
+
+        return True
+
+    # 每个内部列表表示一组等价锚点；同一组命中任意一个即可。
+    def _opening_anchor_groups(self, truth: SlotTruth) -> list[list[str]]:
+        if truth.group not in {"lab", "imaging", "pathogen"} and truth.node_label not in {
+            "LabFinding",
+            "LabTest",
+            "ImagingFinding",
+            "Pathogen",
+        }:
+            return []
+
+        display_name = self._display_name(truth)
+        normalized_name = self._normalize_anchor_text(display_name)
+        anchor_groups: list[list[str]] = []
+
+        if "cd4" in normalized_name or "t淋巴" in normalized_name:
+            anchor_groups.append(["cd4", "t淋巴"])
+            if "200" in normalized_name:
+                anchor_groups.append(["200", "低于200", "<200"])
+            return anchor_groups
+
+        if "hivrna" in normalized_name or "病毒载量" in normalized_name or "病毒量" in normalized_name:
+            anchor_groups.append(["hivrna", "病毒载量", "病毒量"])
+            if any(marker in normalized_name for marker in ("阳性", "检出", "检测到")):
+                anchor_groups.append(["阳性", "检出", "检测到", "还能检测"])
+            return anchor_groups
+
+        if truth.group == "pathogen" or truth.node_label == "Pathogen":
+            pathogen_name = normalized_name.removesuffix("阳性").removesuffix("检出")
+            if len(pathogen_name) > 0:
+                anchor_groups.append([pathogen_name])
+            return anchor_groups
+
+        if truth.group == "imaging" or truth.node_label == "ImagingFinding":
+            if "磨玻璃" in normalized_name:
+                anchor_groups.append(["磨玻璃"])
+            elif len(normalized_name) > 0:
+                anchor_groups.append([normalized_name])
+            return anchor_groups
+
+        if any(keyword in normalized_name for keyword in ("βd葡聚糖", "bdg", "葡聚糖", "g试验")):
+            anchor_groups.append(["βd葡聚糖", "bdg", "葡聚糖", "g试验"])
+
+        result_markers = [marker for marker in ("阳性", "阴性", "升高", "降低", "偏低", "偏高") if marker in normalized_name]
+        if len(result_markers) > 0:
+            anchor_groups.append(result_markers)
+
+        return anchor_groups
+
+    def _normalize_anchor_text(self, value: str) -> str:
+        return str(value).strip().replace(" ", "").replace("-", "").replace("_", "").lower()
 
     def _try_generate_answer_with_llm(
         self,

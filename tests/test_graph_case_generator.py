@@ -405,6 +405,142 @@ def test_generator_competitive_opening_falls_back_to_disease_name_when_no_natura
     assert case.chief_complaint == "最近想咨询一下肥胖相关的情况。"
 
 
+# 验证 PCP 竞争病例会优先覆盖可判定所需的呼吸、免疫、影像和真菌/病原证据族。
+def test_generator_competitive_covers_pcp_required_evidence_families() -> None:
+    target = _make_record(
+        "merged_node_pcp0001",
+        "肺孢子菌肺炎",
+        [
+            _make_evidence("merged_node_sym_pcp_001", "发热", "symptom", priority=1.9),
+            _make_evidence("merged_node_sym_pcp_002", "咳嗽", "symptom", priority=1.8),
+            _make_evidence("merged_node_risk_pcp_001", "HIV/AIDS", "risk", priority=1.7),
+            _make_evidence("merged_node_lab_pcp_001", "CD4+ T淋巴细胞计数 < 200/μL", "lab", priority=2.0),
+            _make_evidence("merged_node_img_pcp_001", "双肺弥漫性磨玻璃影", "imaging", priority=2.0),
+            _make_evidence("merged_node_lab_pcp_003", "动脉血氧分压 <60 mmHg", "lab", priority=2.0),
+            _make_evidence("merged_node_lab_pcp_002", "(1,3)-β-D-葡聚糖明显高于正常值", "lab", priority=2.0),
+            _make_evidence("merged_node_path_pcp_001", "耶氏肺孢子菌", "pathogen", priority=1.95),
+        ],
+    )
+    competitor = _make_record(
+        "merged_node_tb0001",
+        "结核病",
+        [
+            _make_evidence("merged_node_sym_tb_001", "发热", "symptom", priority=1.9),
+            _make_evidence("merged_node_sym_tb_002", "咳嗽", "symptom", priority=1.8),
+            _make_evidence("merged_node_risk_tb_001", "HIV/AIDS", "risk", priority=1.7),
+            _make_evidence("merged_node_sym_tb_003", "盗汗", "symptom", priority=1.6),
+            _make_evidence("merged_node_path_tb_001", "结核分枝杆菌", "pathogen", priority=2.0),
+        ],
+    )
+
+    result = GraphCaseGenerator().generate_from_records([target, competitor])
+    case = next(
+        item
+        for item in result.cases
+        if item.metadata.get("case_type") == "competitive"
+        and item.metadata.get("disease_id") == target.disease_id
+    )
+
+    positive_names = set(case.metadata.get("selected_positive_slots") or [])
+
+    assert "咳嗽" in positive_names
+    assert "CD4+ T淋巴细胞计数 < 200/μL" in positive_names
+    assert "双肺弥漫性磨玻璃影" in positive_names
+    assert "动脉血氧分压 <60 mmHg" in positive_names
+    assert "(1,3)-β-D-葡聚糖明显高于正常值" in positive_names
+    assert case.metadata["benchmark_qc_status"] == "eligible"
+    assert case.metadata["benchmark_missing_family_groups"] == []
+    assert {"respiratory_symptom", "immune_status", "imaging", "oxygenation", "fungal_marker"}.issubset(
+        set(case.metadata["evidence_family_coverage"])
+    )
+
+
+# 验证生成器优先使用 full-evidence catalog 中的疾病最低证据组。
+def test_generator_uses_catalog_minimum_evidence_groups(tmp_path: Path) -> None:
+    catalog_file = tmp_path / "disease_minimum_evidence_groups.json"
+    catalog_file.write_text(
+        json.dumps(
+            [
+                {
+                    "disease_id": "merged_node_catalog_required",
+                    "disease_name": "目录约束病",
+                    "minimum_evidence_groups": [["oxygenation"]],
+                    "minimum_evidence_groups_by_evidence_group": {"lab": [["oxygenation"]]},
+                    "evidence_family_counts": {"oxygenation": 1},
+                }
+            ],
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    record = _make_record(
+        "merged_node_catalog_required",
+        "目录约束病",
+        [
+            *[
+                _make_evidence(f"merged_node_sym_catalog_{index:03d}", f"普通症状{index}", "symptom", priority=2.0 - index * 0.01)
+                for index in range(1, 10)
+            ],
+            _make_evidence("merged_node_lab_catalog_001", "动脉血氧分压 <60 mmHg", "lab", priority=0.5),
+        ],
+    )
+
+    result = GraphCaseGenerator(
+        GraphCaseGeneratorConfig(minimum_evidence_groups_file=str(catalog_file))
+    ).generate_from_records([record])
+    ordinary_case = next(case for case in result.cases if case.metadata.get("case_type") == "ordinary")
+
+    assert "动脉血氧分压 <60 mmHg" in ordinary_case.metadata["selected_positive_slots"]
+    assert ordinary_case.metadata["benchmark_requirement_source"] == "catalog"
+    assert ordinary_case.metadata["benchmark_required_family_groups"] == [["oxygenation"]]
+    assert ordinary_case.metadata["benchmark_qc_status"] == "eligible"
+    assert result.manifest["minimum_evidence_requirement_catalog"]["requirement_count_by_id"] == 1
+
+
+# 验证竞争负例不会把目标病名称或核心定义误写成阴性槽位。
+def test_generator_filters_competitive_negative_conflicting_with_target_definition() -> None:
+    target = _make_record(
+        "merged_node_obesity_target",
+        "肥胖",
+        [
+            _make_evidence("merged_node_shared_risk_ob_001", "HIV感染", "risk", priority=1.8),
+            _make_evidence("merged_node_shared_risk_ob_002", "抗逆转录病毒治疗", "risk", priority=1.7),
+            _make_evidence("merged_node_bmi_ob_001", "BMI>=28.0kg/m2", "risk", priority=2.0),
+            _make_evidence("merged_node_sym_ob_001", "体重增加", "symptom", priority=1.9),
+        ],
+    )
+    competitor = _make_record(
+        "merged_node_lipid_comp",
+        "血脂异常",
+        [
+            _make_evidence("merged_node_shared_risk_li_001", "HIV感染", "risk", priority=1.8),
+            _make_evidence("merged_node_shared_risk_li_002", "抗逆转录病毒治疗", "risk", priority=1.7),
+            _make_evidence("merged_node_sym_li_001", "肥胖", "symptom", priority=1.9),
+            _make_evidence("merged_node_risk_li_001", "吸烟", "risk", priority=1.6),
+            _make_evidence("merged_node_lab_li_001", "LDL-C ≥ 3.0 mmol/L", "lab", priority=2.0),
+        ],
+    )
+
+    result = GraphCaseGenerator().generate_from_records([target, competitor])
+    case = next(
+        item
+        for item in result.cases
+        if item.metadata.get("case_type") == "competitive"
+        and item.metadata.get("disease_id") == target.disease_id
+    )
+
+    negative_names = set(case.metadata.get("selected_negative_slots") or [])
+    positive_names = set(case.metadata.get("selected_positive_slots") or [])
+
+    assert "肥胖" not in negative_names
+    assert "LDL-C ≥ 3.0 mmol/L" not in negative_names
+    assert "吸烟" in negative_names
+    assert "BMI>=28.0kg/m2" in positive_names
+    assert case.metadata["benchmark_qc_status"] == "eligible"
+
+
 # 验证生成的 slot_truth_map key 和 SlotTruth.node_id 都使用真实 target_node_id。
 def test_generator_uses_real_target_node_id_for_slot_truth_map() -> None:
     record = _make_record(

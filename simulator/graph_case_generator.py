@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from .case_schema import SlotTruth, VirtualPatientCase
+from .evidence_family_catalog import classify_evidence_families
 from .generate_cases import write_cases_json, write_cases_jsonl
 
 
@@ -41,9 +42,12 @@ CASE_TYPE_LABELS = {
     "competitive": "竞争病例",
 }
 CASE_TYPE_ORDER = ("ordinary", "low_cost", "exam_driven", "competitive")
-POSITIVE_SLOT_LIMIT = 6
+POSITIVE_SLOT_LIMIT = 8
 COMPETITIVE_NEGATIVE_SLOT_LIMIT = 3
 DEFAULT_BEHAVIOR_STYLE = "cooperative"
+DEFAULT_MINIMUM_EVIDENCE_GROUPS_FILE = (
+    "test_outputs/evidence_family/disease_evidence_catalog_20260502/disease_minimum_evidence_groups.json"
+)
 OPENING_RESULT_MARKERS = (
     "阳性",
     "阴性",
@@ -72,6 +76,8 @@ BACKGROUND_OPENING_RISK_TERMS = (
     "art",
     "免疫功能低下",
 )
+BENCHMARK_QC_ELIGIBLE = "eligible"
+BENCHMARK_QC_INELIGIBLE = "ineligible"
 
 
 @dataclass(frozen=True)
@@ -87,6 +93,19 @@ class GraphCaseGeneratorConfig:
     competitive_min_target_only_pool: int = 2
     competitive_min_competitor_negative_pool: int = 1
     max_competitors_per_disease: int = 1
+    minimum_evidence_groups_file: str = DEFAULT_MINIMUM_EVIDENCE_GROUPS_FILE
+    minimum_evidence_group_match_by_name: bool = False
+
+
+@dataclass(frozen=True)
+class MinimumEvidenceRequirement:
+    """单疾病 full-evidence 最低证据组约束。"""
+
+    disease_id: str
+    disease_name: str
+    required_groups: list[set[str]]
+    required_groups_by_evidence_group: dict[str, list[set[str]]]
+    evidence_family_counts: dict[str, int]
 
 
 @dataclass
@@ -122,6 +141,11 @@ class DiseaseProfile:
     exam_group_keys: set[str]
     exam_relation_keys: set[str]
     discriminative_priority_cutoff: float
+    required_family_groups: list[set[str]]
+    requirement_source: str
+    catalog_required_family_groups: list[set[str]]
+    catalog_required_family_groups_by_evidence_group: dict[str, list[set[str]]]
+    catalog_unavailable_family_groups: list[set[str]]
 
     @property
     def pool_counts(self) -> dict[str, int]:
@@ -361,6 +385,12 @@ class GraphCaseGenerator:
 
     def __init__(self, config: GraphCaseGeneratorConfig | None = None) -> None:
         self.config = config or GraphCaseGeneratorConfig()
+        requirements_by_id, requirements_by_name, requirement_catalog_path = _load_minimum_evidence_requirements(
+            self.config.minimum_evidence_groups_file
+        )
+        self.minimum_evidence_requirements_by_id = requirements_by_id
+        self.minimum_evidence_requirements_by_name = requirements_by_name
+        self.minimum_evidence_requirement_catalog_path = requirement_catalog_path
 
     def generate_from_audit_root(self, audit_root: Path) -> GraphCaseGenerationResult:
         """从审计目录读取报告并生成病例。"""
@@ -392,6 +422,14 @@ class GraphCaseGenerator:
                 "generated_case_ids": [],
                 "skipped": [],
                 "pool_counts": profile.pool_counts,
+                "benchmark_requirement_source": profile.requirement_source,
+                "benchmark_required_family_groups": _serialize_family_groups(profile.required_family_groups),
+                "benchmark_catalog_required_family_groups": _serialize_family_groups(
+                    profile.catalog_required_family_groups
+                ),
+                "benchmark_catalog_unavailable_family_groups": _serialize_family_groups(
+                    profile.catalog_unavailable_family_groups
+                ),
             }
 
             ordinary_case, ordinary_skip = self._build_ordinary_case(profile)
@@ -474,12 +512,29 @@ class GraphCaseGenerator:
 
         disease_entries.sort(key=lambda item: (str(item.get("disease_name") or ""), str(item.get("disease_id") or "")))
         cases.sort(key=lambda item: item.case_id)
+        benchmark_qc_count_by_status = _count_cases_by_metadata_value(cases, "benchmark_qc_status")
+        benchmark_eligible_count_by_type = {
+            case_type: sum(
+                1
+                for case in cases
+                if str(case.metadata.get("case_type") or "") == case_type
+                and str(case.metadata.get("benchmark_qc_status") or "") == BENCHMARK_QC_ELIGIBLE
+            )
+            for case_type in CASE_TYPE_ORDER
+        }
 
         manifest = {
             "audit_root": str(audit_root) if audit_root else "",
             "config": asdict(self.config),
+            "minimum_evidence_requirement_catalog": {
+                "path": self.minimum_evidence_requirement_catalog_path,
+                "requirement_count_by_id": len(self.minimum_evidence_requirements_by_id),
+                "requirement_count_by_name": len(self.minimum_evidence_requirements_by_name),
+            },
             "generated_case_count": len(cases),
             "generated_case_count_by_type": generated_case_count_by_type,
+            "benchmark_qc_count_by_status": benchmark_qc_count_by_status,
+            "benchmark_eligible_count_by_type": benchmark_eligible_count_by_type,
             "skipped_case_count_by_reason": dict(sorted(skipped_case_count_by_reason.items())),
             "disease_report_count": len(records) + len(invalid_records or []),
             "valid_disease_report_count": len(records),
@@ -503,6 +558,13 @@ class GraphCaseGenerator:
             for item in all_evidence
             if str(item.get("group") or "") in {"risk", "detail"}
         ]
+        available_family_coverage = _collect_evidence_family_coverage(all_evidence)
+        (
+            required_groups,
+            requirement_source,
+            catalog_requirement,
+            catalog_unavailable_groups,
+        ) = self._resolve_required_family_groups(record, available_family_coverage)
 
         return DiseaseProfile(
             record=record,
@@ -521,7 +583,47 @@ class GraphCaseGenerator:
             exam_group_keys={str(item.get("group") or "") for item in exam_high_value_pool},
             exam_relation_keys={str(item.get("relation_type") or "") for item in exam_high_value_pool},
             discriminative_priority_cutoff=_top_half_priority_cutoff(all_evidence),
+            required_family_groups=required_groups,
+            requirement_source=requirement_source,
+            catalog_required_family_groups=(
+                list(catalog_requirement.required_groups)
+                if catalog_requirement is not None
+                else []
+            ),
+            catalog_required_family_groups_by_evidence_group=(
+                {
+                    evidence_group: list(groups)
+                    for evidence_group, groups in catalog_requirement.required_groups_by_evidence_group.items()
+                }
+                if catalog_requirement is not None
+                else {}
+            ),
+            catalog_unavailable_family_groups=catalog_unavailable_groups,
         )
+
+    def _resolve_required_family_groups(
+        self,
+        record: DiseaseAuditRecord,
+        available_family_coverage: set[str],
+    ) -> tuple[list[set[str]], str, MinimumEvidenceRequirement | None, list[set[str]]]:
+        """优先使用 full-evidence catalog，缺失时回退到内置疾病大类规则。"""
+
+        catalog_requirement = self.minimum_evidence_requirements_by_id.get(record.disease_id)
+        if catalog_requirement is None and self.config.minimum_evidence_group_match_by_name:
+            catalog_requirement = self.minimum_evidence_requirements_by_name.get(_normalize_text(record.disease_name))
+
+        if catalog_requirement is not None and catalog_requirement.required_groups:
+            available_groups, unavailable_groups = _split_required_groups_by_available_families(
+                catalog_requirement.required_groups,
+                available_family_coverage,
+            )
+            if available_groups:
+                return available_groups, "catalog", catalog_requirement, unavailable_groups
+
+        builtin_required_groups = _benchmark_required_family_groups(record.disease_name)
+        if builtin_required_groups:
+            return builtin_required_groups, "builtin", catalog_requirement, []
+        return [], "none", catalog_requirement, []
 
     def _record_case_result(
         self,
@@ -584,8 +686,10 @@ class GraphCaseGenerator:
             )
 
         chief_text = _render_low_cost_complaint(chief_items, fallback_name=profile.record.disease_name)
-        positive_items = _limit_unique_items(
-            [*chief_pool, *profile.exam_high_value_pool[:1]],
+        positive_items = _select_requirement_covering_items(
+            preferred_items=[*chief_pool, *profile.exam_high_value_pool[:1]],
+            fallback_items=profile.all_evidence,
+            required_groups=profile.required_family_groups,
             limit=POSITIVE_SLOT_LIMIT,
         )
         return self._build_case(
@@ -615,7 +719,12 @@ class GraphCaseGenerator:
                 required=self.config.low_cost_min_pool,
             )
 
-        positive_items = _limit_unique_items(pool, limit=POSITIVE_SLOT_LIMIT)
+        positive_items = _select_requirement_covering_items(
+            preferred_items=pool,
+            fallback_items=pool,
+            required_groups=profile.required_family_groups,
+            limit=POSITIVE_SLOT_LIMIT,
+        )
         chief_text = _render_low_cost_complaint(positive_items[:3], fallback_name=profile.record.disease_name)
         return self._build_case(
             profile=profile,
@@ -659,7 +768,12 @@ class GraphCaseGenerator:
             if str(item.get("group") or "") in {"symptom", "risk"}
         ][:1]
         exam_selected = _limit_unique_items(high_value_pool + exam_pool, limit=POSITIVE_SLOT_LIMIT - len(supplement))
-        positive_items = _limit_unique_items([*exam_selected, *supplement], limit=POSITIVE_SLOT_LIMIT)
+        positive_items = _select_requirement_covering_items(
+            preferred_items=[*exam_selected, *supplement],
+            fallback_items=profile.all_evidence,
+            required_groups=profile.required_family_groups,
+            limit=POSITIVE_SLOT_LIMIT,
+        )
         chief_text = _render_exam_driven_complaint(exam_selected[:3], supplement[:1], profile.record.disease_name)
         return self._build_case(
             profile=profile,
@@ -706,11 +820,20 @@ class GraphCaseGenerator:
         for index, candidate in enumerate(eligible_candidates[: self.config.max_competitors_per_disease], start=1):
             shared_items = _limit_unique_items(candidate.shared_low_cost, limit=3)
             target_only_items = _limit_unique_items(candidate.target_only_discriminative, limit=3)
+            positive_items = _select_requirement_covering_items(
+                preferred_items=[*shared_items, *target_only_items],
+                fallback_items=candidate.target.all_evidence,
+                required_groups=profile.required_family_groups,
+                limit=POSITIVE_SLOT_LIMIT,
+            )
             negative_items = _limit_unique_items(
-                candidate.competitor_only_negative,
+                _filter_incompatible_negative_items(
+                    profile=profile,
+                    positive_items=positive_items,
+                    negative_items=candidate.competitor_only_negative,
+                ),
                 limit=COMPETITIVE_NEGATIVE_SLOT_LIMIT,
             )
-            positive_items = _limit_unique_items([*shared_items, *target_only_items], limit=POSITIVE_SLOT_LIMIT)
             opening_items = _select_competitive_opening_items(
                 shared_items=shared_items,
                 target_only_items=target_only_items,
@@ -880,7 +1003,22 @@ class GraphCaseGenerator:
         """将选中的证据列表渲染成 VirtualPatientCase。"""
 
         positive_items = _filter_conflicting_positive_items(positive_items)
+        negative_items = _filter_incompatible_negative_items(
+            profile=profile,
+            positive_items=positive_items,
+            negative_items=negative_items,
+        )
         opening_items = _filter_opening_items(opening_items, positive_items)
+        qc_summary = _build_benchmark_qc_summary(
+            disease_name=profile.record.disease_name,
+            positive_items=positive_items,
+            negative_items=negative_items,
+            required_groups=profile.required_family_groups,
+            requirement_source=profile.requirement_source,
+            catalog_required_groups=profile.catalog_required_family_groups,
+            catalog_required_groups_by_evidence_group=profile.catalog_required_family_groups_by_evidence_group,
+            catalog_unavailable_groups=profile.catalog_unavailable_family_groups,
+        )
         slot_truth_map: dict[str, SlotTruth] = {}
         opening_node_ids = [
             str(item.get("target_node_id") or "")
@@ -919,6 +1057,7 @@ class GraphCaseGenerator:
             "selected_positive_slots": [str(item.get("target_name") or "") for item in positive_items],
             "selected_negative_slots": [str(item.get("target_name") or "") for item in negative_items],
             "evidence_counts_by_group": profile.evidence_counts_by_group,
+            **qc_summary,
             **metadata_extra,
         }
         return VirtualPatientCase(
@@ -978,6 +1117,22 @@ def render_generation_summary_markdown(manifest: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
+            "## Benchmark QC",
+            "",
+            f"- minimum_evidence_requirement_catalog: {(manifest.get('minimum_evidence_requirement_catalog') or {}).get('path') or '-'}",
+            f"- benchmark_qc_count_by_status: {manifest.get('benchmark_qc_count_by_status') or {}}",
+            "",
+            "| case_type | eligible_count |",
+            "| --- | ---: |",
+        ]
+    )
+    for case_type in CASE_TYPE_ORDER:
+        count = int((manifest.get("benchmark_eligible_count_by_type") or {}).get(case_type) or 0)
+        lines.append(f"| {case_type} | {count} |")
+
+    lines.extend(
+        [
+            "",
             "## 疾病明细",
             "",
             "| disease_name | generated_case_types | skipped_reasons |",
@@ -1031,6 +1186,99 @@ def _render_group_count_markdown(group_counts: dict[str, Any]) -> str:
             continue
         parts.append(f"{group}={value}")
     return "，".join(parts) if parts else "-"
+
+
+def _count_cases_by_metadata_value(cases: Sequence[VirtualPatientCase], key: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for case in cases:
+        value = str(case.metadata.get(key) or "")
+        if not value:
+            continue
+        counts[value] = counts.get(value, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _load_minimum_evidence_requirements(
+    path_value: str,
+) -> tuple[dict[str, MinimumEvidenceRequirement], dict[str, MinimumEvidenceRequirement], str]:
+    """读取 full-evidence catalog 导出的疾病最低证据组。"""
+
+    if not str(path_value or "").strip():
+        return {}, {}, ""
+
+    path = Path(str(path_value)).expanduser()
+    if not path.is_absolute():
+        path = Path(__file__).resolve().parents[1] / path
+
+    if not path.exists():
+        return {}, {}, str(path)
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(payload, dict):
+        raw_items = payload.get("items") or payload.get("diseases") or []
+    elif isinstance(payload, list):
+        raw_items = payload
+    else:
+        raw_items = []
+
+    by_id: dict[str, MinimumEvidenceRequirement] = {}
+    by_name: dict[str, MinimumEvidenceRequirement] = {}
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+
+        requirement = MinimumEvidenceRequirement(
+            disease_id=str(item.get("disease_id") or ""),
+            disease_name=str(item.get("disease_name") or ""),
+            required_groups=_parse_family_groups(item.get("minimum_evidence_groups") or []),
+            required_groups_by_evidence_group={
+                str(evidence_group): _parse_family_groups(groups)
+                for evidence_group, groups in (item.get("minimum_evidence_groups_by_evidence_group") or {}).items()
+            },
+            evidence_family_counts={
+                str(family): int(count or 0)
+                for family, count in (item.get("evidence_family_counts") or {}).items()
+            },
+        )
+        if requirement.disease_id and requirement.required_groups:
+            by_id.setdefault(requirement.disease_id, requirement)
+        normalized_name = _normalize_text(requirement.disease_name)
+        if normalized_name and requirement.required_groups:
+            by_name.setdefault(normalized_name, requirement)
+
+    return by_id, by_name, str(path)
+
+
+def _parse_family_groups(value: Any) -> list[set[str]]:
+    """把 JSON 中的 family group 解析成 list[set[str]]。"""
+
+    parsed: list[set[str]] = []
+    if not isinstance(value, list):
+        return parsed
+
+    for group in value:
+        if isinstance(group, str):
+            family_group = {group.strip()} if group.strip() else set()
+        elif isinstance(group, list):
+            family_group = {str(item).strip() for item in group if str(item).strip()}
+        else:
+            family_group = set()
+        if family_group:
+            parsed.append(family_group)
+    return parsed
+
+
+def _serialize_family_groups(groups: Sequence[set[str]]) -> list[list[str]]:
+    return [sorted(group) for group in groups if group]
+
+
+def _serialize_family_groups_by_evidence_group(
+    groups_by_evidence_group: dict[str, Sequence[set[str]]],
+) -> dict[str, list[list[str]]]:
+    return {
+        str(evidence_group): _serialize_family_groups(groups)
+        for evidence_group, groups in sorted(groups_by_evidence_group.items())
+    }
 
 
 def _build_slot_truth(item: dict[str, Any], value: bool) -> SlotTruth:
@@ -1509,6 +1757,275 @@ def _limit_unique_items(items: Iterable[dict[str, Any]], *, limit: int) -> list[
         if len(deduped) >= limit:
             break
     return deduped
+
+
+def _select_requirement_covering_items(
+    *,
+    preferred_items: Sequence[dict[str, Any]],
+    fallback_items: Sequence[dict[str, Any]],
+    required_groups: Sequence[set[str]] | None = None,
+    disease_name: str = "",
+    limit: int,
+) -> list[dict[str, Any]]:
+    """优先覆盖疾病族最低证据要求，再按原排序补满阳性槽位。"""
+
+    active_required_groups = list(required_groups or _benchmark_required_family_groups(disease_name))
+    if not active_required_groups:
+        return _limit_unique_items(preferred_items, limit=limit)
+
+    candidate_pool = _sort_evidence_items(_unique_evidence_items([*preferred_items, *fallback_items]))
+    selected: list[dict[str, Any]] = []
+    selected_keys: set[str] = set()
+
+    # 先逐个覆盖要求族；每个 requirement group 内任一 family 命中即可。
+    for required_group in active_required_groups:
+        if _items_cover_family_group(selected, required_group):
+            continue
+
+        candidate = _best_item_for_required_group(candidate_pool, selected_keys, required_group)
+        if candidate is None:
+            continue
+
+        selected.append(candidate)
+        selected_keys.add(_evidence_key(candidate))
+        if len(selected) >= limit:
+            return _filter_conflicting_positive_items(selected)[:limit]
+
+    # 再按原有偏好顺序补满，保留 shared / opening 友好证据的自然性。
+    for item in [*preferred_items, *fallback_items]:
+        key = _evidence_key(item)
+        if key in selected_keys:
+            continue
+        selected.append(dict(item))
+        selected_keys.add(key)
+        if len(selected) >= limit:
+            break
+
+    filtered = _filter_conflicting_positive_items(selected)
+
+    # 互斥 family 过滤后若打掉了某个 required family，再尝试用候选池补回。
+    if len(filtered) < limit:
+        filtered_keys = {_evidence_key(item) for item in filtered}
+        missing_required_groups = _missing_required_family_groups(
+            active_required_groups,
+            _collect_evidence_family_coverage(filtered),
+        )
+        for required_group in missing_required_groups:
+            candidate = _best_item_for_required_group(candidate_pool, filtered_keys, set(required_group))
+            if candidate is None:
+                continue
+            filtered.append(candidate)
+            filtered_keys.add(_evidence_key(candidate))
+            filtered = _filter_conflicting_positive_items(filtered)
+            if len(filtered) >= limit:
+                break
+
+    return _limit_unique_items(filtered, limit=limit)
+
+
+def _best_item_for_required_group(
+    candidate_pool: Sequence[dict[str, Any]],
+    selected_keys: set[str],
+    required_group: set[str],
+) -> dict[str, Any] | None:
+    matches = [
+        dict(item)
+        for item in candidate_pool
+        if _evidence_key(item) not in selected_keys and _infer_evidence_families(item) & required_group
+    ]
+    if not matches:
+        return None
+    return min(matches, key=_required_family_candidate_sort_key)
+
+
+def _required_family_candidate_sort_key(item: dict[str, Any]) -> tuple[int, int, int, int, float, float, str]:
+    name = str(item.get("target_name") or "")
+    normalized_name = _normalize_text(name)
+    label = str(item.get("target_label") or "")
+    relation_type = str(item.get("relation_type") or "")
+    semantic_rank = 0
+    if any(term in normalized_name for term in ("βd葡聚糖", "bdg", "葡聚糖", "g试验")):
+        semantic_rank = -2
+    elif any(term in normalized_name for term in ("肺孢子", "pcp", "病原", "抗原阳性", "培养阳性", "dna阳性", "rna阳性")):
+        semantic_rank = -1
+    elif any(term in normalized_name for term in ("乳酸脱氢酶", "ldh")):
+        semantic_rank = 1
+    concrete_rank = 0 if (_has_concrete_result_markers(name) or _extract_measurement_comparators(name)) else 1
+    label_rank = 0 if label in {"LabFinding", "ImagingFinding", "Pathogen"} else 1
+    relation_rank = 0 if relation_type in HIGH_VALUE_EXAM_RELATION_TYPES else 1
+    return (
+        semantic_rank,
+        concrete_rank,
+        label_rank,
+        relation_rank,
+        -float(item.get("priority") or 0.0),
+        -float(item.get("relation_specificity") or 0.0),
+        name,
+    )
+
+
+def _items_cover_family_group(items: Sequence[dict[str, Any]], required_group: set[str]) -> bool:
+    return bool(_collect_evidence_family_coverage(items) & required_group)
+
+
+def _build_benchmark_qc_summary(
+    *,
+    disease_name: str,
+    positive_items: Sequence[dict[str, Any]],
+    negative_items: Sequence[dict[str, Any]],
+    required_groups: Sequence[set[str]] | None = None,
+    requirement_source: str = "builtin",
+    catalog_required_groups: Sequence[set[str]] | None = None,
+    catalog_required_groups_by_evidence_group: dict[str, Sequence[set[str]]] | None = None,
+    catalog_unavailable_groups: Sequence[set[str]] | None = None,
+) -> dict[str, Any]:
+    active_required_groups = list(required_groups or _benchmark_required_family_groups(disease_name))
+    positive_coverage = _collect_evidence_family_coverage(positive_items)
+    negative_coverage = _collect_evidence_family_coverage(negative_items)
+    missing_groups = _missing_required_family_groups(active_required_groups, positive_coverage)
+
+    return {
+        "benchmark_qc_status": BENCHMARK_QC_ELIGIBLE if not missing_groups else BENCHMARK_QC_INELIGIBLE,
+        "benchmark_requirement_source": requirement_source,
+        "benchmark_required_family_groups": _serialize_family_groups(active_required_groups),
+        "benchmark_required_family_group_count": len(active_required_groups),
+        "benchmark_missing_family_groups": missing_groups,
+        "evidence_family_coverage": sorted(positive_coverage),
+        "negative_evidence_family_coverage": sorted(negative_coverage),
+        "benchmark_catalog_required_family_groups": _serialize_family_groups(catalog_required_groups or []),
+        "benchmark_catalog_required_family_groups_by_evidence_group": _serialize_family_groups_by_evidence_group(
+            catalog_required_groups_by_evidence_group or {}
+        ),
+        "benchmark_catalog_unavailable_family_groups": _serialize_family_groups(catalog_unavailable_groups or []),
+    }
+
+
+def _benchmark_required_family_groups(disease_name: str) -> list[set[str]]:
+    """按疾病大类定义 benchmark 可判定性所需的最低证据族。"""
+
+    normalized_name = _normalize_text(disease_name)
+
+    if "肺孢子" in normalized_name or "pcp" in normalized_name:
+        return [
+            {"respiratory_symptom"},
+            {"immune_status"},
+            {"imaging"},
+            {"oxygenation"},
+            {"fungal_marker", "pathogen"},
+        ]
+
+    if "免疫重建炎症综合征" in normalized_name or "iris" in normalized_name:
+        return [
+            {"underlying_infection", "immune_status"},
+            {"art_or_reconstitution"},
+            {"worsening"},
+            {"imaging", "disease_specific_lab", "pathogen"},
+        ]
+
+    if any(term in normalized_name for term in ("脑炎", "脑膜炎", "脑膜脑炎", "cns", "中枢神经")):
+        return [
+            {"neurologic_symptom"},
+            {"pathogen", "disease_specific_lab"},
+            {"imaging", "cns_lab"},
+        ]
+
+    if any(term in normalized_name for term in ("肥胖", "血脂异常", "糖尿病", "代谢")):
+        return [
+            {"metabolic_definition"},
+        ]
+
+    return []
+
+
+def _missing_required_family_groups(
+    required_groups: Sequence[set[str]],
+    coverage: set[str],
+) -> list[list[str]]:
+    return [sorted(group) for group in required_groups if not coverage.intersection(group)]
+
+
+def _split_required_groups_by_available_families(
+    required_groups: Sequence[set[str]],
+    available_family_coverage: set[str],
+) -> tuple[list[set[str]], list[set[str]]]:
+    """将 catalog 要求分成当前审计证据池可覆盖与不可覆盖两类。"""
+
+    available_groups: list[set[str]] = []
+    unavailable_groups: list[set[str]] = []
+    for required_group in required_groups:
+        if required_group.intersection(available_family_coverage):
+            available_groups.append(set(required_group))
+        else:
+            unavailable_groups.append(set(required_group))
+    return available_groups, unavailable_groups
+
+
+def _collect_evidence_family_coverage(items: Sequence[dict[str, Any]]) -> set[str]:
+    coverage: set[str] = set()
+    for item in items:
+        coverage.update(_infer_evidence_families(item))
+    return coverage
+
+
+def _infer_evidence_families(item: dict[str, Any]) -> set[str]:
+    """把图谱证据归入可审计的 benchmark evidence family。"""
+
+    return set(classify_evidence_families(item))
+
+
+def _filter_incompatible_negative_items(
+    *,
+    profile: DiseaseProfile,
+    positive_items: Sequence[dict[str, Any]],
+    negative_items: Sequence[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """过滤会把目标病核心定义或已选阳性家族误写成阴性的竞争证据。"""
+
+    target_name = profile.record.disease_name
+    positive_keys = {_evidence_key(item) for item in positive_items}
+    positive_conflict_families = {_infer_conflict_family(item) for item in positive_items}
+    positive_conflict_families.discard("")
+    filtered: list[dict[str, Any]] = []
+
+    for item in negative_items:
+        key = _evidence_key(item)
+        if key in positive_keys:
+            continue
+        if _negative_name_conflicts_with_target(target_name, item):
+            continue
+        conflict_family = _infer_conflict_family(item)
+        if conflict_family and conflict_family in positive_conflict_families:
+            continue
+        if _negative_family_conflicts_with_target_definition(target_name, item, profile.required_family_groups):
+            continue
+        filtered.append(dict(item))
+
+    return filtered
+
+
+def _negative_name_conflicts_with_target(disease_name: str, item: dict[str, Any]) -> bool:
+    target = _normalize_text(disease_name)
+    name = _normalize_text(str(item.get("target_name") or ""))
+    if len(target) < 2 or len(name) < 2:
+        return False
+    return target in name or name in target
+
+
+def _negative_family_conflicts_with_target_definition(
+    disease_name: str,
+    item: dict[str, Any],
+    required_groups: Sequence[set[str]] | None = None,
+) -> bool:
+    disease_requirements = list(required_groups or _benchmark_required_family_groups(disease_name))
+    if not disease_requirements:
+        return False
+    disease_requirement_families = set().union(*disease_requirements)
+    item_families = _infer_evidence_families(item)
+
+    if "metabolic_definition" in disease_requirement_families and "metabolic_definition" in item_families:
+        return True
+
+    return False
 
 
 def _is_low_cost_evidence(item: dict[str, Any]) -> bool:

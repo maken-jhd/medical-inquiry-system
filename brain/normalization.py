@@ -37,13 +37,43 @@ class NormalizationConfig:
             "高危性行为": ["高危性行为", "无保护性行为", "不安全性行为", "高危行为"],
             "输血史": ["输血史", "输过血"],
             "口腔念珠菌感染": ["口腔念珠菌感染", "口咽念珠菌病", "口腔白斑", "白色东西"],
+            "下肢麻木": ["下肢麻木", "下肢发麻"],
+            "双足麻木": ["双足麻木", "双足发麻"],
+            "腹型肥胖": ["腹型肥胖", "腹部膨隆", "肚子越来越大"],
         }
     )
     exam_aliases: Dict[str, List[str]] = field(
         default_factory=lambda: {
-            "CD4+ T淋巴细胞计数": ["CD4", "CD4计数", "T淋巴细胞计数", "CD4低"],
+            "CD4+ T淋巴细胞计数": ["CD4", "CD4计数", "T淋巴细胞计数"],
+            "CD4+ T淋巴细胞计数 < 200/μL": [
+                "CD4低",
+                "CD4偏低",
+                "CD4很低",
+                "CD4太低",
+                "CD4低于200",
+                "CD4低于 200",
+                "CD4细胞太低",
+                "CD4细胞很低",
+                "CD4细胞计数很低",
+                "CD4细胞计数低于200",
+                "CD4+T细胞计数偏低",
+                "CD4+T细胞计数低于200",
+                "CD4+T淋巴细胞计数偏低",
+                "CD4+T淋巴细胞计数低于200",
+                "CD4+ T淋巴细胞计数低于200",
+            ],
             "β-D-葡聚糖检测": ["β-D葡聚糖", "β-D-葡聚糖", "BDG", "G试验", "葡聚糖"],
             "HIV RNA": ["HIV RNA", "病毒载量", "HIV病毒载量"],
+            "HIV RNA阳性": [
+                "HIV RNA阳性",
+                "HIV RNA检测阳性",
+                "HIV病毒载量阳性",
+                "病毒载量阳性",
+                "病毒还能检测到",
+                "病毒量还能检测到",
+                "HIV RNA可检出",
+                "HIV病毒载量可检出",
+            ],
             "胸部CT": ["胸部CT", "CT", "胸片", "影像", "肺部CT"],
             "PCR": ["PCR", "核酸"],
             "T-SPOT.TB": ["T-SPOT", "TSPOT", "IGRA", "结核检测"],
@@ -88,6 +118,25 @@ class NameNormalizer:
 
         return self._clean_name(raw_name)
 
+    # 为实体链接提供多个候选 surface form，解决患者口语表达和图谱规范名之间的轻量错位。
+    def expand_graph_mentions(self, raw_name: str) -> list[str]:
+        cleaned_name = self._clean_name(raw_name)
+        normalized_name = self.normalize_graph_mention(cleaned_name)
+        candidates: list[str] = []
+
+        def add(value: str) -> None:
+            text = self._clean_name(value)
+            if len(text) > 0 and text not in candidates:
+                candidates.append(text)
+
+        add(normalized_name)
+        add(cleaned_name)
+
+        for value in self._template_graph_mentions(cleaned_name):
+            add(value)
+
+        return candidates
+
     def normalize_feature_category(self, normalized_name: str, fallback: str = "symptom") -> str:
         if normalized_name in {"高危性行为", "输血史", "HIV感染", "免疫功能低下"}:
             return "risk_factor"
@@ -120,6 +169,55 @@ class NameNormalizer:
         aliases = self.config.exam_aliases.get(normalized_name, [])
         return [normalized_name, *aliases]
 
+    # 这些规则是“患者表达到图谱节点”的接口层归一化，不参与疾病推理打分。
+    def _template_graph_mentions(self, raw_name: str) -> list[str]:
+        normalized = self.normalize_exam_text(raw_name)
+        values: list[str] = []
+
+        if "cd4" in normalized or "t淋巴" in normalized:
+            if any(keyword in normalized for keyword in ("低", "偏低", "很低", "太低", "低于200", "<200")):
+                values.append("CD4+ T淋巴细胞计数 < 200/μL")
+            values.append("CD4+ T淋巴细胞计数")
+
+        if "hivrna" in normalized or "病毒载量" in normalized or "病毒量" in normalized:
+            if any(keyword in normalized for keyword in ("阳性", "检出", "检测到", "还能检测")):
+                values.append("HIV RNA阳性")
+            values.append("HIV RNA")
+
+        if "下肢发麻" in normalized:
+            values.append("下肢麻木")
+
+        if "双足发麻" in normalized:
+            values.append("双足麻木")
+
+        if "腹部膨隆" in normalized or "肚子越来越大" in normalized:
+            values.append("腹型肥胖")
+
+        medication = self._extract_medication_usage(raw_name)
+        if medication:
+            values.append(f"使用{medication}")
+
+        return values
+
+    def _extract_medication_usage(self, raw_name: str) -> str:
+        text = self._clean_name(raw_name)
+        patterns = [
+            r"^(.+?)使用$",
+            r"^正在用(.+)$",
+            r"^正在使用(.+)$",
+            r"^使用(.+)$",
+        ]
+
+        for pattern in patterns:
+            match = re.match(pattern, text)
+            if match is None:
+                continue
+            medication = match.group(1).strip()
+            if len(medication) > 0:
+                return medication
+
+        return ""
+
     def _build_alias_lookup(self, mapping: Dict[str, List[str]]) -> dict[str, str]:
         values: dict[str, str] = {}
         for canonical_name, aliases in mapping.items():
@@ -136,4 +234,3 @@ class NameNormalizer:
 
     def _clean_name(self, value: str) -> str:
         return str(value).strip()
-

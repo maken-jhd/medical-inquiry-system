@@ -64,13 +64,99 @@ class EntityLinker:
     # 对单个 mention 做候选查询并选择最佳匹配。
     def _link_single_mention(self, mention: str) -> LinkedEntity:
         normalized_mention = self.normalizer.normalize_graph_mention(mention)
+        expanded_mentions = self.normalizer.expand_graph_mentions(mention)
+        if len(expanded_mentions) == 0:
+            expanded_mentions = [normalized_mention]
 
         # 查询阶段同时覆盖：
         # - 精确 name / canonical_name
         # - alias 命中
         # - 包含关系
         # 这样能兼顾标准术语与患者口语化表述。
-        rows = self.client.run_query(
+        candidates: dict[str, dict] = {}
+        for surface in expanded_mentions:
+            rows = self._query_candidates(surface)
+            for row in rows:
+                node_id = str(row.get("node_id") or "")
+                if len(node_id) == 0:
+                    continue
+
+                similarity = self._compute_similarity(
+                    surface,
+                    str(row.get("canonical_name", "")),
+                    row.get("aliases", []),
+                )
+                exact_surface_match = self._is_exact_surface_match(surface, row)
+                template_match = surface != normalized_mention
+                rank_score = similarity + (0.04 if template_match and exact_surface_match else 0.0)
+                current = candidates.get(node_id)
+
+                if current is None or rank_score > float(current["rank_score"]):
+                    candidates[node_id] = {
+                        "row": row,
+                        "surface": surface,
+                        "similarity": similarity,
+                        "rank_score": rank_score,
+                        "template_match": template_match,
+                        "exact_surface_match": exact_surface_match,
+                    }
+
+        if len(candidates) == 0:
+            return LinkedEntity(
+                mention=normalized_mention,
+                metadata={
+                    "raw_mention": mention,
+                    "expanded_mentions": expanded_mentions,
+                    "link_source": "none",
+                    "template_match": False,
+                },
+            )
+
+        # 排序时统一走同一套相似度函数，避免查询阶段的命中顺序直接决定最终链接结果。
+        scored = sorted(
+            candidates.values(),
+            key=lambda item: (-float(item["rank_score"]), str(item["row"].get("canonical_name", ""))),
+        )
+        best_entry = scored[0]
+        best = best_entry["row"]
+        similarity = float(best_entry["similarity"])
+        template_match = bool(best_entry["template_match"])
+        link_source = "template" if template_match else "direct"
+
+        # top_matches 会挂到 metadata，方便 R1 调试“为什么链接到了这个图谱节点”。
+        top_matches = [
+            {
+                "node_id": item["row"].get("node_id"),
+                "canonical_name": item["row"].get("canonical_name"),
+                "similarity": float(item["similarity"]),
+                "label": item["row"].get("label"),
+                "matched_mention": item["surface"],
+                "link_source": "template" if bool(item["template_match"]) else "direct",
+            }
+            for item in scored[: self.config.top_k_entity_matches]
+        ]
+
+        return LinkedEntity(
+            mention=normalized_mention,
+            node_id=best.get("node_id"),
+            canonical_name=best.get("canonical_name"),
+            similarity=similarity,
+            is_trusted=similarity >= self.config.entity_link_threshold or bool(best_entry["exact_surface_match"]),
+            label=best.get("label"),
+            metadata={
+                "raw_mention": mention,
+                "expanded_mentions": expanded_mentions,
+                "matched_mention": best_entry["surface"],
+                "link_source": link_source,
+                "template_match": template_match,
+                "aliases": list(best.get("aliases", [])),
+                "top_matches": top_matches,
+            },
+        )
+
+    # 用单个 surface form 查询候选节点。
+    def _query_candidates(self, mention: str) -> list[dict]:
+        return self.client.run_query(
             """
             MATCH (n)
             WHERE coalesce(n.name, '') = $mention
@@ -84,58 +170,7 @@ class EntityLinker:
                    coalesce(n.aliases, []) AS aliases
             LIMIT $limit
             """,
-            {"mention": normalized_mention, "limit": self.config.top_k_entity_matches},
-        )
-
-        if len(rows) == 0:
-            return LinkedEntity(
-                mention=normalized_mention,
-                metadata={"raw_mention": mention},
-            )
-
-        # 排序时统一走同一套相似度函数，避免查询阶段的命中顺序直接决定最终链接结果。
-        scored = sorted(
-            rows,
-            key=lambda item: -self._compute_similarity(
-                normalized_mention,
-                str(item.get("canonical_name", "")),
-                item.get("aliases", []),
-            ),
-        )
-        best = scored[0]
-        similarity = self._compute_similarity(
-            normalized_mention,
-            str(best.get("canonical_name", "")),
-            best.get("aliases", []),
-        )
-
-        # top_matches 会挂到 metadata，方便 R1 调试“为什么链接到了这个图谱节点”。
-        top_matches = [
-            {
-                "node_id": item.get("node_id"),
-                "canonical_name": item.get("canonical_name"),
-                "similarity": self._compute_similarity(
-                    normalized_mention,
-                    str(item.get("canonical_name", "")),
-                    item.get("aliases", []),
-                ),
-                "label": item.get("label"),
-            }
-            for item in scored[: self.config.top_k_entity_matches]
-        ]
-
-        return LinkedEntity(
-            mention=normalized_mention,
-            node_id=best.get("node_id"),
-            canonical_name=best.get("canonical_name"),
-            similarity=similarity,
-            is_trusted=similarity >= self.config.entity_link_threshold,
-            label=best.get("label"),
-            metadata={
-                "raw_mention": mention,
-                "aliases": list(best.get("aliases", [])),
-                "top_matches": top_matches,
-            },
+            {"mention": mention, "limit": self.config.top_k_entity_matches},
         )
 
     # 计算 mention 与候选标准名/别名的最佳相似度。
@@ -168,6 +203,13 @@ class EntityLinker:
             return 0.0
 
         return max(scores)
+
+    # 判断扩展后的 surface 是否已经精确命中候选的规范名或别名。
+    def _is_exact_surface_match(self, mention: str, row: dict) -> bool:
+        normalized_mention = self._normalize_text(mention)
+        candidates = [str(row.get("canonical_name") or ""), *[str(item) for item in row.get("aliases", [])]]
+
+        return any(normalized_mention == self._normalize_text(candidate) for candidate in candidates)
 
     # 统一文本形式，减少空格和大小写的影响。
     def _normalize_text(self, value: str) -> str:

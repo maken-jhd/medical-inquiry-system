@@ -441,10 +441,13 @@ class StopRuleEngine:
 
         return ""
 
-    # 将 guarded block reason 映射回 repair 分流可理解的三类拒停原因。
+    # 将 guarded block reason 映射回 repair 分流可理解的拒停原因。
     def _map_guarded_block_to_repair_reason(self, block_reason: str) -> str:
-        if block_reason in {"hard_negative_key_evidence", "strong_unresolved_alternative_candidates"}:
-            return "strong_alternative_not_ruled_out"
+        if block_reason == "hard_negative_key_evidence":
+            return "hard_negative_key_evidence"
+
+        if block_reason == "strong_unresolved_alternative_candidates":
+            return "strong_unresolved_alternative_candidates"
 
         if block_reason in {
             "soft_negative_needs_stability",

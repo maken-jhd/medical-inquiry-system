@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Iterable, List, Sequence
 
 from .neo4j_client import Neo4jClient
@@ -80,6 +81,7 @@ class RetrievalConfig:
     kg_similarity_threshold: float = 0.72
     disable_kg_below_threshold: bool = True
     r1_min_semantic_score: float = 0.48
+    disease_specific_anchor_bonus: float = 0.35
 
 
 class GraphRetriever:
@@ -209,6 +211,13 @@ class GraphRetriever:
                  count(DISTINCT feature) AS matched_feature_count,
                  collect(DISTINCT type(r)) AS relation_types,
                  collect(DISTINCT coalesce(feature.canonical_name, feature.name)) AS evidence_names,
+                 collect(DISTINCT labels(feature)[0]) AS evidence_labels,
+                 collect(DISTINCT {
+                   name: coalesce(feature.canonical_name, feature.name),
+                   label: labels(feature)[0],
+                   relation_type: type(r),
+                   node_id: feature.id
+                 }) AS evidence_payloads,
                  collect(DISTINCT feature.id) AS evidence_node_ids
             RETURN candidate.id AS node_id,
                    labels(candidate)[0] AS label,
@@ -219,6 +228,8 @@ class GraphRetriever:
                    reduce(total = 0.0, item IN direction_confidences | total + item) / size(direction_confidences) AS direction_confidence,
                    relation_types AS relation_types,
                    evidence_names AS evidence_names,
+                   evidence_labels AS evidence_labels,
+                   evidence_payloads AS evidence_payloads,
                    evidence_node_ids AS evidence_node_ids
             ORDER BY relation_count DESC, candidate_weight DESC, name
             LIMIT $limit
@@ -243,6 +254,11 @@ class GraphRetriever:
             direction_confidence = float(row.get("direction_confidence", 1.0))
             matched_feature_count = int(row.get("matched_feature_count", len(evidence_names)))
             relation_types = [str(item) for item in row.get("relation_types", [])]
+            evidence_labels = [str(item) for item in row.get("evidence_labels", [])]
+            evidence_payloads = [
+                item for item in row.get("evidence_payloads", [])
+                if isinstance(item, dict)
+            ]
             semantic_score, semantic_metadata = self._score_r1_candidate(
                 row,
                 total_feature_count=total_feature_count,
@@ -250,6 +266,9 @@ class GraphRetriever:
                 direction_confidence=direction_confidence,
                 link_similarity=link_similarity,
                 relation_types=relation_types,
+                evidence_names=[str(item) for item in evidence_names],
+                evidence_labels=evidence_labels,
+                evidence_payloads=evidence_payloads,
             )
 
             if semantic_score < self.config.r1_min_semantic_score:
@@ -269,8 +288,11 @@ class GraphRetriever:
                         "matched_feature_count": matched_feature_count,
                         "feature_coverage": semantic_metadata["feature_coverage"],
                         "relation_types": relation_types,
+                        "evidence_labels": evidence_labels,
+                        "evidence_payloads": evidence_payloads,
                         "label_prior": semantic_metadata["label_prior"],
                         "relation_specificity": semantic_metadata["relation_specificity"],
+                        "disease_specific_anchor_score": semantic_metadata["disease_specific_anchor_score"],
                         "generic_single_feature_penalty": semantic_metadata["generic_single_feature_penalty"],
                         "direction_confidence": direction_confidence,
                         "entity_link_similarity": link_similarity,
@@ -815,6 +837,9 @@ class GraphRetriever:
         direction_confidence: float,
         link_similarity: float,
         relation_types: Sequence[str],
+        evidence_names: Sequence[str],
+        evidence_labels: Sequence[str],
+        evidence_payloads: Sequence[dict],
     ) -> tuple[float, dict]:
         # R1 语义分数主要想回答三个问题：
         # 1. 它覆盖了多少输入特征？
@@ -824,6 +849,13 @@ class GraphRetriever:
         candidate_weight = min(float(row.get("candidate_weight", 0.0)), 1.0)
         relation_count = min(float(row.get("relation_count", 0.0)) / max(total_feature_count, 1), 1.0)
         relation_specificity = self._compute_relation_specificity(relation_types)
+        disease_specific_anchor_score = self._compute_disease_specific_anchor_score(
+            candidate_name=str(row.get("name", "")),
+            evidence_names=evidence_names,
+            evidence_labels=evidence_labels,
+            relation_types=relation_types,
+            evidence_payloads=evidence_payloads,
+        )
         label_prior = self._label_prior(str(row.get("label", "")))
         generic_single_feature_penalty = self._generic_single_feature_penalty(
             label=str(row.get("label", "")),
@@ -840,6 +872,7 @@ class GraphRetriever:
             + direction_confidence * 0.10
             + candidate_weight * 0.04
             + link_similarity * 0.04
+            + disease_specific_anchor_score * self.config.disease_specific_anchor_bonus
             - generic_single_feature_penalty
         )
         score = max(score, 0.0)
@@ -849,6 +882,7 @@ class GraphRetriever:
             "feature_coverage": feature_coverage,
             "relation_count_ratio": relation_count,
             "relation_specificity": relation_specificity,
+            "disease_specific_anchor_score": disease_specific_anchor_score,
             "label_prior": label_prior,
             "direction_confidence": direction_confidence,
             "candidate_weight": candidate_weight,
@@ -874,6 +908,154 @@ class GraphRetriever:
         }
         scores = [weights.get(item, 0.25) for item in relation_types]
         return sum(scores) / len(scores)
+
+    # 估计输入证据是不是更像“当前疾病自己的锚点”，而不是 HIV/CD4 这类共享背景证据。
+    def _compute_disease_specific_anchor_score(
+        self,
+        *,
+        candidate_name: str,
+        evidence_names: Sequence[str],
+        evidence_labels: Sequence[str],
+        relation_types: Sequence[str],
+        evidence_payloads: Sequence[dict],
+    ) -> float:
+        if len(evidence_names) == 0:
+            return 0.0
+
+        candidate_text = self._normalize_match_text(candidate_name)
+        scores: list[float] = []
+
+        payloads = self._align_evidence_payloads(
+            evidence_names=evidence_names,
+            evidence_labels=evidence_labels,
+            relation_types=relation_types,
+            evidence_payloads=evidence_payloads,
+        )
+
+        for payload in payloads:
+            evidence_text = self._normalize_match_text(str(payload.get("name") or ""))
+            evidence_label = str(payload.get("label") or "")
+            relation_type = str(payload.get("relation_type") or "")
+
+            if len(evidence_text) == 0:
+                continue
+
+            if self._has_meaningful_name_overlap(candidate_text, evidence_text):
+                scores.append(1.0)
+                continue
+
+            if evidence_label == "Pathogen" or relation_type in {"HAS_PATHOGEN", "DIAGNOSED_BY"}:
+                if self._is_hiv_specific_marker(evidence_text):
+                    scores.append(0.35 if "hiv" not in candidate_text else 0.95)
+                elif self._is_generic_hiv_or_immune_anchor(evidence_text):
+                    scores.append(0.25 if "hiv" not in candidate_text else 0.82)
+                else:
+                    scores.append(0.88)
+                continue
+
+            if evidence_label == "ImagingFinding":
+                scores.append(0.72)
+                continue
+
+            if evidence_label in {"LabFinding", "LabTest"}:
+                if self._is_hiv_specific_marker(evidence_text):
+                    scores.append(0.82 if "hiv" in candidate_text else 0.3)
+                elif self._is_generic_hiv_or_immune_anchor(evidence_text):
+                    scores.append(0.28 if "hiv" not in candidate_text else 0.72)
+                else:
+                    scores.append(0.55)
+                continue
+
+            if relation_type == "REQUIRES_DETAIL":
+                scores.append(0.48)
+                continue
+
+            scores.append(0.3 if self._is_generic_hiv_or_immune_anchor(evidence_text) and "hiv" not in candidate_text else 0.45)
+
+        if len(scores) == 0:
+            return 0.0
+
+        return min(max(scores), 1.0)
+
+    # 将独立 collect 出来的证据名字/标签/关系恢复成可逐条评分的 payload 列表。
+    def _align_evidence_payloads(
+        self,
+        *,
+        evidence_names: Sequence[str],
+        evidence_labels: Sequence[str],
+        relation_types: Sequence[str],
+        evidence_payloads: Sequence[dict],
+    ) -> list[dict]:
+        if len(evidence_payloads) > 0:
+            payloads = [dict(item) for item in evidence_payloads]
+        else:
+            payloads = []
+            for index, evidence_name in enumerate(evidence_names):
+                payloads.append(
+                    {
+                        "name": evidence_name,
+                        "label": evidence_labels[index] if index < len(evidence_labels) else "",
+                        "relation_type": relation_types[index] if index < len(relation_types) else "",
+                    }
+                )
+
+        if len(payloads) == 0:
+            return []
+
+        if len(payloads) == len(evidence_names):
+            for index, payload in enumerate(payloads):
+                payload.setdefault("name", evidence_names[index])
+                if index < len(evidence_labels):
+                    payload.setdefault("label", evidence_labels[index])
+                if index < len(relation_types):
+                    payload.setdefault("relation_type", relation_types[index])
+
+        return payloads
+
+    def _has_meaningful_name_overlap(self, candidate_text: str, evidence_text: str) -> bool:
+        if len(candidate_text) == 0 or len(evidence_text) == 0:
+            return False
+
+        if evidence_text in candidate_text or candidate_text in evidence_text:
+            return True
+
+        anchors = [
+            token
+            for token in re.split(r"感染|病|脑炎|肺炎|综合征|阳性|阴性|检测|抗体|rna|dna|病毒|细菌|真菌", evidence_text)
+            if len(token) >= 2
+        ]
+        return any(token in candidate_text for token in anchors)
+
+    def _is_generic_hiv_or_immune_anchor(self, evidence_text: str) -> bool:
+        return any(keyword in evidence_text for keyword in ("cd4", "t淋巴", "免疫功能低下", "hiv感染者", "hivaids"))
+
+    def _is_hiv_specific_marker(self, evidence_text: str) -> bool:
+        return any(
+            keyword in evidence_text
+            for keyword in (
+                "hivrna",
+                "hiv1",
+                "hiv-1",
+                "hiv抗体",
+                "hiv抗原抗体",
+                "病毒载量",
+                "病毒还能检测到",
+                "病毒量还能检测到",
+            )
+        )
+
+    def _normalize_match_text(self, text: str) -> str:
+        return (
+            str(text)
+            .strip()
+            .lower()
+            .replace(" ", "")
+            .replace("（", "(")
+            .replace("）", ")")
+            .replace("-", "")
+            .replace("_", "")
+            .replace("/", "")
+        )
 
     # 候选诊断已统一为 Disease；仅保留非 Disease 兜底降权，避免旧标签继续影响排序。
     def _label_prior(self, label: str) -> float:

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 from .llm_client import LlmClient
-from .types import FinalAnswerScore, PatientContext, ReasoningTrajectory
+from .types import FinalAnswerScore, HypothesisScore, PatientContext, ReasoningTrajectory
 
 
 ALLOWED_REJECT_REASONS = {
@@ -125,6 +125,64 @@ class TrajectoryEvaluator:
 
         return ranked[0]
 
+    # 当 rollout 没有形成可聚合答案时，保守地从当前候选态生成 answer score，避免 best_answer 断层。
+    def score_candidate_hypotheses_without_trajectories(
+        self,
+        hypotheses: Sequence[HypothesisScore],
+        patient_context: PatientContext | None = None,
+        *,
+        limit: int = 3,
+    ) -> List[FinalAnswerScore]:
+        ranked = sorted(hypotheses, key=lambda item: (-item.score, item.name))[: max(limit, 0)]
+
+        if len(ranked) == 0:
+            return []
+
+        max_score = max(float(item.score) for item in ranked) or 1.0
+        observed_evidence = self._observed_session_evidence(patient_context)
+        scores: list[FinalAnswerScore] = []
+
+        for index, hypothesis in enumerate(ranked):
+            normalized_score = max(min(float(hypothesis.score) / max_score, 1.0), 0.0)
+            observed_support = self._observed_answer_specific_support(
+                answer_id=hypothesis.node_id,
+                answer_name=hypothesis.name,
+                observed_evidence=observed_evidence,
+            )
+            observed_support_count = len(observed_support)
+            support_bonus = min(observed_support_count * 0.08, 0.18)
+            rank_penalty = index * 0.04
+            agent_evaluation = max(min(0.22 + normalized_score * 0.28 + support_bonus - rank_penalty, 0.62), 0.0)
+            consistency = max(0.12 - index * 0.025, 0.04)
+            diversity = 0.0
+            final_score = (
+                consistency * self.config.consistency_weight
+                + diversity * self.config.diversity_weight
+                + agent_evaluation * self.config.agent_eval_weight
+            )
+            scores.append(
+                FinalAnswerScore(
+                    answer_id=hypothesis.node_id,
+                    answer_name=hypothesis.name,
+                    consistency=consistency,
+                    diversity=diversity,
+                    agent_evaluation=agent_evaluation,
+                    final_score=final_score,
+                    metadata={
+                        "trajectory_count": 0,
+                        "verifier_mode": "candidate_state_fallback",
+                        "verifier_called": False,
+                        "answer_score_source": "candidate_state_fallback",
+                        "candidate_rank": index + 1,
+                        "candidate_state_score": hypothesis.score,
+                        "observed_answer_specific_support_count": observed_support_count,
+                        "observed_answer_specific_support": observed_support,
+                    },
+                )
+            )
+
+        return sorted(scores, key=lambda item: (-item.final_score, item.answer_name))
+
     # 估计同一答案下轨迹的多样性。
     def _compute_diversity(self, trajectories: List[ReasoningTrajectory]) -> float:
         if len(trajectories) <= 1:
@@ -198,6 +256,22 @@ class TrajectoryEvaluator:
                     "verifier_accept_reason": llm_result["accept_reason"],
                     "verifier_accept_reason_source": llm_result["accept_reason_source"],
                     "verifier_accept_schema_valid": llm_result["accept_schema_valid"],
+                    "observed_evidence_guard_applied": llm_result.get("observed_evidence_guard_applied", False),
+                    "observed_answer_specific_support_count": llm_result.get(
+                        "observed_answer_specific_support_count",
+                        0,
+                    ),
+                    "observed_answer_specific_support": llm_result.get("observed_answer_specific_support", []),
+                    "simulated_positive_key_evidence": llm_result.get("simulated_positive_key_evidence", []),
+                    "simulated_positive_key_evidence_names": llm_result.get(
+                        "simulated_positive_key_evidence_names",
+                        [],
+                    ),
+                    "verifier_acceptance_blocked_by_observed_evidence_guard": llm_result.get(
+                        "verifier_acceptance_blocked_by_observed_evidence_guard",
+                        False,
+                    ),
+                    "observed_evidence_guard_reason": llm_result.get("observed_evidence_guard_reason", ""),
                 }
 
         if self.config.agent_eval_mode != "fallback":
@@ -255,6 +329,13 @@ class TrajectoryEvaluator:
         # 只把该答案组里得分最高的最佳轨迹送给 verifier，
         # 避免 prompt 过重，同时仍保留 trajectory_count 和 answer_candidates 作为群体背景。
         best_trajectory = sorted(trajectories, key=lambda item: (-item.score, item.trajectory_id))[0]
+        observed_session_evidence = self._observed_session_evidence(patient_context)
+        simulated_trajectory_evidence = self._extract_simulated_trajectory_evidence(best_trajectory)
+        observed_support = self._observed_answer_specific_support(
+            answer_id=answer_id,
+            answer_name=answer_name,
+            observed_evidence=observed_session_evidence,
+        )
 
         try:
             payload = self.llm_client.run_structured_prompt(
@@ -264,6 +345,9 @@ class TrajectoryEvaluator:
                     "answer_id": answer_id,
                     "answer_name": answer_name,
                     "best_trajectory": best_trajectory,
+                    "observed_session_evidence": observed_session_evidence,
+                    "observed_answer_specific_support": observed_support,
+                    "simulated_trajectory_evidence": simulated_trajectory_evidence,
                     "trajectory_count": len(trajectories),
                     "answer_candidates": answer_candidates or [],
                 },
@@ -303,6 +387,32 @@ class TrajectoryEvaluator:
             score=score,
             reject_reason=reject_reason,
         )
+        guard_metadata = self._apply_observed_evidence_acceptance_guard(
+            answer_id=answer_id,
+            answer_name=answer_name,
+            should_accept_stop=should_accept_stop_value,
+            score=score,
+            reject_reason=reject_reason,
+            missing_evidence=missing_evidence,
+            recommended_next_evidence=recommended_next_evidence,
+            observed_support=observed_support,
+            simulated_trajectory_evidence=simulated_trajectory_evidence,
+        )
+        should_accept_stop_value = bool(guard_metadata["should_accept_stop"])
+        score = float(guard_metadata["score"])
+        reject_reason = str(guard_metadata["reject_reason"])
+        missing_evidence = list(guard_metadata["missing_evidence"])
+        recommended_next_evidence = list(guard_metadata["recommended_next_evidence"])
+        if not should_accept_stop_value and bool(guard_metadata["metadata"].get("verifier_acceptance_blocked_by_observed_evidence_guard", False)):
+            accept_reason = self._infer_accept_reason(
+                should_accept_stop=False,
+                score=score,
+                reject_reason=reject_reason,
+            )
+            accept_reason_source = "guarded_observed_evidence_guard"
+            accept_schema_valid = False
+            reject_reason_source = "observed_evidence_guard"
+            schema_valid = False
 
         return {
             "score": max(min(score, 1.0), 0.0),
@@ -318,6 +428,63 @@ class TrajectoryEvaluator:
             "schema_valid": schema_valid,
             "accept_reason_source": accept_reason_source,
             "accept_schema_valid": accept_schema_valid,
+            **guard_metadata["metadata"],
+        }
+
+    # 如果 verifier 想基于 rollout 模拟阳性停机，但真实会话没有当前答案的特异支持，则强制改为拒停。
+    def _apply_observed_evidence_acceptance_guard(
+        self,
+        *,
+        answer_id: str,
+        answer_name: str,
+        should_accept_stop: bool,
+        score: float,
+        reject_reason: str,
+        missing_evidence: list[str],
+        recommended_next_evidence: list[str],
+        observed_support: list[dict],
+        simulated_trajectory_evidence: list[dict],
+    ) -> dict:
+        simulated_positive_key_evidence = [
+            item
+            for item in simulated_trajectory_evidence
+            if str(item.get("polarity") or "") == "present" and bool(item.get("is_key_evidence", False))
+        ]
+        observed_support_count = len(observed_support)
+        blocked = bool(should_accept_stop) and observed_support_count == 0 and len(simulated_positive_key_evidence) > 0
+        simulated_names = self._unique_strings(str(item.get("name") or "") for item in simulated_positive_key_evidence)
+        metadata = {
+            "observed_evidence_guard_applied": True,
+            "observed_answer_specific_support_count": observed_support_count,
+            "observed_answer_specific_support": observed_support,
+            "simulated_positive_key_evidence": simulated_positive_key_evidence,
+            "simulated_positive_key_evidence_names": simulated_names,
+            "verifier_acceptance_blocked_by_observed_evidence_guard": blocked,
+        }
+
+        if not blocked:
+            return {
+                "should_accept_stop": should_accept_stop,
+                "score": score,
+                "reject_reason": reject_reason,
+                "missing_evidence": missing_evidence,
+                "recommended_next_evidence": recommended_next_evidence,
+                "metadata": metadata,
+            }
+
+        recommended = self._merge_unique_strings(recommended_next_evidence, simulated_names)
+        missing = self._merge_unique_strings(missing_evidence, simulated_names)
+        metadata["observed_evidence_guard_reason"] = (
+            f"候选答案“{answer_name or answer_id}”的关键支持只来自 rollout 模拟阳性，真实会话尚未确认。"
+        )
+        metadata["verifier_reject_reason_source"] = "observed_evidence_guard"
+        return {
+            "should_accept_stop": False,
+            "score": min(score, 0.64),
+            "reject_reason": "missing_key_support",
+            "missing_evidence": missing,
+            "recommended_next_evidence": recommended,
+            "metadata": metadata,
         }
 
     # 将 accepted 路径的原因结构化，避免只知道“能停”却不知道为什么能停。
@@ -428,6 +595,196 @@ class TrajectoryEvaluator:
             values.append(text)
 
         return values
+
+    # 从 verifier patient_context metadata 中取出真实会话证据。
+    def _observed_session_evidence(self, patient_context: PatientContext | None) -> list[dict]:
+        if patient_context is None:
+            return []
+
+        payload = patient_context.metadata.get("observed_session_evidence", [])
+
+        if not isinstance(payload, list):
+            return []
+
+        return [dict(item) for item in payload if isinstance(item, dict)]
+
+    # 从最佳 rollout 轨迹中提取模拟出来的证据，供 verifier 区分“可验证建议”和“真实已确认事实”。
+    def _extract_simulated_trajectory_evidence(self, trajectory: ReasoningTrajectory) -> list[dict]:
+        values: list[dict] = []
+        current_action: dict[str, Any] = {}
+
+        for step in trajectory.steps:
+            stage = str(step.get("stage") or "")
+
+            if stage == "A3":
+                current_action = {
+                    "action_id": str(step.get("action_id") or ""),
+                    "node_id": str(step.get("target_node_id") or ""),
+                    "name": str(step.get("action_name") or step.get("target_node_name") or ""),
+                    "hypothesis_id": str(step.get("hypothesis_id") or ""),
+                    "question_type_hint": str(step.get("question_type_hint") or ""),
+                }
+                continue
+
+            if stage != "PENDING_ACTION" or len(current_action) == 0:
+                continue
+
+            polarity = str(step.get("polarity") or "")
+            resolution = str(step.get("resolution") or "")
+            item = {
+                **current_action,
+                "polarity": polarity,
+                "resolution": resolution,
+                "answer_branch": str(step.get("answer_branch") or ""),
+                "source": "rollout_simulated",
+                "is_key_evidence": self._is_key_simulated_evidence(current_action),
+            }
+            values.append(item)
+
+        return values
+
+    # 判断 rollout 证据是否足以影响诊断接受边界。
+    def _is_key_simulated_evidence(self, action: dict[str, Any]) -> bool:
+        text = self._normalize_match_text(
+            " ".join(
+                [
+                    str(action.get("name") or ""),
+                    str(action.get("question_type_hint") or ""),
+                ]
+            )
+        )
+        key_markers = (
+            "lab",
+            "imaging",
+            "pathogen",
+            "培养",
+            "抗酸",
+            "pcr",
+            "核酸",
+            "抗体",
+            "抗原",
+            "ct",
+            "mri",
+            "影像",
+            "病原",
+            "阳性",
+            "dna",
+            "rna",
+        )
+        return any(marker in text for marker in key_markers)
+
+    # 判断真实会话里是否已有当前答案的特异支持；HIV/CD4 等泛背景不单独算作具体机会感染/肿瘤的接受依据。
+    def _observed_answer_specific_support(
+        self,
+        *,
+        answer_id: str,
+        answer_name: str,
+        observed_evidence: list[dict],
+    ) -> list[dict]:
+        values: list[dict] = []
+        answer_text = self._normalize_match_text(answer_name)
+
+        for item in observed_evidence:
+            if str(item.get("polarity") or item.get("effective_polarity") or "") != "present":
+                continue
+
+            if str(item.get("resolution") or "") not in {"clear", "hedged"}:
+                continue
+
+            evidence_name = str(item.get("name") or item.get("normalized_name") or item.get("node_id") or "")
+            evidence_text = self._normalize_match_text(evidence_name)
+            hypothesis_id = str(item.get("hypothesis_id") or "")
+            relation_type = str(item.get("relation_type") or "")
+
+            if hypothesis_id == answer_id and not self._is_generic_background_evidence(evidence_text):
+                values.append(dict(item))
+                continue
+
+            if self._has_meaningful_answer_overlap(answer_text, evidence_text):
+                values.append(dict(item))
+                continue
+
+            if relation_type in {"DIAGNOSED_BY", "HAS_PATHOGEN"} and not self._is_generic_background_evidence(evidence_text):
+                values.append(dict(item))
+
+        return values
+
+    def _has_meaningful_answer_overlap(self, answer_text: str, evidence_text: str) -> bool:
+        if len(answer_text) == 0 or len(evidence_text) == 0:
+            return False
+
+        if "hiv" in answer_text and "hiv" in evidence_text:
+            return True
+
+        if evidence_text in answer_text or answer_text in evidence_text:
+            return not self._is_generic_background_evidence(evidence_text)
+
+        tokens = [
+            token
+            for token in (
+                "水痘带状疱疹",
+                "巨细胞",
+                "弓形虫",
+                "隐球菌",
+                "结核",
+                "分枝杆菌",
+                "肺孢子",
+                "卡波西",
+                "hhv8",
+                "hiv",
+                "血脂",
+                "ldl",
+                "甘油三酯",
+                "肥胖",
+            )
+            if token in answer_text and token in evidence_text
+        ]
+        return len(tokens) > 0
+
+    def _is_generic_background_evidence(self, evidence_text: str) -> bool:
+        if len(evidence_text) == 0:
+            return True
+
+        generic_markers = (
+            "hiv感染者",
+            "hiv感染",
+            "艾滋",
+            "cd4",
+            "t淋巴",
+            "免疫功能低下",
+            "免疫抑制",
+            "年龄",
+            "发热",
+        )
+        return any(marker in evidence_text for marker in generic_markers)
+
+    def _normalize_match_text(self, text: str) -> str:
+        return (
+            str(text or "")
+            .strip()
+            .lower()
+            .replace(" ", "")
+            .replace("（", "(")
+            .replace("）", ")")
+            .replace("-", "")
+            .replace("_", "")
+            .replace("/", "")
+            .replace("+", "")
+        )
+
+    def _unique_strings(self, values: Iterable[str]) -> list[str]:
+        unique: list[str] = []
+
+        for value in values:
+            text = str(value).strip()
+            if len(text) == 0 or text in unique:
+                continue
+            unique.append(text)
+
+        return unique
+
+    def _merge_unique_strings(self, left: Sequence[str], right: Sequence[str]) -> list[str]:
+        return self._unique_strings([*left, *right])
 
     # 将模型可能返回的布尔文本标准化，避免 "false" 被 Python bool() 当成 True。
     def _coerce_bool(self, payload: object, default: bool) -> bool:

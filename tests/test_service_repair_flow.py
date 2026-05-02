@@ -111,6 +111,65 @@ def test_service_prefers_recommended_repair_action_for_missing_support() -> None
     assert any(item["name"] == "低氧血症" for item in action.metadata["exam_candidate_evidence"])
 
 
+# 验证 missing_key_support 下 verifier 推荐证据是强引导，能压过更高先验的泛化症状。
+def test_service_missing_support_treats_recommended_evidence_as_hard_guide() -> None:
+    tracker = StateTracker()
+    state = tracker.create_session("s1_hard_guide")
+    state.candidate_hypotheses = [
+        HypothesisScore(
+            node_id="pcp",
+            label="Disease",
+            name="肺孢子菌肺炎 (PCP)",
+            score=1.0,
+            metadata={},
+        )
+    ]
+    rows = [
+        {
+            "node_id": "symptom_fever",
+            "label": "ClinicalFinding",
+            "name": "发热",
+            "relation_type": "MANIFESTS_AS",
+            "relation_weight": 1.0,
+            "node_weight": 1.0,
+            "similarity_confidence": 1.0,
+            "contradiction_priority": 0.9,
+            "question_type_hint": "symptom",
+            "priority": 6.2,
+            "is_red_flag": False,
+            "topic_id": "Disease",
+        },
+        {
+            "node_id": "ct_ggo",
+            "label": "ImagingFinding",
+            "name": "胸部CT磨玻璃影",
+            "relation_type": "HAS_IMAGING_FINDING",
+            "relation_weight": 0.75,
+            "node_weight": 1.0,
+            "similarity_confidence": 1.0,
+            "contradiction_priority": 0.92,
+            "question_type_hint": "imaging",
+            "priority": 1.2,
+            "is_red_flag": False,
+            "topic_id": "Disease",
+        },
+    ]
+    brain = _build_brain(rows, tracker)
+
+    action = brain._choose_repair_action(
+        "s1_hard_guide",
+        SearchResult(),
+        {
+            "reject_reason": "missing_key_support",
+            "recommended_next_evidence": ["获取胸部CT结果以确认磨玻璃影"],
+        },
+    )
+
+    assert action is not None
+    assert action.action_type == "collect_general_exam_context"
+    assert any(item["name"] == "胸部CT磨玻璃影" for item in action.metadata["exam_candidate_evidence"])
+
+
 # 验证 trajectory_insufficient 会倾向切换到不同 question type，避免围绕同类问题打转。
 def test_service_prefers_diversified_question_type_for_trajectory_insufficient() -> None:
     tracker = StateTracker()
@@ -446,6 +505,128 @@ def test_service_can_switch_to_alternative_hypothesis_action_when_verifier_reque
     assert action.hypothesis_id == "covid"
     assert action.action_type == "collect_general_exam_context"
     assert any(item["name"] == "新冠核酸阳性" for item in action.metadata["exam_candidate_evidence"])
+
+
+# 验证 guarded 的 strong_unresolved_alternative_candidates 保留细粒度原因后，仍走竞争诊断动作池。
+def test_service_strong_unresolved_alternative_reason_uses_alternative_pool() -> None:
+    tracker = StateTracker()
+    state = tracker.create_session("s4_guarded_alt")
+    state.candidate_hypotheses = [
+        HypothesisScore(node_id="pcp", label="Disease", name="肺孢子菌肺炎 (PCP)", score=1.0),
+        HypothesisScore(node_id="tb", label="Disease", name="肺结核", score=0.94),
+    ]
+    rows = {
+        "pcp": [
+            {
+                "node_id": "lab_ldh",
+                "label": "LabFinding",
+                "name": "乳酸脱氢酶升高",
+                "relation_type": "HAS_LAB_FINDING",
+                "relation_weight": 0.8,
+                "node_weight": 1.0,
+                "similarity_confidence": 1.0,
+                "contradiction_priority": 0.75,
+                "question_type_hint": "lab",
+                "priority": 2.8,
+                "is_red_flag": False,
+                "topic_id": "Disease",
+            }
+        ],
+        "tb": [
+            {
+                "node_id": "symptom_night_sweat",
+                "label": "ClinicalFinding",
+                "name": "盗汗",
+                "relation_type": "MANIFESTS_AS",
+                "relation_weight": 0.8,
+                "node_weight": 1.0,
+                "similarity_confidence": 1.0,
+                "contradiction_priority": 0.98,
+                "question_type_hint": "symptom",
+                "priority": 2.7,
+                "is_red_flag": False,
+                "topic_id": "Disease",
+            }
+        ],
+    }
+    brain = _build_brain(rows, tracker)
+
+    action = brain._choose_repair_action(
+        "s4_guarded_alt",
+        SearchResult(),
+        {
+            "reject_reason": "strong_unresolved_alternative_candidates",
+            "current_answer_id": "pcp",
+            "alternative_candidates": [{"answer_id": "tb", "answer_name": "肺结核"}],
+            "recommended_next_evidence": ["盗汗"],
+        },
+    )
+
+    assert action is not None
+    assert action.hypothesis_id == "tb"
+    assert action.target_node_name == "盗汗"
+
+
+# 验证 hard_negative_key_evidence 不再被当成竞争诊断未排除，而是先围绕当前答案修复硬反证。
+def test_service_hard_negative_repair_stays_on_current_answer_and_follows_recommendation() -> None:
+    tracker = StateTracker()
+    state = tracker.create_session("s_hard_negative")
+    state.candidate_hypotheses = [
+        HypothesisScore(node_id="ks", label="Disease", name="卡波西肉瘤", score=1.2),
+        HypothesisScore(node_id="toxo", label="Disease", name="弓形虫脑炎", score=0.9),
+    ]
+    rows = {
+        "ks": [
+            {
+                "node_id": "symptom_diarrhea",
+                "label": "ClinicalFinding",
+                "name": "腹泻",
+                "relation_type": "MANIFESTS_AS",
+                "relation_weight": 0.9,
+                "node_weight": 1.0,
+                "similarity_confidence": 1.0,
+                "contradiction_priority": 0.9,
+                "question_type_hint": "symptom",
+                "priority": 5.6,
+                "is_red_flag": False,
+                "topic_id": "Disease",
+            }
+        ],
+        "toxo": [
+            {
+                "node_id": "mri_ring",
+                "label": "ImagingFinding",
+                "name": "头颅MRI环状增强病灶",
+                "relation_type": "DIAGNOSED_BY",
+                "relation_weight": 0.95,
+                "node_weight": 1.0,
+                "similarity_confidence": 1.0,
+                "contradiction_priority": 0.95,
+                "question_type_hint": "imaging",
+                "priority": 1.5,
+                "is_red_flag": False,
+                "topic_id": "Disease",
+            }
+        ],
+    }
+    brain = _build_brain(rows, tracker)
+
+    action = brain._choose_repair_action(
+        "s_hard_negative",
+        SearchResult(best_answer_id="toxo"),
+        {
+            "reject_reason": "hard_negative_key_evidence",
+            "current_answer_id": "toxo",
+            "current_answer_name": "弓形虫脑炎",
+            "guarded_acceptance_block_reason": "hard_negative_key_evidence",
+            "recommended_next_evidence": ["获取头颅MRI正式报告以确认环状增强病灶"],
+        },
+    )
+
+    assert action is not None
+    assert action.hypothesis_id == "toxo"
+    assert action.action_type == "collect_general_exam_context"
+    assert any(item["name"] == "头颅MRI环状增强病灶" for item in action.metadata["exam_candidate_evidence"])
 
 
 # 验证 strong_alternative_not_ruled_out 会更敢于切到非当前 top1 的鉴别证据。

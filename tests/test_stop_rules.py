@@ -91,6 +91,7 @@ def test_guarded_lenient_blocks_negative_key_evidence() -> None:
     assert decision.should_stop is False
     assert decision.reason == "guarded_acceptance_rejected"
     assert decision.metadata["guarded_acceptance_block_reason"] == "hard_negative_key_evidence"
+    assert decision.metadata["repair_reject_reason"] == "hard_negative_key_evidence"
     assert answer_score.metadata["guarded_hard_negative_key_evidence"][0]["negative_evidence_tier"] == "hard"
 
 
@@ -334,6 +335,7 @@ def test_guarded_lenient_blocks_only_strong_unresolved_alternative() -> None:
 
     assert decision.should_stop is False
     assert decision.metadata["guarded_acceptance_block_reason"] == "strong_unresolved_alternative_candidates"
+    assert decision.metadata["repair_reject_reason"] == "strong_unresolved_alternative_candidates"
     assert answer_score.metadata["guarded_strong_alternative_candidates"][0]["strength"] == "strong"
 
 

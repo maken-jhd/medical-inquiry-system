@@ -29,8 +29,10 @@ class HypothesisManagerConfig:
     overlap_penalty: float = 0.10
     feature_coverage_bonus: float = 0.20
     semantic_score_bonus: float = 0.22
+    disease_specific_anchor_bonus: float = 0.35
     verifier_alt_bonus: float = 0.35
     verifier_hedged_penalty: float = 0.25
+    verifier_hard_negative_penalty: float = 0.32
     verifier_missing_support_penalty: float = 0.12
     verifier_trajectory_penalty: float = 0.08
 
@@ -171,8 +173,10 @@ class HypothesisManager:
 
             # 当前被 verifier 拒停的答案会按 reject_reason 受到不同幅度的下调。
             if current_answer_id and hypothesis.node_id == current_answer_id:
-                if reject_reason == "strong_alternative_not_ruled_out":
+                if reject_reason in {"strong_alternative_not_ruled_out", "strong_unresolved_alternative_candidates"}:
                     score_delta -= self.config.verifier_hedged_penalty
+                elif reject_reason == "hard_negative_key_evidence":
+                    score_delta -= self.config.verifier_hard_negative_penalty
                 elif reject_reason == "missing_key_support":
                     score_delta -= self.config.verifier_missing_support_penalty
                 elif reject_reason == "trajectory_insufficient":
@@ -241,9 +245,15 @@ class HypothesisManager:
     # 根据关系类型给不同证据强度设置不同倍率。
     def _relation_multiplier(self, relation_type: str) -> float:
         if relation_type == "DIAGNOSED_BY":
-            return 1.25
+            return 1.35
+
+        if relation_type == "HAS_PATHOGEN":
+            return 1.3
 
         if relation_type == "HAS_LAB_FINDING":
+            return 1.15
+
+        if relation_type == "HAS_IMAGING_FINDING":
             return 1.15
 
         if relation_type == "MANIFESTS_AS":
@@ -398,10 +408,12 @@ class HypothesisManager:
 
             feature_coverage = float(candidate.metadata.get("feature_coverage", 0.0))
             semantic_score = float(candidate.metadata.get("semantic_score", candidate.score))
+            disease_specific_anchor_score = float(candidate.metadata.get("disease_specific_anchor_score", 0.0))
             rerank_bonus = (
                 unique_evidence_count * self.config.unique_evidence_bonus
                 + feature_coverage * self.config.feature_coverage_bonus
                 + semantic_score * self.config.semantic_score_bonus
+                + disease_specific_anchor_score * self.config.disease_specific_anchor_bonus
                 - overlap_ratio * self.config.overlap_penalty
             )
             reranked.append(
@@ -415,6 +427,7 @@ class HypothesisManager:
                         **dict(candidate.metadata),
                         "unique_evidence_count": unique_evidence_count,
                         "overlap_ratio": overlap_ratio,
+                        "disease_specific_anchor_score": disease_specific_anchor_score,
                         "competition_rerank_bonus": rerank_bonus,
                     },
                 )

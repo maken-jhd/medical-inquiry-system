@@ -48,6 +48,9 @@ def test_patient_slot_semantic_match_prompt_constrains_candidate_matching() -> N
     assert "HIV/AIDS ~= HIV感染/HIV感染者" in prompt
     assert "ART ~= 抗逆转录病毒治疗/抗病毒治疗" in prompt
     assert "没有合适候选时 matched_node_id 必须为空字符串" in prompt
+    assert "如果 question_text 问的是 lab/imaging/pathogen、高成本检查、病原体、检查结果或疾病定义性证据" in prompt
+    assert "这些回答会被 brain 解析为 unclear" in prompt
+    assert "不要写成“没有相关情况”或明确阴性" in prompt
 
 
 def test_patient_answer_generation_prompt_blocks_out_of_case_facts() -> None:
@@ -64,6 +67,45 @@ def test_patient_answer_generation_prompt_blocks_out_of_case_facts() -> None:
     assert "临床语义等价关系" in prompt
     assert "不得引入病例槽位外的新事实" in prompt
     assert "不得补充 matched_slot 之外的症状、检查、诊断、病史或治疗" in prompt
+
+
+def test_turn_interpreter_prompt_keeps_unperformed_high_cost_exam_unclear() -> None:
+    client = LlmClient(api_key="")
+    prompt = client._build_prompt(
+        "turn_interpreter",
+        {
+            "previous_question_text": "头颅CT有没有低密度病灶？",
+            "pending_target_name": "头颅CT低密度病灶",
+            "pending_target_label": "ImagingFinding",
+            "question_type": "imaging",
+            "acquisition_mode": "needs_imaging",
+            "evidence_cost": "high",
+            "relation_type": "HAS_IMAGING_FINDING",
+            "patient_text": "没做过这项检查。",
+        },
+    )
+
+    assert "只能把 pending_target_name 标为 unclear，不能标为 absent" in prompt
+    assert "没做过这项检查" in prompt
+    assert "结果明确阴性/不存在" in prompt
+
+
+def test_patient_opening_generation_prompt_preserves_exam_anchors() -> None:
+    client = LlmClient(api_key="")
+    prompt = client._build_prompt(
+        "patient_opening_generation",
+        {
+            "opening_slots": [
+                {"node_id": "cd4_low", "name": "CD4+ T淋巴细胞计数 < 200/μL", "group": "lab"},
+                {"node_id": "hiv_rna_positive", "name": "HIV RNA阳性", "group": "lab"},
+            ],
+        },
+    )
+
+    assert "关键医学锚点" in prompt
+    assert "低于200" in prompt
+    assert "阳性/阴性/升高/降低" in prompt
+    assert "不得把 CD4 < 200、HIV RNA阳性、具体病原体名等压缩成单纯“异常/偏低”" in prompt
 
 
 def test_llm_client_reads_timeout_from_environment(monkeypatch) -> None:

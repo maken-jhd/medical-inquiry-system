@@ -16,6 +16,7 @@ from brain.types import (
     RouteDecision,
     SearchResult,
     SessionState,
+    SlotUpdate,
     StopDecision,
     TurnInterpretationResult,
 )
@@ -284,6 +285,27 @@ def test_finalize_from_search_preserves_verifier_rejection_reason() -> None:
     assert report["best_final_answer"]["answer_name"] == "急性期"
 
 
+# 验证 rollout 只产出 UNKNOWN 答案组时，service 会回落到候选态生成 answer score。
+def test_service_treats_unknown_answer_group_as_needing_candidate_fallback() -> None:
+    state = SessionState(session_id="s_unknown", turn_index=3)
+    best_answer = FinalAnswerScore(
+        answer_id="UNKNOWN",
+        answer_name="UNKNOWN",
+        consistency=1.0,
+        diversity=0.0,
+        agent_evaluation=0.2,
+        final_score=0.36,
+        metadata={},
+    )
+    brain = _build_brain(
+        state,
+        StopDecision(False, "continue", 0.0),
+        best_answer,
+    )
+
+    assert brain._needs_candidate_state_answer_fallback([best_answer]) is True
+
+
 def test_choose_cold_start_probe_action_when_a2_a3_has_no_action() -> None:
     state = SessionState(session_id="s3", turn_index=1)
     brain = ConsultationBrain(
@@ -456,6 +478,59 @@ def test_service_skips_a2_refresh_during_regular_a3_followup() -> None:
     )
 
     assert should_refresh is False
+
+
+# 验证病原体/化验/影像强证据写入后，会强制下一轮 A2 refresh。
+def test_service_marks_a2_refresh_for_strong_exam_evidence() -> None:
+    tracker = StateTracker()
+    state = tracker.create_session("s5_strong")
+    state.candidate_hypotheses = [
+        HypothesisScore(node_id="d1", label="Disease", name="旧候选", score=0.9),
+    ]
+    brain = ConsultationBrain(
+        BrainDependencies(
+            state_tracker=tracker,
+            retriever=DummyRetriever(),
+            med_extractor=EmptyMedExtractor(),
+            entity_linker=EmptyEntityLinker(),
+            question_selector=QuestionSelector(),
+            stop_rule_engine=NonStoppingRuleEngine(),
+            report_builder=ReportBuilder(),
+            evidence_parser=EmptyEvidenceParser(),
+            hypothesis_manager=object(),
+            action_builder=ActionBuilder(),
+            router=MinimalRouter(),
+            mcts_engine=object(),
+            simulation_engine=object(),
+            trajectory_evaluator=EmptyTrajectoryEvaluator(),
+            llm_client=object(),
+        )
+    )
+
+    brain._mark_a2_refresh_if_strong_updates(
+        "s5_strong",
+        [
+            SlotUpdate(
+                node_id="pathogen_vzv",
+                status="true",
+                polarity="present",
+                resolution="clear",
+                metadata={"target_node_label": "Pathogen", "normalized_name": "水痘-带状疱疹病毒"},
+            )
+        ],
+        source="test",
+    )
+
+    should_refresh = brain._should_refresh_a2(
+        tracker.get_session("s5_strong"),
+        effective_stage="A3",
+        should_run_a1=False,
+        a1_result=A1ExtractionResult(),
+    )
+
+    assert should_refresh is True
+    assert tracker.get_session("s5_strong").metadata["force_tree_refresh"] is True
+    assert tracker.get_session("s5_strong").metadata["force_a2_refresh_evidence"] == ["水痘-带状疱疹病毒"]
 
 
 def test_service_builds_a2_evidence_profiles_for_frontend() -> None:

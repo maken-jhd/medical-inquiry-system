@@ -38,6 +38,7 @@ from .types import (
     A3VerificationResult,
     ClinicalFeatureItem,
     ExamContextResult,
+    ExamMentionedResult,
     EvidenceState,
     FinalAnswerScore,
     HypothesisCandidate,
@@ -181,17 +182,32 @@ class ConsultationBrain:
         positive_links: list[LinkedEntity] = []
 
         for mention, linked in zip(turn_result.mentions, linked_results):
+            original_normalized_name = str(mention.normalized_name or "")
+            original_display_name = str(mention.name or "")
             mention.metadata.update(
                 {
                     "linked_canonical_name": linked.canonical_name,
                     "linked_similarity": linked.similarity,
                     "linked_label": linked.label,
                     "linked_is_trusted": linked.is_trusted,
+                    "linked_metadata": dict(linked.metadata),
                 }
             )
 
             if linked.node_id is not None and linked.is_trusted:
                 mention.node_id = str(linked.node_id)
+                if linked.canonical_name is not None and len(str(linked.canonical_name).strip()) > 0:
+                    mention.metadata.update(
+                        {
+                            "original_name": original_display_name,
+                            "original_normalized_name": original_normalized_name,
+                            "graph_grounded_node_id": str(linked.node_id),
+                            "graph_grounded_canonical_name": str(linked.canonical_name),
+                            "graph_grounded_label": linked.label,
+                            "graph_grounded_source": linked.metadata.get("link_source"),
+                        }
+                    )
+                    mention.normalized_name = str(linked.canonical_name)
 
             if pending_action is not None and mention.node_id is None:
                 matched = self.deps.evidence_parser.find_target_mention([mention], pending_action)
@@ -264,6 +280,86 @@ class ConsultationBrain:
                     },
                 ),
             )
+
+    # 病原体阳性、影像/化验阳性等强证据进入后，强制下一轮重跑 A2 并刷新 search tree。
+    def _mark_a2_refresh_if_strong_updates(
+        self,
+        session_id: str,
+        updates: Iterable[SlotUpdate],
+        *,
+        source: str,
+    ) -> None:
+        strong_names: list[str] = []
+
+        for update in updates:
+            if not self._is_strong_positive_evidence_update(update):
+                continue
+            strong_names.append(str(update.metadata.get("normalized_name") or update.node_id))
+
+        if len(strong_names) == 0:
+            return
+
+        state = self.deps.state_tracker.get_session(session_id)
+        state.metadata["force_a2_refresh"] = True
+        state.metadata["force_tree_refresh"] = True
+        state.metadata["force_a2_refresh_reason"] = "strong_graph_evidence_observed"
+        state.metadata["force_a2_refresh_source"] = source
+        state.metadata["force_a2_refresh_evidence"] = strong_names[:6]
+
+    # 普通 verify_evidence 动作确认强证据时，也触发 A2 重排。
+    def _mark_a2_refresh_if_strong_evidence_state(
+        self,
+        session_id: str,
+        evidence_state: EvidenceState,
+        action: MctsAction,
+    ) -> None:
+        if evidence_state.effective_polarity() != "present":
+            return
+
+        label = str(action.target_node_label or "")
+        question_type = str(action.metadata.get("question_type_hint") or "")
+        acquisition_mode = str(action.metadata.get("acquisition_mode") or "")
+        relation_type = str(action.metadata.get("relation_type") or "")
+
+        if (
+            label in {"LabFinding", "LabTest", "ImagingFinding", "Pathogen"}
+            or question_type in {"lab", "imaging", "pathogen"}
+            or acquisition_mode in {"needs_lab_test", "needs_imaging", "needs_pathogen_test"}
+            or relation_type in {"DIAGNOSED_BY", "HAS_PATHOGEN", "HAS_LAB_FINDING", "HAS_IMAGING_FINDING"}
+        ):
+            state = self.deps.state_tracker.get_session(session_id)
+            state.metadata["force_a2_refresh"] = True
+            state.metadata["force_tree_refresh"] = True
+            state.metadata["force_a2_refresh_reason"] = "strong_action_evidence_confirmed"
+            state.metadata["force_a2_refresh_source"] = "pending_action"
+            state.metadata["force_a2_refresh_evidence"] = [action.target_node_name]
+
+    def _is_strong_positive_evidence_update(self, update: SlotUpdate) -> bool:
+        if update.status != "true" and update.polarity != "present":
+            return False
+
+        metadata = dict(update.metadata)
+        label = str(
+            metadata.get("target_node_label")
+            or metadata.get("linked_label")
+            or metadata.get("graph_grounded_label")
+            or ""
+        )
+        source_exam_kind = str(metadata.get("source_exam_kind") or "")
+        source_stage = str(metadata.get("source_stage") or "")
+        normalized_name = str(metadata.get("normalized_name") or update.node_id)
+
+        if label in {"LabFinding", "LabTest", "ImagingFinding", "Pathogen"}:
+            return True
+
+        if source_exam_kind in {"lab", "imaging", "pathogen"}:
+            return True
+
+        if source_stage in {"A4_EXAM_CONTEXT_GENERIC_LINK", "PENDING_ACTION_EXAM_CONTEXT_GENERIC_LINK"}:
+            return True
+
+        normalized = self._normalize_match_text(normalized_name)
+        return any(keyword in normalized for keyword in ("hivrna", "病毒载量", "cd4", "病原", "pcr", "阳性", "检出"))
 
     def _polarity_to_slot_status(self, polarity: str) -> str:
         if polarity == "present":
@@ -368,6 +464,7 @@ class ConsultationBrain:
         # 目标节点一旦被统一 mentions 写入并富化完成，就立即反馈到 hypothesis 排名和 action_stats，
         # 这样本轮后续 search 会基于最新诊断竞争态继续推进。
         self._apply_hypothesis_feedback(session_id, pending_action, evidence_state)
+        self._mark_a2_refresh_if_strong_evidence_state(session_id, evidence_state, pending_action)
         self._record_action_reward(session_id, pending_action, pending_action_result)
         tracker.get_session(session_id).metadata["last_answered_action"] = pending_action
         tracker.clear_pending_action(session_id)
@@ -399,12 +496,24 @@ class ConsultationBrain:
         # exam_context 解析会一次性提取：
         # 是否做过、做了哪些检查、是否说出了结果、是否还需要 follow-up。
         exam_result = self.deps.evidence_parser.interpret_exam_context_answer(patient_text, pending_action)
+        previous_exam_signature = self._exam_context_signature(
+            tracker.get_session(session_id),
+            exam_result.exam_kind,
+        )
         exam_updates = self.deps.evidence_parser.build_slot_updates_from_exam_context(
             pending_action,
             exam_result,
             patient_text,
             turn_index=turn_index,
         )
+        generic_exam_updates = self._build_graph_linked_exam_context_updates(
+            pending_action,
+            exam_result,
+            patient_text,
+            turn_index=turn_index,
+            existing_updates=exam_updates,
+        )
+        all_exam_updates = self._merge_exam_context_updates(exam_updates, generic_exam_updates)
 
         # 无论是否命中具体证据节点，都先把“检查上下文”写回 session，
         # 因为后续高成本动作是否可继续展开要依赖这份状态。
@@ -423,16 +532,34 @@ class ConsultationBrain:
         self._sync_general_exam_context_to_specific_kinds(session_id, exam_result, turn_index)
 
         # 如果这句回答已经给出了具体检查结果，就进一步把它映射成 slot/evidence/hypothesis feedback。
+        if len(all_exam_updates) > 0:
+            tracker.apply_slot_updates(session_id, all_exam_updates)
         if len(exam_updates) > 0:
-            tracker.apply_slot_updates(session_id, exam_updates)
             self._apply_exam_context_evidence_feedback(session_id, pending_action, exam_result, exam_updates, turn_index)
+        if len(generic_exam_updates) > 0:
+            self._apply_generic_exam_context_evidence_feedback(session_id, pending_action, exam_result, generic_exam_updates, turn_index)
+        self._mark_a2_refresh_if_strong_updates(
+            session_id,
+            all_exam_updates,
+            source="exam_context",
+        )
 
         # 做过检查但没说清结果时，挂一个专门 follow-up action，下一轮优先追问结果本身。
+        tracker.get_session(session_id).metadata.pop("exam_context_followup_action", None)
         if exam_result.needs_followup and exam_result.availability == "done":
-            tracker.get_session(session_id).metadata["exam_context_followup_action"] = self._build_exam_context_followup_action(
+            followup_action = self._build_exam_context_followup_action(
                 pending_action,
                 exam_result,
             )
+            if self._should_use_exam_context_followup_action(
+                session_id,
+                pending_action,
+                exam_result,
+                followup_action,
+                all_exam_updates,
+                previous_exam_signature,
+            ):
+                tracker.get_session(session_id).metadata["exam_context_followup_action"] = followup_action
 
         # exam_context 也会构造一个轻量 pending_action_result，便于统一复盘“这一轮发生了什么”。
         pending_action_result = self._build_pending_action_result_from_exam_context(pending_action, exam_result)
@@ -452,7 +579,7 @@ class ConsultationBrain:
                 "followup_reason": exam_result.followup_reason,
             },
         )
-        return pending_action_result, None, route_after_pending_action, exam_updates
+        return pending_action_result, None, route_after_pending_action, all_exam_updates
 
     # 将检查上下文中映射到具体证据节点的结果写入 evidence_states 并反馈 hypothesis。
     def _sync_general_exam_context_to_specific_kinds(
@@ -527,6 +654,157 @@ class ConsultationBrain:
 
         return sorted(kinds)
 
+    # 对检查回答里提到的 test/result 原文再做一次通用实体链接，补上非当前候选里的证据节点。
+    def _build_graph_linked_exam_context_updates(
+        self,
+        pending_action: MctsAction,
+        exam_result: ExamContextResult,
+        patient_text: str,
+        *,
+        turn_index: int,
+        existing_updates: list[SlotUpdate],
+    ) -> list[SlotUpdate]:
+        linker = self.deps.entity_linker
+        if not hasattr(linker, "link_mentions"):
+            return []
+
+        existing_node_ids = {item.node_id for item in existing_updates}
+        payloads = self._collect_exam_context_link_payloads(exam_result)
+        if len(payloads) == 0:
+            return []
+
+        linked_results = linker.link_mentions([item["mention"] for item in payloads])
+        updates: list[SlotUpdate] = []
+        seen_node_ids: set[str] = set(existing_node_ids)
+
+        for payload, linked in zip(payloads, linked_results):
+            if not linked.is_trusted or linked.node_id is None:
+                continue
+            if linked.label not in {"LabFinding", "ImagingFinding", "Pathogen"}:
+                continue
+
+            node_id = str(linked.node_id)
+            if node_id in seen_node_ids:
+                continue
+
+            status, polarity, resolution = self._exam_link_status_from_payload(payload, linked)
+            evidence_text = str(payload.get("evidence") or patient_text)
+            update = SlotUpdate(
+                node_id=node_id,
+                status=status,  # type: ignore[arg-type]
+                polarity=polarity,  # type: ignore[arg-type]
+                resolution=resolution,  # type: ignore[arg-type]
+                value=payload.get("value") or linked.canonical_name,
+                evidence=evidence_text,
+                turn_index=turn_index,
+                metadata={
+                    "source_stage": "A4_EXAM_CONTEXT_GENERIC_LINK",
+                    "normalized_name": linked.canonical_name or payload["mention"],
+                    "display_name": payload["mention"],
+                    "source_exam_kind": exam_result.exam_kind,
+                    "target_node_label": linked.label,
+                    "matched_from_exam_context": True,
+                    "generic_exam_context_link": True,
+                    "raw_mention": payload["mention"],
+                    "source_field": payload.get("source_field"),
+                    "link_metadata": dict(linked.metadata),
+                    "action_id": pending_action.action_id,
+                    "hypothesis_id": pending_action.hypothesis_id,
+                },
+            )
+            updates.append(update)
+            seen_node_ids.add(node_id)
+
+        return updates
+
+    # 收集检查回答中的检查名和结果原文，供实体链接器做候选内锚定。
+    def _collect_exam_context_link_payloads(self, exam_result: ExamContextResult) -> list[dict]:
+        payloads: list[dict] = []
+        seen_mentions: set[str] = set()
+
+        def add(mention: str, *, source_field: str, result: ExamMentionedResult | None = None) -> None:
+            text = str(mention or "").strip()
+            if len(text) == 0 or text in seen_mentions:
+                return
+
+            payloads.append(
+                {
+                    "mention": text,
+                    "source_field": source_field,
+                    "result": result,
+                    "value": result.raw_text if result is not None and result.raw_text else text,
+                    "evidence": result.raw_text if result is not None and result.raw_text else text,
+                }
+            )
+            seen_mentions.add(text)
+
+        for test_name in exam_result.mentioned_tests:
+            add(test_name, source_field="mentioned_tests")
+
+        for result in exam_result.mentioned_results:
+            add(result.test_name, source_field="mentioned_results.test_name", result=result)
+            add(result.raw_text, source_field="mentioned_results.raw_text", result=result)
+
+        return payloads
+
+    # 根据检查结果的 positive/negative/high/low 等归一化结果决定 slot 极性。
+    def _exam_link_status_from_payload(self, payload: dict, linked: LinkedEntity) -> tuple[str, str, str]:
+        result = payload.get("result")
+        normalized_result = ""
+        raw_text = str(payload.get("evidence") or payload.get("mention") or "")
+
+        if isinstance(result, ExamMentionedResult):
+            normalized_result = str(result.normalized_result or "").strip().lower()
+            raw_text = f"{result.test_name} {result.raw_text}".strip()
+
+        normalized_raw = self._normalize_match_text(raw_text)
+        negative_markers = {"negative", "normal", "not_detected", "not detected", "absent", "阴性", "未检出", "正常"}
+
+        if normalized_result in negative_markers or any(marker in normalized_raw for marker in ("阴性", "未检出", "没有提示")):
+            return "false", "absent", "clear"
+
+        positive_markers = {
+            "positive",
+            "high",
+            "low",
+            "elevated",
+            "detected",
+            "abnormal",
+            "阳性",
+            "升高",
+            "降低",
+            "偏低",
+            "偏高",
+        }
+
+        if normalized_result in positive_markers or any(
+            marker in normalized_raw
+            for marker in ("阳性", "检出", "升高", "降低", "偏低", "偏高", "异常", "低于", "增高")
+        ):
+            return "true", "present", "clear"
+
+        if linked.label == "Pathogen":
+            return "true", "present", "hedged"
+
+        return "true", "present", "hedged"
+
+    # 去重合并候选映射更新和通用实体链接更新。
+    def _merge_exam_context_updates(
+        self,
+        exam_updates: list[SlotUpdate],
+        generic_exam_updates: list[SlotUpdate],
+    ) -> list[SlotUpdate]:
+        merged: list[SlotUpdate] = []
+        seen_node_ids: set[str] = set()
+
+        for update in [*exam_updates, *generic_exam_updates]:
+            if update.node_id in seen_node_ids:
+                continue
+            merged.append(update)
+            seen_node_ids.add(update.node_id)
+
+        return merged
+
     # 将检查上下文中映射到具体证据节点的结果写入 evidence_states 并反馈 hypothesis。
     def _apply_exam_context_evidence_feedback(
         self,
@@ -575,6 +853,161 @@ class ConsultationBrain:
                 evidence_state,
                 related_ids,
             )
+
+    # 通用 exam-result 链接不绑定某个 R2 候选，但仍写入 evidence_states 供后续检索与复盘消费。
+    def _apply_generic_exam_context_evidence_feedback(
+        self,
+        session_id: str,
+        pending_action: MctsAction,
+        exam_result: ExamContextResult,
+        updates: list[SlotUpdate],
+        turn_index: int,
+    ) -> None:
+        for update in updates:
+            existence = "unknown"
+            resolution = "unknown"
+
+            if update.status == "true":
+                existence = "exist"
+            elif update.status == "false":
+                existence = "non_exist"
+
+            if update.resolution == "clear":
+                resolution = "clear"
+            elif update.resolution == "hedged":
+                resolution = "hedged"
+
+            evidence_state = EvidenceState(
+                node_id=update.node_id,
+                polarity=update.polarity,
+                existence=existence,  # type: ignore[arg-type]
+                resolution=resolution,  # type: ignore[arg-type]
+                reasoning=f"由检查上下文原文链接得到：{update.value or update.evidence or ''}",
+                source_turns=[turn_index],
+                metadata={
+                    "source_stage": "PENDING_ACTION_EXAM_CONTEXT_GENERIC_LINK",
+                    "action_id": pending_action.action_id,
+                    "hypothesis_id": pending_action.hypothesis_id,
+                    "exam_kind": exam_result.exam_kind,
+                    "exam_availability": exam_result.availability,
+                    "target_node_name": update.metadata.get("normalized_name", update.node_id),
+                    "patient_answer": update.evidence,
+                    **dict(update.metadata),
+                },
+            )
+            self.deps.state_tracker.set_evidence_state(session_id, evidence_state)
+
+    # 生成 follow-up 前做防循环判定，避免同一个检查入口被泛化追问多轮。
+    def _should_use_exam_context_followup_action(
+        self,
+        session_id: str,
+        pending_action: MctsAction,
+        exam_result: ExamContextResult,
+        followup_action: MctsAction,
+        applied_updates: list[SlotUpdate],
+        previous_signature: dict,
+    ) -> bool:
+        if not exam_result.needs_followup or exam_result.availability != "done":
+            return False
+
+        if len(applied_updates) > 0:
+            return False
+
+        state = self.deps.state_tracker.get_session(session_id)
+        target_node_id = followup_action.target_node_id
+        followup_mode = str(followup_action.metadata.get("exam_followup_mode") or "")
+
+        if followup_mode == "specific_result":
+            return target_node_id not in state.asked_node_ids
+
+        if target_node_id == "__exam_context__::general" and target_node_id in state.asked_node_ids:
+            return False
+
+        if self._exam_result_has_test_or_result(exam_result):
+            return False
+
+        if not self._exam_context_result_has_new_information(previous_signature, exam_result):
+            return False
+
+        counter_key = f"exam_context_followup_count::{target_node_id}"
+        count = int(state.metadata.get(counter_key, 0) or 0)
+        if count >= 1:
+            return False
+
+        state.metadata[counter_key] = count + 1
+        if target_node_id == "__exam_context__::general":
+            state.metadata["exam_context_general_followup_count"] = int(
+                state.metadata.get("exam_context_general_followup_count", 0) or 0
+            ) + 1
+        state.metadata.setdefault("exam_context_followup_history", []).append(
+            {
+                "source_action_id": pending_action.action_id,
+                "target_node_id": target_node_id,
+                "exam_kind": exam_result.exam_kind,
+                "followup_mode": followup_mode or "generic",
+                "followup_reason": exam_result.followup_reason,
+            }
+        )
+        return True
+
+    # 当前上下文里已经掌握的检查名/结果签名，用于判断下一轮回答是否真的新增了信息。
+    def _exam_context_signature(self, state: SessionState, exam_kind: str) -> dict:
+        context = state.exam_context.get(exam_kind)
+
+        if context is None:
+            return {
+                "availability": "unknown",
+                "tests": set(),
+                "results": set(),
+            }
+
+        return {
+            "availability": context.availability,
+            "tests": {self._normalize_match_text(item) for item in context.mentioned_exam_names},
+            "results": {
+                (
+                    self._normalize_match_text(item.test_name),
+                    self._normalize_match_text(item.raw_text),
+                    self._normalize_match_text(item.normalized_result),
+                )
+                for item in context.mentioned_exam_results
+            },
+        }
+
+    # 检查本轮解析结果是否相对上一轮新增了检查状态、检查名或结果。
+    def _exam_context_result_has_new_information(
+        self,
+        previous_signature: dict,
+        exam_result: ExamContextResult,
+    ) -> bool:
+        if previous_signature.get("availability") != exam_result.availability:
+            return True
+
+        previous_tests = set(previous_signature.get("tests") or set())
+        current_tests = {self._normalize_match_text(item) for item in exam_result.mentioned_tests}
+        if len(current_tests - previous_tests) > 0:
+            return True
+
+        previous_results = set(previous_signature.get("results") or set())
+        current_results = {
+            (
+                self._normalize_match_text(item.test_name),
+                self._normalize_match_text(item.raw_text),
+                self._normalize_match_text(item.normalized_result),
+            )
+            for item in exam_result.mentioned_results
+        }
+        return len(current_results - previous_results) > 0
+
+    # 只要患者已经提到检查名、结果或病原体名，就不再对同一个 general 入口做泛化追问。
+    def _exam_result_has_test_or_result(self, exam_result: ExamContextResult) -> bool:
+        if any(len(str(item).strip()) > 0 for item in exam_result.mentioned_tests):
+            return True
+
+        return any(
+            len(str(item.test_name).strip()) > 0 or len(str(item.raw_text).strip()) > 0
+            for item in exam_result.mentioned_results
+        )
 
     # 优先复用本轮统一 mentions 已写入的 target evidence_state；若异常缺失，再从同一份解释结果补一份。
     def _get_or_build_pending_action_evidence_state(
@@ -907,6 +1340,53 @@ class ConsultationBrain:
 
         return None
 
+    # 最终发问前再做一次可问性过滤，兜住 search/repair/follow-up 产生的重复动作。
+    def _filter_selected_action_for_repeat(
+        self,
+        session_id: str,
+        selected_action: MctsAction | None,
+        search_result: SearchResult,
+    ) -> MctsAction | None:
+        if selected_action is None or self._selected_action_is_askable(session_id, selected_action):
+            return selected_action
+
+        search_result.metadata["filtered_repeated_action"] = asdict(selected_action)
+        search_result.metadata["filtered_repeated_action_reason"] = "target_already_asked_or_exam_context_resolved"
+        return None
+
+    # 统一判断一个动作当前是否还能问：general exam context 不允许重复，普通节点也不重复问。
+    def _selected_action_is_askable(self, session_id: str, action: MctsAction | None) -> bool:
+        if action is None:
+            return True
+
+        state = self.deps.state_tracker.get_session(session_id)
+        target_node_id = str(action.target_node_id or "")
+        followup_mode = str(action.metadata.get("exam_followup_mode") or "")
+
+        if target_node_id == "__exam_context__::general" and target_node_id in state.asked_node_ids:
+            return False
+
+        if target_node_id in state.asked_node_ids:
+            return False
+
+        if action.action_type == "collect_general_exam_context":
+            return self._exam_context_availability_for_action(state, "general") == "unknown"
+
+        if action.action_type == "collect_exam_context" and followup_mode != "specific_result":
+            exam_kind = str(action.metadata.get("exam_kind") or "").strip()
+            if exam_kind in {"general", "lab", "imaging", "pathogen"}:
+                return self._exam_context_availability_for_action(state, exam_kind) == "unknown"
+
+        return True
+
+    def _exam_context_availability_for_action(self, state: SessionState, exam_kind: str) -> str:
+        context = state.exam_context.get(exam_kind)
+
+        if context is None:
+            return "unknown"
+
+        return context.availability
+
     # 运行 R1 + A2，生成主假设和备选假设并写回当前会话状态。
     def _run_a2(
         self,
@@ -917,12 +1397,24 @@ class ConsultationBrain:
     ) -> A2HypothesisResult:
         tracker = self.deps.state_tracker
         state = tracker.get_session(session_id)
+        force_reason = str(state.metadata.pop("force_a2_refresh_reason", "") or "")
+        force_source = str(state.metadata.pop("force_a2_refresh_source", "") or "")
+        force_evidence = state.metadata.pop("force_a2_refresh_evidence", [])
+        state.metadata.pop("force_a2_refresh", None)
         candidates = self.deps.retriever.retrieve_r1_candidates(
             list(linked_entities) + list(a1_result.key_features),
             patient_context,
             state,
         )
         a2_result = self.deps.hypothesis_manager.run_a2_hypothesis_generation(patient_context, candidates)
+        if len(force_reason) > 0:
+            a2_result.metadata.update(
+                {
+                    "force_a2_refresh_reason": force_reason,
+                    "force_a2_refresh_source": force_source,
+                    "force_a2_refresh_evidence": force_evidence,
+                }
+            )
         score_candidates = []
 
         if a2_result.primary_hypothesis is not None:
@@ -948,6 +1440,9 @@ class ConsultationBrain:
             return True
 
         if effective_stage == "A2":
+            return True
+
+        if bool(state.metadata.get("force_a2_refresh", False)):
             return True
 
         return should_run_a1 and len(a1_result.key_features) > 0
@@ -1271,6 +1766,11 @@ class ConsultationBrain:
             patient_context=verifier_patient_context,
             session_turn_index=state.turn_index,
         )
+        if self._needs_candidate_state_answer_fallback(final_scores) and len(state.candidate_hypotheses) > 0:
+            final_scores = self.deps.trajectory_evaluator.score_candidate_hypotheses_without_trajectories(
+                state.candidate_hypotheses,
+                patient_context=verifier_patient_context,
+            )
 
         # best_answer 代表“从答案聚合视角看，当前最优的最终诊断候选是谁”。
         best_answer = self.deps.trajectory_evaluator.select_best_answer(final_scores)
@@ -1309,10 +1809,25 @@ class ConsultationBrain:
         state.metadata["last_search_result"] = search_result
         return search_result
 
+    # rollout 可能只产出 UNKNOWN/空答案组；此时用当前 A2 候选态补一组保守 answer score。
+    def _needs_candidate_state_answer_fallback(self, scores: Sequence[FinalAnswerScore]) -> bool:
+        if len(scores) == 0:
+            return True
+
+        for score in scores:
+            answer_id = str(score.answer_id or "").strip().upper()
+            answer_name = str(score.answer_name or "").strip().upper()
+
+            if answer_id not in {"", "UNKNOWN"} and answer_name not in {"", "UNKNOWN"}:
+                return False
+
+        return True
+
     # verifier 判断是否可以停止时需要看到累计会话证据，而不是只看当前 turn 的患者回复。
     def _build_verifier_patient_context(self, session_id: str, latest_context: PatientContext) -> PatientContext:
         state = self.deps.state_tracker.get_session(session_id)
         raw_sections: list[str] = []
+        observed_session_evidence: list[dict] = []
         latest_text = latest_context.raw_text.strip()
 
         if len(latest_text) > 0:
@@ -1329,6 +1844,22 @@ class ConsultationBrain:
                 raw_sections.append(
                     f"- {slot.node_id}: polarity={slot.effective_polarity()}, status={slot.status}, resolution={slot.resolution}, evidence={evidence_text}"
                 )
+                observed_session_evidence.append(
+                    {
+                        "source": "observed_slot",
+                        "node_id": slot.node_id,
+                        "name": str(slot.metadata.get("normalized_name") or slot.metadata.get("target_node_name") or slot.node_id),
+                        "polarity": slot.effective_polarity(),
+                        "status": slot.status,
+                        "existence": "exist" if slot.effective_polarity() == "present" else "non_exist" if slot.effective_polarity() == "absent" else "unknown",
+                        "resolution": slot.resolution,
+                        "hypothesis_id": str(slot.metadata.get("hypothesis_id") or ""),
+                        "relation_type": str(slot.metadata.get("relation_type") or ""),
+                        "evidence_tags": self._normalize_string_list(slot.metadata.get("evidence_tags", [])),
+                        "source_turns": list(slot.source_turns),
+                        "evidence": evidence_text,
+                    }
+                )
 
         if len(state.mention_context) > 0:
             raw_sections.append("累计提及项上下文：")
@@ -1343,8 +1874,29 @@ class ConsultationBrain:
             raw_sections.append("累计上一轮动作证据判断：")
 
             for evidence in state.evidence_states.values():
+                evidence_name = str(
+                    evidence.metadata.get("target_node_name")
+                    or evidence.metadata.get("normalized_name")
+                    or evidence.node_id
+                )
                 raw_sections.append(
-                    f"- {evidence.node_id}: polarity={evidence.effective_polarity()}, existence={evidence.existence}, resolution={evidence.resolution}, reasoning={evidence.reasoning}"
+                    f"- {evidence.node_id}: name={evidence_name}, polarity={evidence.effective_polarity()}, existence={evidence.existence}, resolution={evidence.resolution}, reasoning={evidence.reasoning}"
+                )
+                observed_session_evidence.append(
+                    {
+                        "source": "observed_evidence_state",
+                        "node_id": evidence.node_id,
+                        "name": evidence_name,
+                        "polarity": evidence.effective_polarity(),
+                        "existence": evidence.existence,
+                        "resolution": evidence.resolution,
+                        "hypothesis_id": str(evidence.metadata.get("hypothesis_id") or ""),
+                        "relation_type": str(evidence.metadata.get("relation_type") or ""),
+                        "evidence_tags": self._normalize_string_list(evidence.metadata.get("evidence_tags", [])),
+                        "source_stage": str(evidence.metadata.get("source_stage") or ""),
+                        "source_turns": list(evidence.source_turns),
+                        "reasoning": evidence.reasoning,
+                    }
                 )
 
         if len(state.candidate_hypotheses) > 0:
@@ -1358,7 +1910,11 @@ class ConsultationBrain:
             general_info=latest_context.general_info,
             clinical_features=list(latest_context.clinical_features),
             raw_text=raw_text,
-            metadata={**dict(latest_context.metadata), "context_scope": "cumulative_session_for_verifier"},
+            metadata={
+                **dict(latest_context.metadata),
+                "context_scope": "cumulative_session_for_verifier",
+                "observed_session_evidence": observed_session_evidence,
+            },
         )
 
     # 将搜索结果转成一条可直接用于提问的动作。
@@ -1397,12 +1953,12 @@ class ConsultationBrain:
         pending_action = tracker.get_pending_action(session_id)
         known_feature_names = self._collect_known_feature_names(session_id)
         turn_result = self.deps.evidence_parser.interpret_turn(patient_text, pending_action=pending_action)
+        linked_entities = self._prepare_turn_mentions(turn_result, pending_action)
         patient_context = self.deps.evidence_parser.build_patient_context_from_turn(turn_result, patient_text)
         a1_result = self.deps.evidence_parser.run_a1_key_symptom_extraction(
             patient_context,
             known_feature_names=known_feature_names,
         )
-        linked_entities = self._prepare_turn_mentions(turn_result, pending_action)
         generic_updates = self._build_slot_updates_from_mentions(turn_result.mentions, turn_index=turn_index)
 
         # 统一提及项先合并进会话上下文，再写入通用 slots/evidence_states，
@@ -1411,6 +1967,11 @@ class ConsultationBrain:
         if len(generic_updates) > 0:
             tracker.apply_slot_updates(session_id, generic_updates)
         self._apply_generic_evidence_states_from_mentions(session_id, turn_result.mentions, turn_index=turn_index)
+        self._mark_a2_refresh_if_strong_updates(
+            session_id,
+            generic_updates,
+            source="turn_interpreter",
+        )
 
         # 如果上一轮已经发出问题，这里会先把本轮回答解释成：
         # - 上一轮动作对应的目标证据判断
@@ -1588,6 +2149,16 @@ class ConsultationBrain:
                 search_result.selected_action = selected_action
                 search_result.root_best_action = selected_action
                 search_result.metadata["fallback_reason"] = "no_a2_a3_action_available"
+
+        selected_action = self._filter_selected_action_for_repeat(session_id, selected_action, search_result)
+        if selected_action is None and not accept_decision.should_stop and not stop_decision.should_stop:
+            selected_action = self._choose_cold_start_probe_action(session_id)
+            if selected_action is not None and self._selected_action_is_askable(session_id, selected_action):
+                search_result.selected_action = selected_action
+                search_result.root_best_action = selected_action
+                search_result.metadata["fallback_reason"] = "repeat_action_filtered_to_cold_start"
+            else:
+                selected_action = None
 
         if self._has_search_signal(search_result):
             # 这里把 repair 前后的动作、reroot 情况和 reject reason 整理成便于前端/复盘读取的观测结构。
@@ -2163,7 +2734,7 @@ class ConsultationBrain:
 
         # 若 verifier 没给出具体 alternatives，但拒停理由就是 strong alternative，
         # 则从当前 hypothesis 排名里兜底构造几个强备选，保证 repair 仍有目标可追。
-        if reject_reason == "strong_alternative_not_ruled_out" and len(alternative_candidates) == 0:
+        if self._is_alternative_repair_reason(reject_reason) and len(alternative_candidates) == 0:
             alternative_candidates = [
                 {
                     "answer_id": item.node_id,
@@ -2173,7 +2744,7 @@ class ConsultationBrain:
                 for item in state.candidate_hypotheses[1:3]
             ]
 
-        if reject_reason == "missing_key_support" and len(recommended_next_evidence) == 0:
+        if reject_reason in {"missing_key_support", "hard_negative_key_evidence"} and len(recommended_next_evidence) == 0:
             recommended_next_evidence = self._normalize_string_list(metadata.get("verifier_missing_evidence", []))[:3]
 
         # guarded gate 给出的 family 缺口优先级很高，必要时把它们前置合并进推荐证据。
@@ -2197,6 +2768,8 @@ class ConsultationBrain:
             "guarded_confirmed_evidence_families": self._normalize_string_list(
                 guarded_features.get("guarded_confirmed_key_evidence_families", [])
             ),
+            "guarded_hard_negative_key_evidence": guarded_features.get("guarded_hard_negative_key_evidence", []),
+            "guarded_strong_alternative_candidates": guarded_strong_alternatives,
             "guarded_acceptance_features": guarded_features,
             "force_tree_refresh": True,
             "repair_stage": self._map_reject_reason_to_stage(reject_reason),
@@ -2355,7 +2928,11 @@ class ConsultationBrain:
 
         guarded_block_reason = str(repair_context.get("guarded_acceptance_block_reason") or "")
 
-        if guarded_block_reason in {"pcp_combo_insufficient", "missing_confirmed_key_evidence"}:
+        if guarded_block_reason in {
+            "pcp_combo_insufficient",
+            "missing_confirmed_key_evidence",
+            "hard_negative_key_evidence",
+        } or str(repair_context.get("reject_reason") or "") == "hard_negative_key_evidence":
             current_answer_id = str(repair_context.get("current_answer_id") or "")
             current_answer = self._find_hypothesis_by_id(state.candidate_hypotheses, current_answer_id)
 
@@ -2375,7 +2952,7 @@ class ConsultationBrain:
         ranked = sorted(state.candidate_hypotheses, key=lambda item: (-item.score, item.name))
         selected: list[HypothesisScore] = [current_hypothesis]
 
-        if reject_reason != "strong_alternative_not_ruled_out":
+        if not self._is_alternative_repair_reason(reject_reason):
             return selected
 
         alternative_candidates = self._normalize_alternative_candidates(repair_context.get("alternative_candidates", []))
@@ -2504,30 +3081,44 @@ class ConsultationBrain:
         family_diversity_bonus = 0.35 if len(recent_semantic_evidence_tags) > 0 and not shared_evidence_family else 0.0
         family_repeat_penalty = 0.3 if shared_evidence_family else 0.0
 
-        # 三类 reject_reason 分别有不同偏好：
+        # 不同 reject_reason 分别有不同偏好：
         # - missing_key_support：优先补 verifier / hypothesis 推荐缺口
-        # - strong_alternative_not_ruled_out：优先找能拉开竞争差异的动作
+        # - hard_negative_key_evidence：优先围绕当前答案补能化解硬反证的推荐锚点
+        # - strong alternative：优先找能拉开竞争差异的动作
         # - trajectory_insufficient：优先选新颖、少重复的动作稳定路径
-        if reject_reason == "missing_key_support":
+        if reject_reason in {"missing_key_support", "hard_negative_key_evidence"}:
             recommended_gap_score = max(
                 recommended_match_score,
                 joint_recommended_match_score,
                 verifier_recommended_match_score * 0.9,
                 hypothesis_recommended_match_score * 0.75,
             )
+            hard_recommended_bonus = 0.0
+
+            if recommended_gap_score >= 0.9:
+                hard_recommended_bonus = 4.0
+            elif recommended_gap_score >= 0.65:
+                hard_recommended_bonus = 2.5
+            elif recommended_gap_score >= 0.35:
+                hard_recommended_bonus = 1.2
+
+            if reject_reason == "hard_negative_key_evidence" and recommended_gap_score > 0.0:
+                hard_recommended_bonus += 1.25
+
             return (
                 score
-                + recommended_gap_score * 2.9
-                + joint_recommended_match_score * 1.8
-                + verifier_recommended_match_score * 1.25
-                + hypothesis_recommended_match_score * 0.85
-                + recommended_bonus * 1.35
+                + recommended_gap_score * 5.2
+                + hard_recommended_bonus
+                + joint_recommended_match_score * 2.8
+                + verifier_recommended_match_score * 2.1
+                + hypothesis_recommended_match_score * 1.0
+                + recommended_bonus * 2.4
                 + guarded_family_match_score * 2.2
                 + pcp_combo_priority_bonus
                 + missing_family_priority_bonus
                 + combo_anchor_bonus
                 + repair_cost_bias
-                + discriminative_gain * 0.65
+                + discriminative_gain * 0.45
                 + type_diversity_bonus * 0.55
                 + family_diversity_bonus * 0.85
                 - same_type_penalty * 0.5
@@ -2536,7 +3127,7 @@ class ConsultationBrain:
                 - patient_burden * 0.15
             )
 
-        if reject_reason == "strong_alternative_not_ruled_out":
+        if self._is_alternative_repair_reason(reject_reason):
             current_answer_id = str(repair_context.get("current_answer_id") or "")
             alternative_hypothesis_bonus = 1.05 if len(current_answer_id) > 0 and action.hypothesis_id != current_answer_id else 0.0
             competition_family_bonus = (
@@ -2666,10 +3257,14 @@ class ConsultationBrain:
 
     # 将 verifier 拒停原因映射为更明确的 repair 阶段语义。
     def _map_reject_reason_to_stage(self, reject_reason: str) -> str:
-        if reject_reason == "strong_alternative_not_ruled_out":
+        if self._is_alternative_repair_reason(reject_reason):
             return "A2"
 
         return "A3"
+
+    # verifier 和 guarded gate 的历史枚举略有不同，这里统一判断“竞争诊断未排除”类 repair。
+    def _is_alternative_repair_reason(self, reject_reason: str) -> bool:
+        return reject_reason in {"strong_alternative_not_ruled_out", "strong_unresolved_alternative_candidates"}
 
     # 将 guarded gate 暴露出的缺失证据家族翻译成 A3 可匹配的推荐证据文本。
     def _recommended_evidence_for_guarded_families(
@@ -2929,6 +3524,8 @@ class ConsultationBrain:
         repair_mode = {
             "missing_key_support": "repair_supporting_evidence",
             "strong_alternative_not_ruled_out": "repair_hypothesis_competition",
+            "strong_unresolved_alternative_candidates": "repair_hypothesis_competition",
+            "hard_negative_key_evidence": "repair_hard_negative_resolution",
             "trajectory_insufficient": "repair_path_diversification",
         }.get(reject_reason, "repair_generic")
 

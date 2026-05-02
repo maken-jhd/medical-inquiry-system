@@ -53,6 +53,10 @@ class ActionBuilder:
         for row in rows:
             # 单条 R2 证据会融合：
             # 图谱优先级、反证价值、候选假设重叠、推荐证据命中度、获取成本和患者负担。
+            row_node_id = str(row.get("node_id") or "")
+            if session_state is not None and row_node_id in session_state.asked_node_ids:
+                continue
+
             priority = float(row.get("priority", 0.0))
             contradiction_priority = float(row.get("contradiction_priority", 0.0))
             relation_weight = float(row.get("relation_weight", 0.0))
@@ -100,29 +104,59 @@ class ActionBuilder:
             if exam_kind is not None and session_state is not None and self._is_high_cost_exam_mode(acquisition_mode):
                 general_availability = self._get_exam_availability(session_state, "general")
                 availability = self._get_exam_availability(session_state, exam_kind)
+                general_target = "__exam_context__::general"
+                specific_target = f"__exam_context__::{exam_kind}"
+                general_asked = general_target in session_state.asked_node_ids
+                specific_asked = specific_target in session_state.asked_node_ids
 
                 if general_availability == "not_done" or availability == "not_done":
                     continue
 
                 if general_availability == "unknown":
-                    # 若还不知道是否做过检查，则把多个高成本证据收敛成一次 exam_context 追问，
-                    # 避免患者在不知道做没做检查前就被逐条追问具体结果。
-                    self._accumulate_exam_context_action(
-                        exam_context_actions,
-                        exam_kind="general",
-                        candidate_exam_kind=exam_kind,
-                        row=row,
-                        hypothesis_id=hypothesis_id,
-                        topic_id=topic_id,
-                        priority=priority,
-                        evidence_tags=evidence_tags,
-                        acquisition_mode=acquisition_mode,
-                        evidence_cost=evidence_cost,
-                        discriminative_gain=discriminative_gain,
-                        recommended_match_score=recommended_match_score,
-                        joint_recommended_match_score=joint_recommended_match_score,
-                        recommended_bonus=recommended_bonus,
-                    )
+                    if not general_asked:
+                        # 若还不知道是否做过检查，则把多个高成本证据收敛成一次 exam_context 追问，
+                        # 避免患者在不知道做没做检查前就被逐条追问具体结果。
+                        self._accumulate_exam_context_action(
+                            exam_context_actions,
+                            exam_kind="general",
+                            candidate_exam_kind=exam_kind,
+                            row=row,
+                            hypothesis_id=hypothesis_id,
+                            topic_id=topic_id,
+                            priority=priority,
+                            evidence_tags=evidence_tags,
+                            acquisition_mode=acquisition_mode,
+                            evidence_cost=evidence_cost,
+                            discriminative_gain=discriminative_gain,
+                            novelty_score=novelty_score,
+                            recommended_match_score=recommended_match_score,
+                            verifier_recommended_match_score=verifier_recommended_match_score,
+                            hypothesis_recommended_match_score=hypothesis_recommended_match_score,
+                            joint_recommended_match_score=joint_recommended_match_score,
+                            recommended_bonus=recommended_bonus,
+                        )
+                    elif availability == "unknown" and not specific_asked:
+                        # general 已问过但没有明确结果时，不再重复问“有没有做过检查”，
+                        # 只允许退到 lab/imaging/pathogen 这类更具体的检查入口。
+                        self._accumulate_exam_context_action(
+                            exam_context_actions,
+                            exam_kind=exam_kind,
+                            candidate_exam_kind=exam_kind,
+                            row=row,
+                            hypothesis_id=hypothesis_id,
+                            topic_id=topic_id,
+                            priority=priority,
+                            evidence_tags=evidence_tags,
+                            acquisition_mode=acquisition_mode,
+                            evidence_cost=evidence_cost,
+                            discriminative_gain=discriminative_gain,
+                            novelty_score=novelty_score,
+                            recommended_match_score=recommended_match_score,
+                            verifier_recommended_match_score=verifier_recommended_match_score,
+                            hypothesis_recommended_match_score=hypothesis_recommended_match_score,
+                            joint_recommended_match_score=joint_recommended_match_score,
+                            recommended_bonus=recommended_bonus,
+                        )
                     continue
 
             # 低成本可直接问的证据，或检查上下文已知可继续追问的证据，在这里转成真正的 verify action。
@@ -349,7 +383,10 @@ class ActionBuilder:
         acquisition_mode: str,
         evidence_cost: str,
         discriminative_gain: float,
+        novelty_score: float,
         recommended_match_score: float,
+        verifier_recommended_match_score: float,
+        hypothesis_recommended_match_score: float,
         joint_recommended_match_score: float,
         recommended_bonus: float,
     ) -> None:
@@ -369,7 +406,10 @@ class ActionBuilder:
             "priority": float(row.get("priority", priority)),
             "contradiction_priority": float(row.get("contradiction_priority", 0.0)),
             "discriminative_gain": discriminative_gain,
+            "novelty_score": novelty_score,
             "recommended_match_score": recommended_match_score,
+            "verifier_recommended_match_score": verifier_recommended_match_score,
+            "hypothesis_recommended_match_score": hypothesis_recommended_match_score,
             "joint_recommended_match_score": joint_recommended_match_score,
             "recommended_evidence_bonus": recommended_bonus,
         }
@@ -398,6 +438,13 @@ class ActionBuilder:
                     "evidence_cost": evidence_cost,
                     "patient_burden": 0.35,
                     "accessibility_bias": -0.05,
+                    "discriminative_gain": discriminative_gain,
+                    "novelty_score": novelty_score,
+                    "recommended_evidence_bonus": recommended_bonus,
+                    "recommended_match_score": recommended_match_score,
+                    "verifier_recommended_match_score": verifier_recommended_match_score,
+                    "hypothesis_recommended_match_score": hypothesis_recommended_match_score,
+                    "joint_recommended_match_score": joint_recommended_match_score,
                     "exam_candidate_evidence": [candidate_payload],
                     "exam_examples": [candidate_payload["name"]],
                     "evidence_tags": sorted(
@@ -415,6 +462,34 @@ class ActionBuilder:
 
         # 若该类动作已存在，只补充候选证据、示例名称和 family tags，不再新建动作。
         action.prior_score = max(action.prior_score, priority - 0.05)
+        action.metadata["discriminative_gain"] = max(
+            float(action.metadata.get("discriminative_gain", 0.0)),
+            discriminative_gain,
+        )
+        action.metadata["novelty_score"] = max(
+            float(action.metadata.get("novelty_score", 0.0)),
+            novelty_score,
+        )
+        action.metadata["recommended_evidence_bonus"] = max(
+            float(action.metadata.get("recommended_evidence_bonus", 0.0)),
+            recommended_bonus,
+        )
+        action.metadata["recommended_match_score"] = max(
+            float(action.metadata.get("recommended_match_score", 0.0)),
+            recommended_match_score,
+        )
+        action.metadata["verifier_recommended_match_score"] = max(
+            float(action.metadata.get("verifier_recommended_match_score", 0.0)),
+            verifier_recommended_match_score,
+        )
+        action.metadata["hypothesis_recommended_match_score"] = max(
+            float(action.metadata.get("hypothesis_recommended_match_score", 0.0)),
+            hypothesis_recommended_match_score,
+        )
+        action.metadata["joint_recommended_match_score"] = max(
+            float(action.metadata.get("joint_recommended_match_score", 0.0)),
+            joint_recommended_match_score,
+        )
         action.metadata["is_red_flag"] = bool(action.metadata.get("is_red_flag", False)) or bool(
             row.get("is_red_flag", False)
         )

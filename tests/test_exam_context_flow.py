@@ -6,7 +6,7 @@ from brain.hypothesis_manager import HypothesisManager
 from brain.report_builder import ReportBuilder
 from brain.service import BrainDependencies, ConsultationBrain
 from brain.state_tracker import StateTracker
-from brain.types import ExamContextState, HypothesisScore, MctsAction, PatientContext
+from brain.types import ExamContextState, HypothesisScore, LinkedEntity, MctsAction, PatientContext
 
 
 class ExamFlowRetriever:
@@ -45,17 +45,34 @@ class FakeExamContextLlmClient:
         return dict(self.payload)
 
 
+class FakeExamEntityLinker:
+    """模拟检查结果原文到图谱证据节点的可信链接。"""
+
+    def __init__(self, mapping: dict[str, LinkedEntity]) -> None:
+        self.mapping = mapping
+
+    def link_mentions(self, mentions: list[str]) -> list[LinkedEntity]:
+        return [
+            self.mapping.get(
+                mention,
+                LinkedEntity(mention=mention, metadata={"raw_mention": mention}),
+            )
+            for mention in mentions
+        ]
+
+
 def _build_brain(
     tracker: StateTracker,
     rows: list[dict] | None = None,
     llm_client: object | None = None,
+    entity_linker: object | None = None,
 ) -> ConsultationBrain:
     return ConsultationBrain(
         BrainDependencies(
             state_tracker=tracker,
             retriever=ExamFlowRetriever(rows),
             med_extractor=object(),
-            entity_linker=object(),
+            entity_linker=entity_linker or object(),
             question_selector=object(),
             stop_rule_engine=object(),
             report_builder=ReportBuilder(),
@@ -176,6 +193,62 @@ def test_service_exam_context_done_with_result_updates_slot_and_state() -> None:
     assert state.slots["lab_cd4_low"].status == "true"
 
 
+# 检查上下文回答里的结果原文即使不在当前候选列表里，也应通过实体链接写入图谱证据状态。
+def test_service_exam_context_generic_result_link_updates_evidence_state_without_general_repeat() -> None:
+    tracker = StateTracker()
+    state = tracker.create_session("s_exam_generic_link")
+    state.candidate_hypotheses = [HypothesisScore(node_id="vzv", label="Disease", name="VZV脑炎", score=1.0)]
+    tracker.set_pending_action("s_exam_generic_link", _collect_lab_action())
+    tracker.mark_question_asked("s_exam_generic_link", "__exam_context__::general")
+    brain = _build_brain(
+        tracker,
+        llm_client=FakeExamContextLlmClient(
+            {
+                "availability": "done",
+                "mentioned_tests": [],
+                "mentioned_results": [
+                    {
+                        "test_name": "病原学检查",
+                        "raw_text": "水痘-带状疱疹病毒",
+                        "normalized_result": "positive",
+                    }
+                ],
+                "needs_followup": True,
+                "followup_reason": "结果已给出但未命中当前候选。",
+                "reasoning": "患者说做过检查，提示水痘-带状疱疹病毒。",
+            }
+        ),
+        entity_linker=FakeExamEntityLinker(
+            {
+                "水痘-带状疱疹病毒": LinkedEntity(
+                    mention="水痘-带状疱疹病毒",
+                    node_id="pathogen_vzv",
+                    canonical_name="水痘-带状疱疹病毒",
+                    similarity=1.0,
+                    is_trusted=True,
+                    label="Pathogen",
+                    metadata={"link_source": "direct"},
+                )
+            }
+        ),
+    )
+
+    _, _, route_after_pending_action, updates = brain.update_from_pending_action(
+        "s_exam_generic_link",
+        PatientContext(raw_text="做过，结果提示水痘-带状疱疹病毒。"),
+        "做过，结果提示水痘-带状疱疹病毒。",
+        turn_index=2,
+    )
+
+    state = tracker.get_session("s_exam_generic_link")
+    assert route_after_pending_action.stage == "A3"
+    assert [update.node_id for update in updates] == ["pathogen_vzv"]
+    assert state.slots["pathogen_vzv"].status == "true"
+    assert state.evidence_states["pathogen_vzv"].existence == "exist"
+    assert state.evidence_states["pathogen_vzv"].metadata["source_stage"] == "A4_EXAM_CONTEXT_GENERIC_LINK"
+    assert "exam_context_followup_action" not in state.metadata
+
+
 # 患者做过且只给出检查名时，应优先生成具体结果追问，而不是泛化澄清。
 def test_service_exam_context_with_test_name_builds_specific_result_followup() -> None:
     tracker = StateTracker()
@@ -210,6 +283,38 @@ def test_service_exam_context_with_test_name_builds_specific_result_followup() -
     assert "CD4" in followup_action.metadata["question_text"]
     assert followup_action.metadata["exam_kind"] == "lab"
     assert followup_action.metadata["source_exam_kind"] == "general"
+
+
+# 已问过 general 且回答没有新增检查名/结果时，不应继续挂同一个 general follow-up。
+def test_service_exam_context_does_not_repeat_general_followup() -> None:
+    tracker = StateTracker()
+    tracker.create_session("s_exam_no_repeat")
+    tracker.set_pending_action("s_exam_no_repeat", _collect_lab_action())
+    tracker.mark_question_asked("s_exam_no_repeat", "__exam_context__::general")
+    brain = _build_brain(
+        tracker,
+        llm_client=FakeExamContextLlmClient(
+            {
+                "availability": "done",
+                "mentioned_tests": [],
+                "mentioned_results": [],
+                "needs_followup": True,
+                "followup_reason": "患者只说做过检查。",
+                "reasoning": "患者没有补充检查名或结果。",
+            }
+        ),
+    )
+
+    brain.update_from_pending_action(
+        "s_exam_no_repeat",
+        PatientContext(raw_text="做过检查，但不记得具体有哪些。"),
+        "做过检查，但不记得具体有哪些。",
+        turn_index=2,
+    )
+
+    state = tracker.get_session("s_exam_no_repeat")
+    assert state.exam_context["general"].availability == "done"
+    assert "exam_context_followup_action" not in state.metadata
 
 
 # 患者明确没做过检查时，应记录 not_done，且不生成具体结果追问。

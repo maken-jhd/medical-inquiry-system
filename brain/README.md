@@ -70,6 +70,7 @@
   - 统一封装第二阶段大模型结构化调用。
   - 当前供 `MedExtractor`、`turn_interpreter`、`A1` 抽取、`A2` 假设排序、`exam_context` 解释和轨迹 verifier 复用。
   - 当前会统一处理结构化 prompt 的单次重试，并把超时、输出非法、空抽取等情况转换为显式领域错误。
+  - 当前 `turn_interpreter` prompt 已明确区分高成本检查/疾病定义性证据的“未检查、没听说”和“结果明确阴性”，前者按 `unclear` 处理，避免缺槽位回答被误写成 hard negative。
 
 - [errors.py](/Users/loki/Workspace/GraduationDesign/brain/errors.py)
   - 定义 LLM-first 链路下统一对外暴露的领域错误。
@@ -78,6 +79,7 @@
 - [normalization.py](/Users/loki/Workspace/GraduationDesign/brain/normalization.py)
   - 集中维护 alias、canonical name 和常见口语映射。
   - 当前供 `MedExtractor`、`A1`、`exam_context` 和 `EntityLinker` 共用，避免各模块各自维护一套零散词典。
+  - 当前新增 `expand_graph_mentions()`，用于把患者口语表达扩展成若干图谱候选 surface form，例如 CD4 低值、HIV RNA 阳性、下肢/双足发麻、药物使用和腹型肥胖等接口层表达。
 
 - [state_tracker.py](/Users/loki/Workspace/GraduationDesign/brain/state_tracker.py)
   - 负责维护会话中的槽位状态。
@@ -104,6 +106,7 @@
   - 负责和知识图谱交互，提供候选节点、候选假设和验证证据的查询入口。
   - 当前已经实现论文风格的 `R1 / R2` 双向检索基础版。
   - `R1` 已增加方向语义权重与实体链接相似度融合。
+  - `R1` 当前会额外估计 `disease_specific_anchor_score`，让病原体、HIV RNA、关键检查结果等更能区分目标疾病的强证据，压过 CD4/HIV 背景这类共享泛证据。
   - `R2` 已支持方向优先、已问节点过滤与问题类型提示。
 
 - [question_selector.py](/Users/loki/Workspace/GraduationDesign/brain/question_selector.py)
@@ -123,6 +126,12 @@
   - 当前已经串联 `turn_interpreter -> mention merge -> A1 -> A2 -> R2/A3 -> rollout -> report` 的搜索闭环。
   - 当前也是读取 [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml) 并构造默认依赖的入口。
   - `process_turn()` 当前已按“统一解释本轮回答 -> 消化上一轮 pending action -> 判断本轮阶段 -> search / verifier / repair -> 输出下一问或最终报告”的顺序补充分段中文注释，便于顺着源码阅读控制流。
+  - 当前会先把可信实体链接回填到 `mention.node_id / normalized_name`，再派生 `PatientContext` 和 `A1`，保证 opening 证据、slot 更新、R1 和 mention_context 使用同一图谱锚点。
+  - 当前会把 `exam_context` 回答中的检查名与结果原文再次送入实体链接；可信命中 `LabFinding / ImagingFinding / Pathogen` 时直接写入 slot/evidence_state，且不再围绕 `__exam_context__::general` 重复追问。
+  - 当前病原体阳性、影像/化验阳性、CD4 低值等强证据进入后，会设置 `force_a2_refresh` 和 `force_tree_refresh`，促使下一步重新执行 A2 并围绕新强证据收束。
+  - 当前 verifier / guarded repair 会区分 `hard_negative_key_evidence` 与 `strong_unresolved_alternative_candidates`：前者优先围绕当前答案的推荐锚点化解硬反证，后者才进入竞争诊断动作池。
+  - 当前 verifier 上下文会携带累计真实会话证据 `observed_session_evidence`，避免把 rollout 模拟路径里的阳性检查当作患者已经确认的事实。
+  - 当 rollout 没有形成具体最终答案、或只形成 `UNKNOWN` 答案组时，当前会从 A2 候选态生成保守 `FinalAnswerScore`，避免 top hypothesis 已存在但 `best_answer=None`。
 
 ### 3. 核心解释与决策模块
 
@@ -138,24 +147,29 @@
   - 再由这些 `mentions` 派生首轮检索线索，并解释上一轮目标动作的回答结果。
   - `A1` 当前只输出 `key_features + selection_decision`，不再输出 `uncertain_features / noise_features` 一类历史契约。
   - 当前会输出 `supporting_span / negation_span / uncertain_span`，长回答统一走 `turn_interpreter`；`exam_context_interpretation` 仍保留给检查上下文动作。
+  - 当前对高成本检查 / 病原 / 定义性证据的否定短答，会优先交回 `turn_interpreter` prompt 做语义判断，避免“没做过检查”和“结果明确阴性”被同一个直通规则混在一起。
   - 当前不再把长回答静默退回规则词典；LLM 失败会直接向上抛出领域错误。
 
 - [entity_linker.py](/Users/loki/Workspace/GraduationDesign/brain/entity_linker.py)
   - 对齐论文里的实体链接与阈值过滤。
   - 负责把 mention 对齐到图谱节点，并决定当前是否可信地启用 KG。
   - 当前在入图前会先消费集中式 normalization 结果，减少 `艾滋病 -> HIV感染`、`咳嗽 -> 干咳` 这类名称不齐造成的漏连。
+  - 当前会对单个 mention 查询多个扩展 surface form，并在结果 metadata 中记录 `expanded_mentions / matched_mention / link_source / template_match`，便于排查患者表达到图谱节点的对接质量。
 
 - [hypothesis_manager.py](/Users/loki/Workspace/GraduationDesign/brain/hypothesis_manager.py)
   - 对应 `A2` 假设生成。
   - 负责整理由图谱检索得到的候选疾病，并维护主假设与备选假设。
   - 当前已能结合患者上下文和证据类型做轻量重排。
   - 若启用 LLM 排序，还会把 `supporting_features / conflicting_features / recommended_next_evidence` 写入 metadata。
+  - 当前 repair 重排能识别 guarded 细粒度拒停原因，对硬反证、强备选未排除、关键支持缺失分别施加不同分数调整。
 
 - [action_builder.py](/Users/loki/Workspace/GraduationDesign/brain/action_builder.py)
   - 对应 `A3` 证据验证的动作生成层。
   - 负责把图谱返回的验证证据转成“下一步可执行动作”。
   - 当前已支持结合 competing hypotheses 估计 `discriminative_gain`。
   - 当前也会消费 `recommended_next_evidence`，让动作更贴近鉴别诊断。
+  - 当前高成本检查聚合成 `collect_general_exam_context` 时，也会把推荐证据命中分、区分度和新颖度提到动作顶层，保证 repair scorer 真正读到 verifier 推荐缺口。
+  - 当前检查上下文已经带状态门控：`general` 已回答后不再生成 `collect_general_exam_context`，具体 `lab / imaging / pathogen` 已明确未做时会跳过对应高成本结果追问。
 
 - [router.py](/Users/loki/Workspace/GraduationDesign/brain/router.py)
   - 对应上一轮动作解释后的代码级路由。
@@ -179,6 +193,8 @@
   - `diversity` 已从“唯一动作数”升级为基于轨迹相似度的组内平均差异。
   - `agent_evaluation` 当前支持 `fallback` 与可选 `llm_verifier` 两种模式。
   - 当前 `llm_verifier` 会和 stop rule 的最早接受窗口对齐：如果 `turn_index` 或 `trajectory_count` 还未达到可接受最终答案的最低条件，就先延后 verifier，临时使用 fallback 评分，避免早期 A3 追问每轮都重复触发高成本 verifier。
+  - 当前 `trajectory_agent_verifier` 会显式区分 `observed_session_evidence` 与 `simulated_trajectory_evidence`；若接受理由只依赖 rollout 模拟阳性强证据、真实会话没有当前答案的特异支持，会被二次 guard 改为 `missing_key_support` 拒停。
+  - 当前支持 `score_candidate_hypotheses_without_trajectories()`，用于在轨迹聚合断层时把现有候选疾病转成低分、不可直接停机的 answer score，供 repair / 下一问继续使用。
 
 ### 5. 辅助文件
 

@@ -86,6 +86,16 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="每个疾病最多生成多少个竞争病例。",
     )
+    parser.add_argument(
+        "--minimum-evidence-groups-file",
+        default=GraphCaseGeneratorConfig.minimum_evidence_groups_file,
+        help="full-evidence catalog 导出的 disease_minimum_evidence_groups.json；为空则只使用内置兜底规则。",
+    )
+    parser.add_argument(
+        "--minimum-evidence-group-match-by-name",
+        action="store_true",
+        help="当 disease_id 未命中 catalog 时，允许用疾病名称匹配最低证据组。",
+    )
     return parser.parse_args()
 
 
@@ -101,6 +111,8 @@ def main() -> int:
         competitive_min_target_only_pool=args.competitive_min_target_only_pool,
         competitive_min_competitor_negative_pool=args.competitive_min_competitor_negative_pool,
         max_competitors_per_disease=args.max_competitors_per_disease,
+        minimum_evidence_groups_file=args.minimum_evidence_groups_file,
+        minimum_evidence_group_match_by_name=args.minimum_evidence_group_match_by_name,
     )
     generator = GraphCaseGenerator(config=config)
     audit_root = Path(args.audit_root).resolve()
@@ -129,6 +141,7 @@ def main() -> int:
         "summary_file": str(summary_file),
         "generated_case_count": result.manifest["generated_case_count"],
         "generated_case_count_by_type": result.manifest["generated_case_count_by_type"],
+        "minimum_evidence_requirement_catalog": result.manifest["minimum_evidence_requirement_catalog"],
         "skipped_case_count_by_reason": result.manifest["skipped_case_count_by_reason"],
         "valid_disease_report_count": result.manifest["valid_disease_report_count"],
         "invalid_disease_report_count": result.manifest["invalid_disease_report_count"],

@@ -48,6 +48,8 @@ class EvidenceParser:
     ) -> TurnInterpretationResult:
         if pending_action is not None:
             direct_reply = self._classify_direct_reply(patient_text)
+            if self._should_defer_direct_reply_to_llm(patient_text, pending_action, direct_reply):
+                direct_reply = None
             if direct_reply is not None:
                 return self._build_direct_reply_turn_result(patient_text, pending_action, direct_reply)
 
@@ -60,6 +62,8 @@ class EvidenceParser:
                 "patient_text": patient_text,
                 "previous_question_text": str(pending_action.metadata.get("question_text") or "") if pending_action is not None else "",
                 "pending_target_name": pending_action.target_node_name if pending_action is not None else "",
+                "pending_target_label": pending_action.target_node_label if pending_action is not None else "",
+                "pending_action_type": pending_action.action_type if pending_action is not None else "",
                 "pending_target_aliases": (
                     self._candidate_target_aliases(pending_action.target_node_name, pending_action)
                     if pending_action is not None
@@ -67,6 +71,21 @@ class EvidenceParser:
                 ),
                 "question_type": (
                     str(pending_action.metadata.get("question_type_hint") or pending_action.action_type or "")
+                    if pending_action is not None
+                    else ""
+                ),
+                "acquisition_mode": (
+                    str(pending_action.metadata.get("acquisition_mode") or "")
+                    if pending_action is not None
+                    else ""
+                ),
+                "evidence_cost": (
+                    str(pending_action.metadata.get("evidence_cost") or "")
+                    if pending_action is not None
+                    else ""
+                ),
+                "relation_type": (
+                    str(pending_action.metadata.get("relation_type") or "")
                     if pending_action is not None
                     else ""
                 ),
@@ -1233,6 +1252,41 @@ class EvidenceParser:
                 return "uncertain"
 
         return None
+
+    # 高成本检查/定义性证据的否定短答容易同时表达“没检查”和“结果阴性”两种语义；
+    # 这类回答交回 LLM prompt 结合 question_type、label 和 acquisition_mode 判定。
+    def _should_defer_direct_reply_to_llm(
+        self,
+        patient_text: str,
+        action: MctsAction,
+        direct_reply: str | None,
+    ) -> bool:
+        if direct_reply != "negative":
+            return False
+
+        if action.action_type != "verify_evidence":
+            return False
+
+        if self.llm_client is None or not self.llm_client.is_available():
+            return False
+
+        label = str(action.target_node_label or "")
+        question_type = str(action.metadata.get("question_type_hint") or "")
+        acquisition_mode = str(action.metadata.get("acquisition_mode") or "")
+        evidence_cost = str(action.metadata.get("evidence_cost") or "")
+        relation_type = str(action.metadata.get("relation_type") or "")
+
+        if (
+            label in {"LabFinding", "LabTest", "ImagingFinding", "Pathogen"}
+            or question_type in {"lab", "imaging", "pathogen"}
+            or acquisition_mode in {"needs_lab_test", "needs_imaging", "needs_pathogen_test"}
+            or evidence_cost == "high"
+            or relation_type in {"DIAGNOSED_BY", "HAS_PATHOGEN", "HAS_LAB_FINDING", "HAS_IMAGING_FINDING"}
+        ):
+            return True
+
+        _ = patient_text
+        return False
 
     def _coerce_resolution_value(self, value: object) -> str:
         normalized = str(value or "").strip()

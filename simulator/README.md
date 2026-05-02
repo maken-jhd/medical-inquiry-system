@@ -30,16 +30,28 @@
 - [graph_case_generator.py](/Users/loki/Workspace/GraduationDesign/simulator/graph_case_generator.py)
   - 用于把疾病级图谱审计结果转换成图谱驱动的虚拟病人病例骨架。
   - 当前支持 `ordinary / low_cost / exam_driven / competitive` 四类病例。
+  - 当前会优先读取 `disease_minimum_evidence_groups.json`，用 full-evidence catalog 为每个疾病提供最低 evidence family 约束；catalog 缺失或 disease_id 不命中时，才回退到内置 PCP / IRIS / CNS / 代谢类规则。
+  - 生成病例时会先按 catalog family 约束选择阳性槽位，再按原 priority / specificity 补满；如果 catalog 要求的 family 不存在于当前 disease audit 证据池，会记录到 `benchmark_catalog_unavailable_family_groups`，不把不可选证据计入病例 QC 缺失项。
+  - 当前会为病例生成 benchmark evidence-family QC 元数据，把证据映射到 `immune_status / respiratory_symptom / imaging / oxygenation / fungal_marker / pathogen / neurologic_symptom / art_or_reconstitution / worsening / metabolic_definition` 等可审计证据族。
+  - 竞争病例的阴性槽位会过滤与目标病名称、目标病核心定义或已选阳性互斥 family 冲突的证据，避免把目标病本身写成阴性。
   - `competitive` 病例当前会主动过滤 `HIV感染 / HIV感染者 / 抗逆转录病毒治疗 / 免疫功能低下` 这类背景风险 opening，并优先回退到目标病自己的症状、具体检查结果或疾病名，避免把背景信息直接渲染成主诉。
   - 会同时输出 `cases.jsonl`、`cases.json`、`manifest.json` 和 `summary.md`。
+
+- [evidence_family_catalog.py](/Users/loki/Workspace/GraduationDesign/simulator/evidence_family_catalog.py)
+  - 用于把 Neo4j 中的证据节点归入可审计 evidence family。
+  - 当前支持 symptom、risk、detail、lab、imaging、pathogen 六个证据大组；症状侧覆盖呼吸、神经、全身、消化、皮肤黏膜、口腔耳鼻咽喉、淋巴、泌尿生殖、肌肉骨骼、心血管、血液/出血、眼部、代谢、精神心理、免疫状态、病情恶化和重症线索等 family。
+  - 检查侧覆盖 CD4 / viral load / oxygenation / fungal marker / CNS lab / disease-specific lab / serology / pathology / pulmonary imaging / CNS imaging / pathogen subtype 等 family；risk/detail 侧覆盖 ART、基础感染、暴露风险、用药风险、合并症、病程时间、严重度和治疗反应等 family。
+  - 会基于每个疾病关联到的 evidence family，生成 symptom-only 和 full-evidence 两种 `minimum_evidence_groups` 建议；当前结果用于人工检查和后续接入病例生成器，不直接改变 `brain` 推理逻辑。
 
 ### 2. 病人代理
 
 - [patient_agent.py](/Users/loki/Workspace/GraduationDesign/simulator/patient_agent.py)
   - 负责模拟“虚拟病人如何回答问题”。
   - 当前已支持根据病例骨架中的 opening slots 生成首轮开场，并在问答中遵循“未被问到不主动透露、敏感信息可回避、未知项不乱答”的行为规则。
+  - 当前 LLM 生成 opening 时会校验检查类关键锚点；如果把 `CD4 < 200`、`HIV RNA阳性`、具体病原体名或影像异常压缩成笼统“异常/偏低”，会退回规则模板，保证首轮证据更容易被 brain 链接进图谱。
   - 当前已支持 `__exam_context__::general/lab/imaging/pathogen` 检查上下文回答：`general` 会汇总 lab / imaging / pathogen 槽位，具体类型只汇总对应槽位；优先回答最多 3 条阳性检查结果，没有阳性但有阴性时回答最多 3 条阴性结果，无相关检查槽位时才回到 unknown。
   - 当前在精确匹配失败且配置了可用 LLM 时，会调用 `patient_slot_semantic_match`，只允许在病例已有 `candidate_slots` 内做医学语义等价匹配；匹配成功后按该槽位真值回答，匹配失败时给出简短明确否定且不揭示槽位。
+  - 当前 no-match prompt 已区分普通症状和高成本检查/疾病定义性证据：后者缺槽位时倾向回答“没做过这项检查 / 没听医生提过 / 报告里没注意到”，交给 brain 解析成 `unclear`，不默认制造明确阴性。
   - 在配置了可用 LLM 时，会使用受约束的 LLM 生成更自然的患者表达；否则退回规则模板。
 
 ### 3. 自动对战与评测
@@ -72,8 +84,14 @@
 - 已具备一批可直接跑的 seed cases
 - 已具备基于疾病审计结果的图谱驱动病例骨架生成器
 - 病人代理已支持骨架驱动开场、检查上下文汇总回答和候选内语义匹配受约束回答
+- 病人 opening 的检查类关键锚点会被显式保留，避免首轮证据在自然语言压缩后丢失图谱锚点
+- 检查/病原/疾病定义性问题 no-match 时不再默认强阴性，降低缺槽位对 guarded acceptance 的误伤
 - 自动回放和基础评测已经能批量跑通
-- 当前图谱驱动病例正式输出已固定落盘到 `test_outputs/simulator_cases/graph_cases_20260426_final/`，并补充了固定随机种子的四类各 5 条抽样结果，便于人工复核
+- 当前图谱驱动病例 catalog-QC 正式输出已固定落盘到 `test_outputs/simulator_cases/graph_cases_20260502_catalog_qc/`，并可按固定随机种子抽取四类各 5 条样本，便于人工复核
+- 当前新增 10 例 smoke 输入到 `test_outputs/simulator_cases/graph_cases_20260502_catalog_qc/smoke10/`；该批按 `ordinary=3 / low_cost=2 / exam_driven=3 / competitive=2` 均衡抽样，全部来自 `benchmark_qc_status=eligible` 病例
+- 当前已根据本机 Neo4j 导出症状证据族目录到 `test_outputs/evidence_family/disease_symptom_catalog_20260502/`，其中包含 disease-symptom 查看版 Markdown、症状节点分类 JSON 和每个疾病的 symptom-only 最低证据组建议
+- 当前已根据本机 Neo4j 导出全证据族目录到 `test_outputs/evidence_family/disease_evidence_catalog_20260502/`，其中包含 symptom / risk / detail / lab / imaging / pathogen 六类证据节点和每个疾病的 full-evidence 最低证据组建议
+- 当前已将 full-evidence 最低证据组接入病例生成器，并重新生成病例集到 `test_outputs/simulator_cases/graph_cases_20260502_catalog_qc/`
 - 路径缓存仍然是后续待完成模块
 
 因此，这个目录当前更适合被理解为：
@@ -123,6 +141,15 @@
 
 - [generate_graph_virtual_patients.py](/Users/loki/Workspace/GraduationDesign/scripts/generate_graph_virtual_patients.py)
   - 使用疾病级图谱审计输出生成图谱驱动虚拟病人病例。
+  - 当前支持 `--minimum-evidence-groups-file` 指定 full-evidence catalog 约束文件；默认读取 `test_outputs/evidence_family/disease_evidence_catalog_20260502/disease_minimum_evidence_groups.json`。
+
+- [export_disease_symptom_family_catalog.py](/Users/loki/Workspace/GraduationDesign/scripts/export_disease_symptom_family_catalog.py)
+  - 连接当前 Neo4j，导出 `Disease` 与 `ClinicalFinding` 之间的 `MANIFESTS_AS` 关系。
+  - 输出 `disease_symptom_family_catalog.json/md`、`symptom_family_nodes.json` 和 `disease_minimum_symptom_groups.json`，便于先人工检查症状分类，再决定如何把结果接入病例生成器。
+
+- [export_disease_evidence_family_catalog.py](/Users/loki/Workspace/GraduationDesign/scripts/export_disease_evidence_family_catalog.py)
+  - 连接当前 Neo4j，导出 `Disease` 与 `ClinicalFinding / RiskFactor / PopulationGroup / ClinicalAttribute / LabFinding / LabTest / ImagingFinding / Pathogen` 的核心证据关系。
+  - 输出 `disease_evidence_family_catalog.json/md`、`evidence_family_nodes.json` 和 `disease_minimum_evidence_groups.json`，作为后续全疾病 benchmark QC 的候选约束底稿。
 
 - [sample_graph_virtual_patients.py](/Users/loki/Workspace/GraduationDesign/scripts/sample_graph_virtual_patients.py)
   - 从 `cases.json` 或 `cases.jsonl` 中按病例类型固定抽样，输出 `sampled_cases_4x5.json` 和 `sampled_cases_4x5.md`，用于人工检查 opening 与 positive slots 质量。

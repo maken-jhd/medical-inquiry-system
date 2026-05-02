@@ -1042,6 +1042,8 @@ process_turn()
 1. 提炼拒停原因
    - `missing_key_support`
    - `strong_alternative_not_ruled_out`
+   - `strong_unresolved_alternative_candidates`
+   - `hard_negative_key_evidence`
    - `trajectory_insufficient`
 2. 根据拒停原因重排 hypothesis
 3. 显式挑一个最适合“补证据缺口”的下一问

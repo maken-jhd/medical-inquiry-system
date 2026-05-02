@@ -1,7 +1,7 @@
 """测试轨迹评估器的分组评分与最佳答案选择。"""
 
 from brain.trajectory_evaluator import TrajectoryEvaluator, TrajectoryEvaluatorConfig
-from brain.types import PatientContext, ReasoningTrajectory
+from brain.types import HypothesisScore, PatientContext, ReasoningTrajectory
 
 
 # 验证轨迹评估器会优先选择轨迹数量更多且得分更高的答案。
@@ -81,6 +81,30 @@ class InvalidReasonVerifierClient:
         }
 
 
+class SimulatedEvidenceAcceptingVerifierClient:
+    """模拟 verifier 试图把 rollout 阳性当成真实已确认事实。"""
+
+    def is_available(self) -> bool:
+        return True
+
+    def run_structured_prompt(self, prompt_name: str, variables: dict, schema: type) -> dict:
+        assert prompt_name == "trajectory_agent_verifier"
+        assert "observed_session_evidence" in variables
+        assert "simulated_trajectory_evidence" in variables
+        _ = schema
+        return {
+            "score": 0.93,
+            "should_accept_stop": True,
+            "reject_reason": "missing_key_support",
+            "reasoning": "rollout 假设已经拿到关键阳性证据。",
+            "missing_evidence": [],
+            "risk_flags": [],
+            "recommended_next_evidence": ["痰分枝杆菌培养"],
+            "alternative_candidates": [],
+            "accept_reason": "key_support_sufficient",
+        }
+
+
 # 验证当启用 llm_verifier 模式时，agent evaluation 会消费 verifier 分数。
 def test_trajectory_evaluator_supports_llm_verifier_mode() -> None:
     evaluator = TrajectoryEvaluator(
@@ -133,6 +157,70 @@ def test_trajectory_evaluator_marks_invalid_verifier_reject_reason_schema() -> N
     assert scores[0].metadata["verifier_reject_reason"] == "strong_alternative_not_ruled_out"
     assert scores[0].metadata["verifier_reject_reason_source"] == "fallback_inferred"
     assert scores[0].metadata["verifier_schema_valid"] is False
+
+
+# 验证 rollout 模拟阳性不能替代真实会话已确认证据来触发 stop。
+def test_trajectory_evaluator_blocks_acceptance_when_only_simulated_key_evidence_exists() -> None:
+    evaluator = TrajectoryEvaluator(
+        TrajectoryEvaluatorConfig(agent_eval_mode="llm_verifier"),
+        llm_client=SimulatedEvidenceAcceptingVerifierClient(),  # type: ignore[arg-type]
+    )
+    trajectories = [
+        ReasoningTrajectory(
+            trajectory_id="t1",
+            final_answer_id="tb",
+            final_answer_name="活动性结核病",
+            steps=[
+                {"stage": "A3", "action_id": "a1", "action_name": "痰分枝杆菌培养", "question_type_hint": "lab"},
+                {"stage": "PENDING_ACTION", "polarity": "present", "resolution": "clear", "answer_branch": "positive"},
+            ],
+            score=0.9,
+        )
+    ]
+    patient_context = PatientContext(
+        raw_text="发热伴咳嗽",
+        metadata={"observed_session_evidence": []},
+    )
+
+    grouped = evaluator.group_by_answer(trajectories)
+    scores = evaluator.score_groups(grouped, patient_context=patient_context)
+
+    assert scores[0].metadata["verifier_should_accept"] is False
+    assert scores[0].metadata["verifier_reject_reason"] == "missing_key_support"
+    assert scores[0].metadata["verifier_reject_reason_source"] == "observed_evidence_guard"
+    assert scores[0].metadata["verifier_acceptance_blocked_by_observed_evidence_guard"] is True
+
+
+# 验证没有 rollout 轨迹时，候选态兜底也能生成保守的 final answer score。
+def test_trajectory_evaluator_scores_candidate_hypotheses_without_trajectories() -> None:
+    evaluator = TrajectoryEvaluator()
+    hypotheses = [
+        HypothesisScore(node_id="d1", label="Disease", name="水痘-带状疱疹病毒感染", score=0.92, metadata={}),
+        HypothesisScore(node_id="d2", label="Disease", name="结核病", score=0.8, metadata={}),
+    ]
+    patient_context = PatientContext(
+        raw_text="发热",
+        metadata={
+            "observed_session_evidence": [
+                {
+                    "source": "observed_evidence_state",
+                    "node_id": "vzb",
+                    "name": "水痘-带状疱疹病毒",
+                    "polarity": "present",
+                    "existence": "exist",
+                    "resolution": "clear",
+                    "relation_type": "HAS_PATHOGEN",
+                }
+            ]
+        },
+    )
+
+    scores = evaluator.score_candidate_hypotheses_without_trajectories(hypotheses, patient_context=patient_context)
+
+    assert len(scores) == 2
+    assert scores[0].answer_id == "d1"
+    assert scores[0].metadata["answer_score_source"] == "candidate_state_fallback"
+    assert scores[0].metadata["trajectory_count"] == 0
 
 
 # 验证在未达到可终止观察窗口前，llm verifier 会延后到后续轮次再调用。

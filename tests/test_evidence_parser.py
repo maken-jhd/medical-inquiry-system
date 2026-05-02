@@ -114,6 +114,57 @@ def test_pending_action_short_direct_reply_skips_llm() -> None:
     assert interpretation.metadata["interpretation_source"] == "turn_interpreter"
 
 
+# 验证高成本检查的否定短答会交回 LLM 解析，不再被直接截成明确 absent。
+def test_pending_action_high_cost_negative_reply_defers_to_llm_as_unclear() -> None:
+    class FakeLlmClient:
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
+        def is_available(self) -> bool:
+            return True
+
+        def run_structured_prompt(self, prompt_name: str, variables: dict, schema):
+            self.prompts.append(prompt_name)
+            _ = variables, schema
+            if prompt_name == "turn_interpreter":
+                return {
+                    "mentions": [
+                        {
+                            "name": "头颅CT低密度病灶",
+                            "polarity": "unclear",
+                            "evidence_span": "没做过这项检查",
+                            "reasoning": "患者描述的是未做检查而不是明确阴性结果。",
+                        }
+                    ],
+                    "reasoning_summary": "高成本检查的否定短答应按未检查/不确定处理。",
+                }
+            return {}
+
+    client = FakeLlmClient()
+    parser = EvidenceParser(llm_client=client)
+    action = MctsAction(
+        action_id="a6",
+        action_type="verify_evidence",
+        target_node_id="node_ct",
+        target_node_label="ImagingFinding",
+        target_node_name="头颅CT低密度病灶",
+        hypothesis_id="d1",
+        topic_id="Disease",
+        metadata={
+            "question_type_hint": "imaging",
+            "acquisition_mode": "needs_imaging",
+            "evidence_cost": "high",
+            "relation_type": "HAS_IMAGING_FINDING",
+        },
+    )
+
+    interpretation = parser.derive_pending_action_result_from_text("没做过这项检查。", action)
+
+    assert client.prompts == ["turn_interpreter"]
+    assert interpretation.polarity == "unclear"
+    assert interpretation.resolution == "hedged"
+
+
 def test_pending_action_unclear_answer_marks_hedged() -> None:
     class FakeLlmClient:
         def __init__(self) -> None:

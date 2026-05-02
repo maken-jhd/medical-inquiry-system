@@ -1,6 +1,6 @@
 """测试图谱检索器的 R1 / R2 基础行为。"""
 
-from brain.retriever import GraphRetriever
+from brain.retriever import GraphRetriever, RetrievalConfig
 from brain.types import EvidenceState, HypothesisScore, KeyFeature, SessionState, SlotState
 
 
@@ -134,6 +134,120 @@ def test_retriever_tightens_r1_candidate_semantics() -> None:
     assert len(candidates) == 1
     assert candidates[0].node_id == "disease_good"
     assert candidates[0].metadata["feature_coverage"] > 0.6
+
+
+class DiseaseSpecificAnchorFakeNeo4jClient(FakeNeo4jClient):
+    """提供病原体锚点和泛化免疫锚点，验证 R1 更偏向疾病特异证据。"""
+
+    def run_query(self, query: str, params: dict | None = None) -> list[dict]:
+        self.last_query = query
+        self.last_params = params or {}
+
+        if "MATCH (feature)-[r]->(candidate)" in query:
+            return [
+                {
+                    "node_id": "disease_kaposi",
+                    "label": "Disease",
+                    "name": "卡波西肉瘤",
+                    "relation_count": 1.0,
+                    "matched_feature_count": 1,
+                    "candidate_weight": 1.0,
+                    "direction_confidence": 1.0,
+                    "relation_types": ["HAS_LAB_FINDING"],
+                    "evidence_names": ["CD4+ T淋巴细胞计数 < 200/μL"],
+                    "evidence_labels": ["LabFinding"],
+                    "evidence_node_ids": ["lab_cd4_low"],
+                },
+                {
+                    "node_id": "disease_toxo",
+                    "label": "Disease",
+                    "name": "弓形虫病",
+                    "relation_count": 1.0,
+                    "matched_feature_count": 1,
+                    "candidate_weight": 0.8,
+                    "direction_confidence": 1.0,
+                    "relation_types": ["HAS_PATHOGEN"],
+                    "evidence_names": ["刚地弓形虫"],
+                    "evidence_labels": ["Pathogen"],
+                    "evidence_node_ids": ["pathogen_toxo"],
+                },
+            ]
+
+        return super().run_query(query, params)
+
+
+# 验证病原体/疾病名强相关证据会压过 CD4 这类共享免疫背景证据。
+def test_retriever_prioritizes_disease_specific_anchor_over_generic_cd4() -> None:
+    retriever = GraphRetriever(
+        DiseaseSpecificAnchorFakeNeo4jClient(),
+        RetrievalConfig(r1_min_semantic_score=0.0),
+    )
+    key_features = [
+        KeyFeature(name="CD4低", normalized_name="CD4+ T淋巴细胞计数 < 200/μL"),
+        KeyFeature(name="刚地弓形虫", normalized_name="刚地弓形虫"),
+    ]
+
+    candidates = retriever.retrieve_r1_candidates(key_features)
+
+    assert [candidate.node_id for candidate in candidates[:2]] == ["disease_toxo", "disease_kaposi"]
+    assert candidates[0].metadata["disease_specific_anchor_score"] > candidates[1].metadata["disease_specific_anchor_score"]
+
+
+class HivSpecificAnchorFakeNeo4jClient(FakeNeo4jClient):
+    """提供 HIV 病原锚点与泛化 CD4 背景，验证 R1 更偏向疾病特异证据。"""
+
+    def run_query(self, query: str, params: dict | None = None) -> list[dict]:
+        self.last_query = query
+        self.last_params = params or {}
+
+        if "MATCH (feature)-[r]->(candidate)" in query:
+            return [
+                {
+                    "node_id": "disease_hiv",
+                    "label": "Disease",
+                    "name": "HIV感染",
+                    "relation_count": 2.0,
+                    "matched_feature_count": 2,
+                    "candidate_weight": 1.0,
+                    "direction_confidence": 1.0,
+                    "relation_types": ["DIAGNOSED_BY", "HAS_LAB_FINDING"],
+                    "evidence_names": ["HIV-1", "HIV RNA阳性"],
+                    "evidence_labels": ["Pathogen", "LabFinding"],
+                    "evidence_node_ids": ["pathogen_hiv1", "lab_hiv_rna"],
+                },
+                {
+                    "node_id": "disease_kaposi",
+                    "label": "Disease",
+                    "name": "卡波西肉瘤",
+                    "relation_count": 1.0,
+                    "matched_feature_count": 1,
+                    "candidate_weight": 0.8,
+                    "direction_confidence": 1.0,
+                    "relation_types": ["HAS_LAB_FINDING"],
+                    "evidence_names": ["CD4+ T淋巴细胞计数 < 200/μL"],
+                    "evidence_labels": ["LabFinding"],
+                    "evidence_node_ids": ["lab_cd4_low"],
+                },
+            ]
+
+        return super().run_query(query, params)
+
+
+# 验证 HIV 病原特异性锚点会压过单纯 CD4 背景证据。
+def test_retriever_prioritizes_hiv_specific_anchor_over_generic_cd4_background() -> None:
+    retriever = GraphRetriever(
+        HivSpecificAnchorFakeNeo4jClient(),
+        RetrievalConfig(r1_min_semantic_score=0.0),
+    )
+    key_features = [
+        KeyFeature(name="HIV感染", normalized_name="HIV感染"),
+        KeyFeature(name="CD4低", normalized_name="CD4+ T淋巴细胞计数 < 200/μL"),
+    ]
+
+    candidates = retriever.retrieve_r1_candidates(key_features)
+
+    assert [candidate.node_id for candidate in candidates[:2]] == ["disease_hiv", "disease_kaposi"]
+    assert candidates[0].metadata["disease_specific_anchor_score"] > candidates[1].metadata["disease_specific_anchor_score"]
 
 
 class ProfileFakeNeo4jClient(FakeNeo4jClient):

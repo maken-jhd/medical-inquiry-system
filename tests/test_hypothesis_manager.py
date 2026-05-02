@@ -86,6 +86,33 @@ def test_hypothesis_manager_applies_verifier_reshuffle() -> None:
     assert reranked[0].metadata["verifier_recommended_next_evidence"] == ["低氧血症"]
 
 
+# 验证 guarded 的细粒度 repair reason 会被 hypothesis 重排识别。
+def test_hypothesis_manager_handles_guarded_repair_reasons() -> None:
+    manager = HypothesisManager()
+    hypotheses = [
+        HypothesisScore(node_id="current", label="Disease", name="当前答案", score=1.0, metadata={}),
+        HypothesisScore(node_id="alt", label="Disease", name="强备选", score=0.8, metadata={}),
+    ]
+
+    hard_negative = manager.apply_verifier_repair(
+        hypotheses,
+        current_answer_id="current",
+        reject_reason="hard_negative_key_evidence",
+    )
+    strong_alternative = manager.apply_verifier_repair(
+        hypotheses,
+        current_answer_id="current",
+        reject_reason="strong_unresolved_alternative_candidates",
+        alternative_candidates=[{"answer_id": "alt", "reason": "guarded strong alternative"}],
+    )
+
+    current_after_hard_negative = next(item for item in hard_negative if item.node_id == "current")
+    assert current_after_hard_negative.metadata["verifier_reject_reason"] == "hard_negative_key_evidence"
+    assert current_after_hard_negative.score < 1.0
+    assert strong_alternative[0].node_id == "alt"
+    assert strong_alternative[0].metadata["verifier_alternative_reason"] == "guarded strong alternative"
+
+
 # 验证 evidence_state 即使还保留旧 existence 字段，也会优先按 polarity 做分数调整。
 def test_hypothesis_manager_scores_unclear_and_absent_by_polarity() -> None:
     manager = HypothesisManager()

@@ -230,3 +230,63 @@ def test_action_builder_skips_high_cost_evidence_when_exam_not_done() -> None:
     )
 
     assert actions == []
+
+
+# 验证 general 检查入口一旦已有结论，就不会再次生成 collect_general_exam_context。
+def test_action_builder_does_not_repeat_general_exam_context_when_resolved() -> None:
+    builder = ActionBuilder()
+    state = SessionState(
+        session_id="s_general_done",
+        exam_context={
+            "general": ExamContextState(exam_kind="general", availability="done"),
+            "lab": ExamContextState(exam_kind="lab"),
+            "imaging": ExamContextState(exam_kind="imaging"),
+            "pathogen": ExamContextState(exam_kind="pathogen"),
+        },
+    )
+
+    actions = builder.build_verification_actions(
+        [
+            {
+                "node_id": "lab_cd4_low",
+                "label": "LabFinding",
+                "name": "CD4+ T淋巴细胞计数 < 200/μL",
+                "question_type_hint": "lab",
+                "acquisition_mode": "needs_lab_test",
+                "evidence_cost": "high",
+                "priority": 2.0,
+            }
+        ],
+        hypothesis_id="pcp",
+        session_state=state,
+    )
+
+    assert all(action.action_type != "collect_general_exam_context" for action in actions)
+    assert {action.target_node_id for action in actions} == {"lab_cd4_low"}
+
+
+# 验证已问过 general 后不会再返回同一个抽象检查入口，只会降级成更具体的检查上下文。
+def test_action_builder_uses_specific_exam_context_after_general_was_asked() -> None:
+    builder = ActionBuilder()
+    state = SessionState(session_id="s_general_asked")
+    state.asked_node_ids.append("__exam_context__::general")
+
+    actions = builder.build_verification_actions(
+        [
+            {
+                "node_id": "lab_cd4_low",
+                "label": "LabFinding",
+                "name": "CD4+ T淋巴细胞计数 < 200/μL",
+                "question_type_hint": "lab",
+                "acquisition_mode": "needs_lab_test",
+                "evidence_cost": "high",
+                "priority": 2.0,
+            }
+        ],
+        hypothesis_id="pcp",
+        session_state=state,
+    )
+
+    assert len(actions) == 1
+    assert actions[0].action_type == "collect_exam_context"
+    assert actions[0].target_node_id == "__exam_context__::lab"

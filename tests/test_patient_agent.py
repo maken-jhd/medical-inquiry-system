@@ -14,9 +14,11 @@ class FakePatientLlmClient:
         *,
         semantic_payload: dict[str, Any] | None = None,
         known_answer_text: str = "有。",
+        opening_text: str = "",
     ) -> None:
         self.semantic_payload = semantic_payload or {}
         self.known_answer_text = known_answer_text
+        self.opening_text = opening_text
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
     def is_available(self) -> bool:
@@ -30,6 +32,9 @@ class FakePatientLlmClient:
 
         if prompt_name == "patient_answer_generation":
             return schema(answer_text=self.known_answer_text, reasoning="")
+
+        if prompt_name == "patient_opening_generation":
+            return schema(opening_text=self.opening_text, reasoning="")
 
         return schema()
 
@@ -78,6 +83,40 @@ def test_patient_agent_opens_case_from_proactive_slots() -> None:
     assert "发热" in opening.opening_text
     assert "干咳" in opening.opening_text
     assert opening.revealed_slot_ids == ["发热", "干咳"]
+
+
+# 验证检查类开场不会把 CD4 阈值等关键锚点压缩成“异常”。
+def test_patient_agent_opening_preserves_lab_anchor_when_llm_is_too_vague() -> None:
+    fake_llm = FakePatientLlmClient(opening_text="最近检查提示有点异常，想来看看。")
+    agent = VirtualPatientAgent(llm_client=fake_llm, use_llm=True)
+    case = VirtualPatientCase(
+        case_id="case_opening_lab",
+        title="test",
+        slot_truth_map={
+            "cd4_low": SlotTruth(
+                node_id="cd4_low",
+                value=True,
+                group="lab",
+                node_label="LabFinding",
+                aliases=["CD4+ T淋巴细胞计数 < 200/μL"],
+                reveal_only_if_asked=False,
+            ),
+            "hiv_rna_positive": SlotTruth(
+                node_id="hiv_rna_positive",
+                value=True,
+                group="lab",
+                node_label="LabFinding",
+                aliases=["HIV RNA阳性"],
+                reveal_only_if_asked=False,
+            ),
+        },
+    )
+
+    opening = agent.open_case(case)
+
+    assert "CD4" in opening.opening_text
+    assert "200" in opening.opening_text
+    assert "HIV RNA阳性" in opening.opening_text
 
 
 # 验证 unknown fallback 使用不确定表述，而不是容易被误判为阴性的固定句式。
@@ -210,6 +249,29 @@ def test_llm_semantic_no_match_returns_negative_without_revealing_slot() -> None
     reply = agent.answer_question("night_sweat", "有没有盗汗？", case)
 
     assert reply.answer_text == "没有这个症状。"
+    assert reply.revealed_slot_id is None
+
+
+# 验证 LLM no-match 未给出话术时，默认不再把检查类缺槽位说成明确阴性。
+def test_llm_semantic_no_match_default_is_uncertain_not_hard_negative() -> None:
+    fake_llm = FakePatientLlmClient(semantic_payload={"matched_node_id": "", "no_match_answer": ""})
+    agent = VirtualPatientAgent(llm_client=fake_llm, use_llm=True)
+    case = VirtualPatientCase(
+        case_id="case_no_match_exam",
+        title="test",
+        slot_truth_map={
+            "cd4": SlotTruth(
+                node_id="cd4",
+                value=True,
+                group="lab",
+                aliases=["CD4+ T淋巴细胞计数 < 200/μL"],
+            )
+        },
+    )
+
+    reply = agent.answer_question("head_ct_low_density", "头颅CT有没有低密度病灶？", case)
+
+    assert "没听医生提过" in reply.answer_text
     assert reply.revealed_slot_id is None
 
 
