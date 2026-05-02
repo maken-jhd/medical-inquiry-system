@@ -11,6 +11,7 @@ import yaml
 
 from .action_builder import ActionBuilder, ActionBuilderConfig
 from .entity_linker import EntityLinker, EntityLinkerConfig
+from .evidence_anchor import EvidenceAnchorAnalyzer
 from .evidence_parser import EvidenceParser, EvidenceParserConfig
 from .errors import LlmUnavailableError
 from .hypothesis_manager import HypothesisManager, HypothesisManagerConfig
@@ -77,6 +78,7 @@ class BrainDependencies:
     mcts_engine: MctsEngine | None = None
     simulation_engine: SimulationEngine | None = None
     trajectory_evaluator: TrajectoryEvaluator | None = None
+    evidence_anchor_analyzer: EvidenceAnchorAnalyzer | None = None
     llm_client: LlmClient | None = None
     repair_policy: "RepairPolicyConfig" = field(default_factory=lambda: RepairPolicyConfig())
 
@@ -121,6 +123,8 @@ class ConsultationBrain:
             deps.simulation_engine = SimulationEngine()
         if deps.trajectory_evaluator is None:
             deps.trajectory_evaluator = TrajectoryEvaluator()
+        if deps.evidence_anchor_analyzer is None:
+            deps.evidence_anchor_analyzer = EvidenceAnchorAnalyzer()
         self.deps = deps
 
     # 创建一条新的问诊会话并返回初始状态。
@@ -218,6 +222,168 @@ class ConsultationBrain:
                 positive_links.append(linked)
 
         return positive_links
+
+    # 将“没做过/没听说/没注意”这类 no-result 回答统一降为 unclear。
+    def _normalize_no_result_mentions_for_pending_action(
+        self,
+        turn_result: TurnInterpretationResult,
+        pending_action: MctsAction | None,
+        patient_text: str,
+    ) -> None:
+        if pending_action is None or pending_action.action_type != "verify_evidence":
+            return
+
+        if not self._is_no_result_unclear_target(pending_action):
+            return
+
+        if not self._patient_text_expresses_no_result(patient_text):
+            return
+
+        if self._patient_text_expresses_explicit_negative_result(patient_text):
+            return
+
+        matched = self.deps.evidence_parser.find_target_mention(turn_result.mentions, pending_action)
+        if matched is None:
+            return
+
+        matched.polarity = "unclear"
+        matched.metadata.update(
+            {
+                "no_result_normalized_to_unclear": True,
+                "no_result_normalization_reason": "exam_or_measurement_not_performed_or_not_known",
+            }
+        )
+
+    # 对 pending_action_result 再兜底一次，覆盖 LLM 错把“没做过”解析成 absent 的情况。
+    def _normalize_no_result_pending_action_result(
+        self,
+        pending_action: MctsAction,
+        patient_text: str,
+        pending_action_result: PendingActionResult,
+    ) -> PendingActionResult:
+        if pending_action.action_type != "verify_evidence":
+            return pending_action_result
+
+        if pending_action_result.polarity != "absent":
+            return pending_action_result
+
+        if not self._is_no_result_unclear_target(pending_action):
+            return pending_action_result
+
+        if not self._patient_text_expresses_no_result(patient_text):
+            return pending_action_result
+
+        if self._patient_text_expresses_explicit_negative_result(patient_text):
+            return pending_action_result
+
+        pending_action_result.polarity = "unclear"
+        pending_action_result.resolution = "hedged"
+        pending_action_result.uncertain_span = pending_action_result.negation_span or patient_text
+        pending_action_result.negation_span = ""
+        pending_action_result.reasoning = (
+            pending_action_result.reasoning
+            + "；该回答表达的是未做/未听说/未留意检查或测量结果，按 unclear 而非明确阴性处理。"
+        ).strip("；")
+        pending_action_result.metadata.update(
+            {
+                "polarity": "unclear",
+                "no_result_normalized_to_unclear": True,
+                "no_result_normalization_reason": "exam_or_measurement_not_performed_or_not_known",
+            }
+        )
+        return pending_action_result
+
+    def _is_no_result_unclear_target(self, action: MctsAction) -> bool:
+        label = str(action.target_node_label or "")
+        question_type = str(action.metadata.get("question_type_hint") or "")
+        acquisition_mode = str(action.metadata.get("acquisition_mode") or "")
+        evidence_cost = str(action.metadata.get("evidence_cost") or "")
+        target_name = self._normalize_match_text(action.target_node_name)
+
+        if label in {"LabFinding", "LabTest", "ImagingFinding", "Pathogen"}:
+            return True
+
+        if question_type in {"lab", "imaging", "pathogen"}:
+            return True
+
+        if acquisition_mode in {"needs_lab_test", "needs_imaging", "needs_pathogen_test"}:
+            return True
+
+        if evidence_cost == "high":
+            return True
+
+        if label == "ClinicalAttribute" or question_type == "detail":
+            numeric_markers = (
+                "bmi",
+                "评分",
+                "分期",
+                "分级",
+                "计数",
+                "载量",
+                "数值",
+                "指数",
+                "体重",
+                "身高",
+                "血压",
+                "氧分压",
+                "pao2",
+                "spo2",
+                "cd4",
+            )
+            return any(marker in target_name for marker in numeric_markers)
+
+        return False
+
+    def _patient_text_expresses_no_result(self, patient_text: str) -> bool:
+        normalized = self._normalize_match_text(patient_text)
+        return any(
+            marker in normalized
+            for marker in (
+                "没做",
+                "没有做",
+                "没查",
+                "没有查",
+                "没拍",
+                "没有拍",
+                "没验",
+                "没有验",
+                "没做过",
+                "没有做过",
+                "没听医生提过",
+                "没听说",
+                "没有听说",
+                "没注意",
+                "没有注意",
+                "没太注意",
+                "不记得",
+                "记不清",
+                "不太清楚",
+                "报告里没看到",
+                "报告没看到",
+                "没留意",
+                "没有留意",
+            )
+        )
+
+    def _patient_text_expresses_explicit_negative_result(self, patient_text: str) -> bool:
+        normalized = self._normalize_match_text(patient_text)
+        return any(
+            marker in normalized
+            for marker in (
+                "结果阴性",
+                "阴性",
+                "未检出",
+                "没有检出",
+                "未见异常",
+                "没有异常",
+                "报告正常",
+                "结果正常",
+                "医生排除",
+                "已经排除",
+                "没有提示",
+                "未提示",
+            )
+        )
 
     def _build_slot_updates_from_mentions(
         self,
@@ -428,6 +594,11 @@ class ConsultationBrain:
             self.deps.evidence_parser.derive_pending_action_result(turn_result, pending_action, patient_text)
             if turn_result is not None
             else self.deps.evidence_parser.derive_pending_action_result_from_text(patient_text, pending_action)
+        )
+        pending_action_result = self._normalize_no_result_pending_action_result(
+            pending_action,
+            patient_text,
+            pending_action_result,
         )
         evidence_tags = self._infer_action_evidence_tags(pending_action)
         confirmed_family_candidate = self._is_confirmed_family_candidate(
@@ -1421,11 +1592,49 @@ class ConsultationBrain:
             score_candidates.append(a2_result.primary_hypothesis)
 
         score_candidates.extend(a2_result.alternatives)
-        tracker.set_candidate_hypotheses(
-            session_id,
-            self.deps.hypothesis_manager.build_hypothesis_scores(score_candidates),
-        )
+        scores = self.deps.hypothesis_manager.build_hypothesis_scores(score_candidates)
+        scores = self._apply_observed_anchor_rerank_to_scores(session_id, scores)
+        tracker.set_candidate_hypotheses(session_id, scores)
+        if len(scores) > 0:
+            a2_result.primary_hypothesis = self._score_to_candidate(scores[0])
+            a2_result.alternatives = [
+                self._score_to_candidate(item)
+                for item in scores[1 : self.deps.hypothesis_manager.config.expand_top_k_hypotheses]
+            ]
+            a2_result.metadata["observed_anchor_rerank_applied"] = True
         return a2_result
+
+    # 用真实会话证据刷新候选诊断的 anchor metadata 与排序。
+    def _apply_observed_anchor_rerank(self, session_id: str) -> list[HypothesisScore]:
+        state = self.deps.state_tracker.get_session(session_id)
+        if len(state.candidate_hypotheses) == 0:
+            state.metadata["observed_anchor_index"] = {
+                "source": "observed_session_state",
+                "observed_evidence": [],
+                "candidate_anchor_summary": [],
+                "strong_anchor_candidates": [],
+                "anchored_candidate_ids": [],
+            }
+            return []
+
+        ranked = self._apply_observed_anchor_rerank_to_scores(session_id, state.candidate_hypotheses)
+        self.deps.state_tracker.set_candidate_hypotheses(session_id, ranked)
+        return ranked
+
+    def _apply_observed_anchor_rerank_to_scores(
+        self,
+        session_id: str,
+        hypotheses: Sequence[HypothesisScore],
+    ) -> list[HypothesisScore]:
+        analyzer = self.deps.evidence_anchor_analyzer
+        state = self.deps.state_tracker.get_session(session_id)
+
+        if analyzer is None:
+            return list(hypotheses)
+
+        ranked, anchor_index = analyzer.rerank_hypotheses(state, list(hypotheses))
+        state.metadata["observed_anchor_index"] = anchor_index
+        return ranked
 
     # A3 常规追问轮次优先复用上一轮的 hypothesis 排名，只有需要重建假设时才重新执行 A2。
     def _should_refresh_a2(
@@ -1953,6 +2162,9 @@ class ConsultationBrain:
         pending_action = tracker.get_pending_action(session_id)
         known_feature_names = self._collect_known_feature_names(session_id)
         turn_result = self.deps.evidence_parser.interpret_turn(patient_text, pending_action=pending_action)
+        # 高成本检查、病原和测量型 detail 的“没做过/没听说”不是结果阴性；
+        # 在统一 mentions 写入状态前先改回 unclear，避免形成 hard negative。
+        self._normalize_no_result_mentions_for_pending_action(turn_result, pending_action, patient_text)
         linked_entities = self._prepare_turn_mentions(turn_result, pending_action)
         patient_context = self.deps.evidence_parser.build_patient_context_from_turn(turn_result, patient_text)
         a1_result = self.deps.evidence_parser.run_a1_key_symptom_extraction(
@@ -1996,6 +2208,9 @@ class ConsultationBrain:
 
         # 读取一次已经过 pending_action 刷新的最新会话状态；后续阶段判断都基于这个状态而不是旧状态。
         state = tracker.get_session(session_id)
+        if len(state.candidate_hypotheses) > 0:
+            self._apply_observed_anchor_rerank(session_id)
+            state = tracker.get_session(session_id)
         stage_after_pending_action = getattr(route_after_pending_action, "stage", None)
 
         # 下面这些对象是本轮统一返回结构的占位结果；无论走哪条分支，都尽量返回同一套字段。
@@ -2104,6 +2319,8 @@ class ConsultationBrain:
 
         # `best_answer_score` 来自 trajectory 分组聚合，是 search 路径层面的“当前最优答案”。
         best_answer_score = self.deps.trajectory_evaluator.select_best_answer(search_result.final_answer_scores)
+        if len(tracker.get_session(session_id).candidate_hypotheses) > 0:
+            self._apply_observed_anchor_rerank(session_id)
 
         # `should_accept_final_answer()` 才是真正的“全局能不能停”闸门；
         # 它会综合 turn_index、trajectory_count、verifier、guarded gate 等条件。
@@ -2681,19 +2898,27 @@ class ConsultationBrain:
 
         metadata = dict(best_answer_score.metadata)
         guarded_blocked = accept_decision.reason == "guarded_acceptance_rejected"
+        anchor_blocked = accept_decision.reason == "anchor_controlled_rejected"
 
-        # 只有 llm_verifier 明确拒停，或 guarded gate 挡下 verifier 的“可停”建议时，才进入 repair。
-        if metadata.get("verifier_mode") != "llm_verifier":
+        # 只有 llm_verifier 明确拒停，或结构化 gate 挡下 verifier 的“可停”建议时，才进入 repair。
+        if metadata.get("verifier_mode") != "llm_verifier" and not anchor_blocked:
             return None
 
-        if bool(metadata.get("verifier_should_accept", True)) and not guarded_blocked:
+        if bool(metadata.get("verifier_should_accept", True)) and not guarded_blocked and not anchor_blocked:
             return None
 
         state = self.deps.state_tracker.get_session(session_id)
+        if len(state.candidate_hypotheses) > 0:
+            self._apply_observed_anchor_rerank(session_id)
+            state = self.deps.state_tracker.get_session(session_id)
         reject_reason = (
             str(accept_decision.metadata.get("repair_reject_reason", "")).strip()
             or str(metadata.get("verifier_reject_reason", "")).strip()
             or "missing_key_support"
+        )
+        path_control_reason = (
+            str(accept_decision.metadata.get("path_control_reason", "")).strip()
+            or str(accept_decision.metadata.get("anchor_controlled_block_reason", "")).strip()
         )
         current_hypothesis = self._find_hypothesis_by_id(state.candidate_hypotheses, search_result.best_answer_id)
         recommended_next_evidence = self._normalize_string_list(metadata.get("verifier_recommended_next_evidence", []))
@@ -2727,10 +2952,17 @@ class ConsultationBrain:
         guarded_strong_alternatives = self._normalize_alternative_candidates(
             guarded_features.get("guarded_strong_alternative_candidates", [])
         )
+        anchor_alternatives = self._normalize_alternative_candidates(
+            accept_decision.metadata.get("anchor_stronger_alternative_candidates", [])
+        )
 
         # guarded gate 若明确指出是强备选未排除，就优先用 guarded 解析出的强竞争者覆盖普通 alternatives。
         if guarded_block_reason == "strong_unresolved_alternative_candidates" and len(guarded_strong_alternatives) > 0:
             alternative_candidates = guarded_strong_alternatives
+
+        # anchor gate 若发现真实强锚点属于其他候选，repair 主目标直接切到该候选。
+        if reject_reason == "anchored_alternative_exists" and len(anchor_alternatives) > 0:
+            alternative_candidates = anchor_alternatives
 
         # 若 verifier 没给出具体 alternatives，但拒停理由就是 strong alternative，
         # 则从当前 hypothesis 排名里兜底构造几个强备选，保证 repair 仍有目标可追。
@@ -2756,6 +2988,7 @@ class ConsultationBrain:
 
         return {
             "reject_reason": reject_reason,
+            "path_control_reason": path_control_reason or reject_reason,
             "recommended_next_evidence": recommended_next_evidence,
             "alternative_candidates": alternative_candidates,
             "verifier_reasoning": str(metadata.get("verifier_reasoning", "")),
@@ -2771,6 +3004,13 @@ class ConsultationBrain:
             "guarded_hard_negative_key_evidence": guarded_features.get("guarded_hard_negative_key_evidence", []),
             "guarded_strong_alternative_candidates": guarded_strong_alternatives,
             "guarded_acceptance_features": guarded_features,
+            "anchor_controlled_blocked": anchor_blocked,
+            "anchor_controlled_block_reason": str(
+                accept_decision.metadata.get("anchor_controlled_block_reason") or ""
+            ),
+            "anchor_answer_features": accept_decision.metadata.get("anchor_answer_features", {}),
+            "anchor_stronger_alternative_candidates": anchor_alternatives,
+            "observed_anchor_index": state.metadata.get("observed_anchor_index", {}),
             "force_tree_refresh": True,
             "repair_stage": self._map_reject_reason_to_stage(reject_reason),
             "current_answer_id": best_answer_score.answer_id,
@@ -2939,6 +3179,14 @@ class ConsultationBrain:
             if current_answer is not None:
                 return current_answer
 
+        if str(repair_context.get("reject_reason") or "") == "anchored_alternative_exists":
+            alternatives = self._normalize_alternative_candidates(repair_context.get("alternative_candidates", []))
+            for item in alternatives:
+                answer_id = str(item.get("answer_id") or "").strip()
+                candidate = self._find_hypothesis_by_id(state.candidate_hypotheses, answer_id)
+                if candidate is not None:
+                    return candidate
+
         return sorted(state.candidate_hypotheses, key=lambda item: (-item.score, item.name))[0]
 
     # 在 repair 阶段决定当前要从哪些 hypothesis 上取下一批候选动作。
@@ -2951,6 +3199,9 @@ class ConsultationBrain:
         reject_reason = str(repair_context.get("reject_reason", "missing_key_support"))
         ranked = sorted(state.candidate_hypotheses, key=lambda item: (-item.score, item.name))
         selected: list[HypothesisScore] = [current_hypothesis]
+
+        if reject_reason == "anchored_alternative_exists":
+            return selected
 
         if not self._is_alternative_repair_reason(reject_reason):
             return selected
@@ -3086,7 +3337,12 @@ class ConsultationBrain:
         # - hard_negative_key_evidence：优先围绕当前答案补能化解硬反证的推荐锚点
         # - strong alternative：优先找能拉开竞争差异的动作
         # - trajectory_insufficient：优先选新颖、少重复的动作稳定路径
-        if reject_reason in {"missing_key_support", "hard_negative_key_evidence"}:
+        if reject_reason in {
+            "missing_key_support",
+            "hard_negative_key_evidence",
+            "missing_required_anchor",
+            "insufficient_evidence_family_coverage",
+        }:
             recommended_gap_score = max(
                 recommended_match_score,
                 joint_recommended_match_score,
@@ -3264,7 +3520,11 @@ class ConsultationBrain:
 
     # verifier 和 guarded gate 的历史枚举略有不同，这里统一判断“竞争诊断未排除”类 repair。
     def _is_alternative_repair_reason(self, reject_reason: str) -> bool:
-        return reject_reason in {"strong_alternative_not_ruled_out", "strong_unresolved_alternative_candidates"}
+        return reject_reason in {
+            "strong_alternative_not_ruled_out",
+            "strong_unresolved_alternative_candidates",
+            "anchored_alternative_exists",
+        }
 
     # 将 guarded gate 暴露出的缺失证据家族翻译成 A3 可匹配的推荐证据文本。
     def _recommended_evidence_for_guarded_families(
@@ -3376,6 +3636,8 @@ class ConsultationBrain:
                         "answer_id": answer_id or None,
                         "answer_name": answer_name or answer_id,
                         "reason": str(item.get("reason", "")).strip(),
+                        "observed_anchor_score": item.get("observed_anchor_score", 0.0),
+                        "anchor_supporting_evidence": item.get("anchor_supporting_evidence", []),
                         **self._classify_alternative_candidate(item),
                     }
                 )
@@ -3523,8 +3785,11 @@ class ConsultationBrain:
         reject_reason = str(current_context.get("reject_reason", "")).strip()
         repair_mode = {
             "missing_key_support": "repair_supporting_evidence",
+            "missing_required_anchor": "repair_supporting_evidence",
+            "insufficient_evidence_family_coverage": "repair_supporting_evidence",
             "strong_alternative_not_ruled_out": "repair_hypothesis_competition",
             "strong_unresolved_alternative_candidates": "repair_hypothesis_competition",
+            "anchored_alternative_exists": "repair_hypothesis_competition",
             "hard_negative_key_evidence": "repair_hard_negative_resolution",
             "trajectory_insufficient": "repair_path_diversification",
         }.get(reject_reason, "repair_generic")

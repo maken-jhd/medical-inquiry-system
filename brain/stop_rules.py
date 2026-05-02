@@ -10,6 +10,7 @@ from .types import EvidenceState, FinalAnswerScore, HypothesisScore, SessionStat
 
 
 GUARDED_LENIENT_PROFILES = {"guarded_lenient", "guarded-lenient", "guarded"}
+ANCHOR_CONTROLLED_PROFILES = {"anchor_controlled", "anchor-controlled", "anchor"}
 GUARDED_DEFINITION_RELATION_TYPES = {
     "DIAGNOSED_BY",
     "HAS_LAB_FINDING",
@@ -198,6 +199,13 @@ class StopRuleEngine:
         ):
             return StopDecision(False, "verifier_rejected_stop", answer_score.agent_evaluation)
 
+        # anchor_controlled profile 把“真实会话强锚点”作为接受最终答案的主结构约束；
+        # rollout 模拟阳性不会进入 candidate metadata，因此不会被这里计入 confirmed evidence。
+        anchor_decision = self._check_anchor_controlled_acceptance(answer_score, session_state, acceptance_profile)
+
+        if anchor_decision is not None:
+            return anchor_decision
+
         # guarded_lenient profile 只放宽 verifier prompt，
         # 但最终是否允许停诊仍要经过结构化安全闸门二次确认。
         guarded_decision = self._check_guarded_lenient_acceptance(answer_score, session_state, acceptance_profile)
@@ -217,13 +225,198 @@ class StopRuleEngine:
 
         return StopDecision(True, "final_answer_accepted", answer_score.final_score)
 
-    # 读取 verifier acceptance profile；真实实验脚本通过环境变量控制该值。
+    # 读取结构化 stop gate 的 acceptance profile；verifier prompt 另走 TRAJECTORY_* 配置。
     def _acceptance_profile(self) -> str:
-        return (
-            os.getenv("TRAJECTORY_VERIFIER_ACCEPTANCE_PROFILE")
-            or self.config.acceptance_profile
-            or "baseline"
-        ).strip().lower()
+        # 显式 StopRuleConfig 优先，环境变量只作为默认 baseline 的覆盖来源；
+        # 这样单测和消融可以稳定指定 guarded_lenient / anchor_controlled。
+        configured_profile = (self.config.acceptance_profile or "").strip().lower()
+
+        if configured_profile and configured_profile != "baseline":
+            return configured_profile
+
+        return (os.getenv("BRAIN_ACCEPTANCE_PROFILE") or configured_profile or "baseline").strip().lower()
+
+    # anchor_controlled profile 的接受条件只读取真实会话 anchor metadata。
+    def _check_anchor_controlled_acceptance(
+        self,
+        answer_score: FinalAnswerScore,
+        session_state: SessionState | None,
+        acceptance_profile: str,
+    ) -> StopDecision | None:
+        if acceptance_profile not in ANCHOR_CONTROLLED_PROFILES:
+            return None
+
+        if session_state is None:
+            return None
+
+        answer_features = self._anchor_features_for_answer(answer_score, session_state)
+        answer_score.metadata.update(
+            {
+                "anchor_controlled_applied": True,
+                "observed_anchor_score": answer_features.get("observed_anchor_score", 0.0),
+                "anchor_tier": answer_features.get("anchor_tier", "speculative"),
+                "anchor_supporting_evidence": answer_features.get("anchor_supporting_evidence", []),
+                "background_support_score": answer_features.get("background_support_score", 0.0),
+                "anchor_negative_evidence": answer_features.get("anchor_negative_evidence", []),
+                "anchor_missing_evidence_families": answer_features.get("anchor_missing_evidence_families", []),
+            }
+        )
+        stronger_alternatives = self._stronger_anchor_alternatives(
+            answer_score,
+            session_state,
+            answer_features,
+        )
+        block_reason = self._select_anchor_controlled_block_reason(answer_features, stronger_alternatives)
+
+        if len(block_reason) == 0:
+            session_state.metadata["last_anchor_controlled_decision"] = {
+                "should_accept": True,
+                "reason": "",
+                "answer_id": answer_score.answer_id,
+                "answer_name": answer_score.answer_name,
+                "turn_index": session_state.turn_index,
+                "anchor_answer_features": answer_features,
+            }
+            return None
+
+        repair_reason = self._map_anchor_block_to_repair_reason(block_reason)
+        metadata = {
+            "acceptance_profile": acceptance_profile,
+            "anchor_controlled_block_reason": block_reason,
+            "path_control_reason": repair_reason,
+            "repair_reject_reason": repair_reason,
+            "anchor_answer_features": answer_features,
+            "anchor_stronger_alternative_candidates": stronger_alternatives,
+            "observed_anchor_index": session_state.metadata.get("observed_anchor_index", {}),
+        }
+        answer_score.metadata["anchor_controlled_block_reason"] = block_reason
+        session_state.metadata["last_anchor_controlled_decision"] = {
+            "should_accept": False,
+            "reason": block_reason,
+            "answer_id": answer_score.answer_id,
+            "answer_name": answer_score.answer_name,
+            "turn_index": session_state.turn_index,
+            **metadata,
+        }
+        return StopDecision(
+            False,
+            "anchor_controlled_rejected",
+            answer_score.agent_evaluation,
+            metadata,
+        )
+
+    def _anchor_features_for_answer(
+        self,
+        answer_score: FinalAnswerScore,
+        session_state: SessionState,
+    ) -> dict:
+        hypothesis = self._find_hypothesis(session_state.candidate_hypotheses, answer_score.answer_id)
+        metadata = dict(hypothesis.metadata) if hypothesis is not None else {}
+
+        if len(metadata) == 0:
+            metadata = dict(answer_score.metadata)
+
+        return {
+            "answer_id": answer_score.answer_id,
+            "answer_name": answer_score.answer_name,
+            "anchor_tier": str(metadata.get("anchor_tier") or "speculative"),
+            "observed_anchor_score": float(metadata.get("observed_anchor_score", 0.0) or 0.0),
+            "strong_anchor_score": float(metadata.get("strong_anchor_score", 0.0) or 0.0),
+            "background_support_score": float(metadata.get("background_support_score", 0.0) or 0.0),
+            "anchor_supporting_evidence": self._as_list(metadata.get("anchor_supporting_evidence", [])),
+            "provisional_anchor_evidence": self._as_list(metadata.get("provisional_anchor_evidence", [])),
+            "background_supporting_evidence": self._as_list(metadata.get("background_supporting_evidence", [])),
+            "anchor_negative_evidence": self._as_list(metadata.get("anchor_negative_evidence", [])),
+            "anchor_missing_evidence_families": self._as_list(metadata.get("anchor_missing_evidence_families", [])),
+            "minimum_evidence_groups_available": bool(metadata.get("minimum_evidence_groups_available", False)),
+            "minimum_evidence_family_coverage_satisfied": bool(
+                metadata.get("minimum_evidence_family_coverage_satisfied", False)
+            ),
+        }
+
+    def _stronger_anchor_alternatives(
+        self,
+        answer_score: FinalAnswerScore,
+        session_state: SessionState,
+        answer_features: dict,
+    ) -> list[dict]:
+        answer_anchor_score = float(answer_features.get("observed_anchor_score", 0.0) or 0.0)
+        values: list[dict] = []
+
+        for hypothesis in session_state.candidate_hypotheses:
+            if hypothesis.node_id == answer_score.answer_id:
+                continue
+
+            metadata = dict(hypothesis.metadata)
+            tier = str(metadata.get("anchor_tier") or "")
+            observed_anchor_score = float(metadata.get("observed_anchor_score", 0.0) or 0.0)
+
+            if tier != "strong_anchor" or observed_anchor_score <= answer_anchor_score + 1e-6:
+                continue
+
+            values.append(
+                {
+                    "answer_id": hypothesis.node_id,
+                    "answer_name": hypothesis.name,
+                    "reason": "真实会话中存在更强 observed strong anchor。",
+                    "strength": "strong",
+                    "is_unresolved_strong": True,
+                    "observed_anchor_score": observed_anchor_score,
+                    "anchor_supporting_evidence": metadata.get("anchor_supporting_evidence", []),
+                }
+            )
+
+        return sorted(values, key=lambda item: (-float(item.get("observed_anchor_score", 0.0)), str(item.get("answer_name"))))
+
+    def _select_anchor_controlled_block_reason(
+        self,
+        answer_features: dict,
+        stronger_alternatives: list[dict],
+    ) -> str:
+        if len(answer_features.get("anchor_negative_evidence", []) or []) > 0:
+            return "clear_negative_definition_evidence"
+
+        if len(stronger_alternatives) > 0:
+            return "anchored_alternative_exists"
+
+        anchor_tier = str(answer_features.get("anchor_tier") or "")
+        has_strong_anchor = anchor_tier == "strong_anchor" and float(
+            answer_features.get("observed_anchor_score", 0.0) or 0.0
+        ) > 0.0
+
+        family_coverage_substitute = bool(answer_features.get("minimum_evidence_groups_available", False)) and bool(
+            answer_features.get("minimum_evidence_family_coverage_satisfied", False)
+        )
+
+        if not has_strong_anchor and not family_coverage_substitute:
+            return "missing_required_anchor"
+
+        if has_strong_anchor and len(answer_features.get("anchor_missing_evidence_families", []) or []) > 0:
+            return "insufficient_evidence_family_coverage"
+
+        return ""
+
+    def _map_anchor_block_to_repair_reason(self, block_reason: str) -> str:
+        if block_reason == "anchored_alternative_exists":
+            return "anchored_alternative_exists"
+
+        if block_reason == "insufficient_evidence_family_coverage":
+            return "insufficient_evidence_family_coverage"
+
+        return "missing_required_anchor"
+
+    def _find_hypothesis(
+        self,
+        hypotheses: Iterable[HypothesisScore],
+        answer_id: str,
+    ) -> HypothesisScore | None:
+        for hypothesis in hypotheses:
+            if hypothesis.node_id == answer_id:
+                return hypothesis
+        return None
+
+    def _as_list(self, value: object) -> list:
+        return value if isinstance(value, list) else []
 
     # guarded_lenient 只放宽 verifier prompt，不放宽安全闸门。
     def _check_guarded_lenient_acceptance(

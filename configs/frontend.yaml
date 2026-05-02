@@ -19,6 +19,6 @@ llm:
   api_key: ""
 
 brain:
-  acceptance_profile: guarded_lenient
+  acceptance_profile: anchor_controlled
   verifier_acceptance_profile: guarded_lenient
   agent_eval_mode: llm_verifier

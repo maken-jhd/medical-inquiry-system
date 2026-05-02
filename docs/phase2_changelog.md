@@ -3360,3 +3360,61 @@ conda run -n GraduationDesign python -m pytest tests/test_frontend_ui_adapter.py
 - 结果：
   - `23 passed`
   - `17 passed`
+
+## 三十七、2026-05-02：Observed Anchor-Controlled Reasoning 接入诊断链路
+
+### 本次目标
+
+- 借鉴 Med-MCTS 的路径边界，把 rollout 保持为候选推理路径，不再让模拟阳性污染真实会话证据
+- 用真实患者回答中的高特异证据形成 `observed anchor`，统一支配 A2 排序、repair 分流和 stop gate
+- 收敛 verifier / guarded / repair 的职责边界，把细粒度 guarded 原因降级为 metadata，主控制原因转向 anchor + evidence family coverage
+- 修复检查、病原、影像和数值型 detail 的“没做过 / 没听说 / 没注意”被误写成 hard negative 的问题
+
+### 本次实现
+
+- 新增：
+  - [brain/evidence_anchor.py](/Users/loki/Workspace/GraduationDesign/brain/evidence_anchor.py)
+  - [tests/test_evidence_anchor.py](/Users/loki/Workspace/GraduationDesign/tests/test_evidence_anchor.py)
+- 更新：
+  - [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - [brain/stop_rules.py](/Users/loki/Workspace/GraduationDesign/brain/stop_rules.py)
+  - [brain/hypothesis_manager.py](/Users/loki/Workspace/GraduationDesign/brain/hypothesis_manager.py)
+  - [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml)
+  - [configs/frontend.yaml](/Users/loki/Workspace/GraduationDesign/configs/frontend.yaml)
+  - [frontend/config_loader.py](/Users/loki/Workspace/GraduationDesign/frontend/config_loader.py)
+  - [frontend/README.md](/Users/loki/Workspace/GraduationDesign/frontend/README.md)
+  - [brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
+  - [docs/diagnosis_system_todolist.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_system_todolist.md)
+  - 相关 stop / repair 单测
+- 具体改动：
+  - `EvidenceAnchorAnalyzer` 只读取真实 `SessionState.slots / evidence_states`，并过滤 `rollout / simulation` 来源证据
+  - anchor 分级为 `strong_anchor / provisional_anchor / background_supported / negative_anchor`
+  - A2 写回候选前会执行 anchor-aware rerank，候选 metadata 增加 `observed_anchor_score / anchor_tier / anchor_supporting_evidence / background_support_score / anchor_negative_evidence`
+  - 收紧 anchor 与 coverage 判定：证据必须命中候选疾病自身 KG evidence payload 才能成为 anchor；minimum evidence family coverage 只统计 `present + clear` 的真实证据，`absent / unclear / hedged` 不再补 coverage
+  - 新增 `acceptance_profile=anchor_controlled`，默认写入 [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml)
+  - stop gate 改为优先读取显式 `StopRuleConfig` / 配置文件；`BRAIN_ACCEPTANCE_PROFILE` 只覆盖默认 baseline，并与 verifier prompt 使用的 `TRAJECTORY_VERIFIER_ACCEPTANCE_PROFILE` 分离；前端默认结构化 stop 为 `anchor_controlled`，verifier prompt 仍保留 `guarded_lenient`
+  - anchor gate 拒停时统一输出 `missing_required_anchor / anchored_alternative_exists / insufficient_evidence_family_coverage`
+  - repair 在 `anchored_alternative_exists` 时直接围绕 anchored candidate 取 R2，不再沿错误 top hypothesis 持续补证据
+  - 普通 `verify_evidence` 对检查/病原/影像/测量类 no-result 回答做后处理：未做、没听说、没注意、不记得归为 `unclear`；阴性、未检出、未见异常仍保留 `absent`
+
+### 结果影响
+
+- `水痘-带状疱疹病毒 / 巨细胞病毒` 这类真实病原体锚点进入会话后，会稳定保护对应候选，不再被只靠 HIV/CD4 背景或 rollout 模拟阳性的候选压过
+- rollout 里的 `MTB培养阳性` 之类模拟证据不会计入 stop gate 的 confirmed evidence
+- stop / repair 的主路径更接近“真实观测锚点 + 最低证据覆盖”，旧 guarded 细规则仍保留为复盘字段和消融 baseline
+- BMI、CD4、CT、病原体等检查或测量结果的“没做过”不再直接变成 hard negative
+
+### 验证
+
+- 执行：
+
+```bash
+conda run -n GraduationDesign python -m pytest tests/test_evidence_anchor.py tests/test_stop_rules.py tests/test_service_repair_flow.py -q
+conda run -n GraduationDesign python -m pytest tests/test_evidence_parser.py tests/test_action_builder.py tests/test_exam_context_flow.py tests/test_service_stop_flow.py tests/test_trajectory_evaluator.py tests/test_retriever.py tests/test_hypothesis_manager.py -q
+conda run -n GraduationDesign python -m pytest -q
+```
+
+- 结果：
+  - `46 passed`
+  - `53 passed`
+  - `217 passed`
