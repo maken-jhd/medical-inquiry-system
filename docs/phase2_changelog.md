@@ -10,6 +10,58 @@
 - `phase2_execution_checklist.md` 更偏“路线设计与待办清单”
 - 本文更偏“已经发生过哪些阶段性变化、分别解决了什么问题”
 
+## 近期更新：2026-05-02 stop rule 打薄与 evidence role 驱动排序
+
+### 本次目标
+
+- 不针对 smoke10 的个别病例写补丁，而是把诊断控制逻辑上移到通用 evidence role 与特异度
+- 打薄 stop rule，删除旧 `guarded_lenient` / PCP combo 这类带医学合同感的二次 gate
+- 让 A2 observed anchor 排序按“角色 + 特异度”工作：病原体、定义性检查、疾病特异检查优先，CD4/HIV/发热/年龄等高连接背景降权
+- 让 repair/action 从“追当前 top hypothesis”改为“补缺失证据角色”
+
+### 本次改动
+
+- [brain/stop_rules.py](/Users/loki/Workspace/GraduationDesign/brain/stop_rules.py)
+  - 重建为薄 stop policy：保留 turn 窗口、trajectory 门槛、verifier 明确拒绝、真实 observed anchor、更强 anchored alternative、clear negative definition evidence 与基础分数阈值
+  - 删除 guarded/PCP combo/minimum evidence family 合同型判断
+  - `anchor_controlled` 下，只有 `strong_anchor / definition_anchor / provisional_anchor` 可进入最终接受；`background_supported / speculative` 会以 `missing_required_anchor` 进入 repair
+  - `strong_anchor / definition_anchor` 可使用更低 trajectory 门槛，避免明确真实强证据被纯轨迹数量卡死
+- [brain/evidence_anchor.py](/Users/loki/Workspace/GraduationDesign/brain/evidence_anchor.py)
+  - 新增通用 evidence role：`disease_specific_anchor / definition_anchor / phenotype_support / risk_or_comorbidity / background_context`
+  - A2 observed anchor 排序新增 role tier 与 `role_specificity_score`
+  - 疾病节点自身命中会作为 `SELF_DISEASE_MATCH` 强锚点参与排序，避免“巨细胞病毒感染”等真实疾病提及被 CD4 背景证据压住
+  - CD4、HIV、免疫抑制、发热、年龄、既往病史等高连接证据统一降为 background；病原体、疾病特异化验/影像、定义性 detail 保留高权重
+- [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - 移除 verifier repair 中的 guarded family / PCP combo 分支
+  - repair context 新增 `missing_evidence_roles`
+  - `missing_required_anchor` 下会把 top-k hypothesis 的动作纳入候选池，而不是只追当前 top
+  - repair action scoring 改为通用 role score：优先 `disease_specific_anchor / definition_anchor`，降权 background-only action，同时保留推荐证据命中、区分度、新颖度和成本偏置
+- [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml)
+  - 移除旧 stop gate 的 `guarded_lenient_early_turn_index`
+- [tests/test_stop_rules.py](/Users/loki/Workspace/GraduationDesign/tests/test_stop_rules.py)、[tests/test_evidence_anchor.py](/Users/loki/Workspace/GraduationDesign/tests/test_evidence_anchor.py)、[tests/test_service_repair_flow.py](/Users/loki/Workspace/GraduationDesign/tests/test_service_repair_flow.py)
+  - 更新 stop/anchor/repair 测试到 evidence role 驱动的新语义
+
+### 影响范围
+
+- stop rule 不再承担疾病专科诊断合同，只做通用流程停机与安全拒停
+- 病原体阳性、疾病名直接命中、定义性数值/检查证据会更稳定地压过 CD4/HIV 等背景证据
+- 背景证据仍可扩大候选池，但不能单独触发最终接受
+- repair 在背景证据不足时会主动寻找特异锚点或定义锚点，减少沿错误 top hypothesis 一路追问的概率
+
+### 验证结果
+
+- 已执行：
+
+```bash
+python -m py_compile brain/stop_rules.py brain/evidence_anchor.py brain/service.py brain/hypothesis_manager.py
+conda run -n GraduationDesign python -m pytest tests/test_stop_rules.py tests/test_evidence_anchor.py tests/test_service_repair_flow.py tests/test_service_config.py tests/test_hypothesis_manager.py -q
+conda run -n GraduationDesign python -m pytest -q
+```
+
+- 结果：
+  - `35 passed`
+  - `201 passed`
+
 ## 近期更新：2026-05-02 verifier 真实证据隔离与答案聚合兜底
 
 ### 本次目标

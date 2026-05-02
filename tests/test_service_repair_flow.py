@@ -302,7 +302,7 @@ def test_service_missing_support_prefers_recommended_evidence_family() -> None:
     assert action.target_node_name == "胸部CT磨玻璃影"
 
 
-def test_service_pcp_combo_repair_prefers_missing_family_anchor_over_respiratory_path() -> None:
+def test_service_missing_anchor_repair_prefers_specific_role_over_background_path() -> None:
     tracker = StateTracker()
     state = tracker.create_session("s_combo")
     state.candidate_hypotheses = [
@@ -328,14 +328,14 @@ def test_service_pcp_combo_repair_prefers_missing_family_anchor_over_respiratory
         ],
         "pcp": [
             {
-                "node_id": "cd4",
+                "node_id": "pcp_pcr",
                 "label": "LabFinding",
-                "name": "CD4+ T淋巴细胞计数 < 200/μL",
-                "relation_type": "HAS_LAB_FINDING",
-                "relation_weight": 0.8,
+                "name": "诱导痰肺孢子菌 PCR 阳性",
+                "relation_type": "DIAGNOSED_BY",
+                "relation_weight": 0.95,
                 "node_weight": 1.0,
                 "similarity_confidence": 1.0,
-                "contradiction_priority": 0.88,
+                "contradiction_priority": 0.98,
                 "question_type_hint": "lab",
                 "priority": 2.0,
                 "is_red_flag": False,
@@ -363,20 +363,18 @@ def test_service_pcp_combo_repair_prefers_missing_family_anchor_over_respiratory
         "s_combo",
         SearchResult(best_answer_id="pcp"),
         {
-            "reject_reason": "missing_key_support",
+            "reject_reason": "missing_required_anchor",
             "current_answer_id": "pcp",
             "current_answer_name": "肺孢子菌肺炎 (PCP)",
-            "guarded_acceptance_block_reason": "pcp_combo_insufficient",
-            "guarded_confirmed_evidence_families": ["imaging", "oxygenation"],
-            "guarded_missing_evidence_families": ["immune_status", "pathogen", "pcp_specific"],
-            "recommended_next_evidence": ["CD4+ T淋巴细胞计数 < 200/μL", "β-D 葡聚糖", "PCP PCR"],
+            "missing_evidence_roles": ["disease_specific_anchor"],
+            "recommended_next_evidence": ["肺孢子菌 PCR", "病原学证据"],
         },
     )
 
     assert action is not None
     assert action.hypothesis_id == "pcp"
     assert action.action_type == "collect_general_exam_context"
-    assert any(item["name"] == "CD4+ T淋巴细胞计数 < 200/μL" for item in action.metadata["exam_candidate_evidence"])
+    assert any(item["name"] == "诱导痰肺孢子菌 PCR 阳性" for item in action.metadata["exam_candidate_evidence"])
 
 
 def test_service_missing_confirmed_evidence_prefers_missing_family_before_root_symptoms() -> None:
@@ -423,8 +421,7 @@ def test_service_missing_confirmed_evidence_prefers_missing_family_before_root_s
         {
             "reject_reason": "missing_key_support",
             "current_answer_id": "pcp",
-            "guarded_acceptance_block_reason": "missing_confirmed_key_evidence",
-            "guarded_missing_evidence_families": ["pathogen", "pcp_specific"],
+            "missing_evidence_roles": ["disease_specific_anchor"],
             "recommended_next_evidence": ["β-D 葡聚糖", "PCP PCR"],
         },
     )
@@ -579,10 +576,10 @@ def test_service_anchor_controlled_repair_switches_to_anchored_alternative() -> 
     assert any(item["name"] == "水痘-带状疱疹病毒" for item in action.metadata["exam_candidate_evidence"])
 
 
-# 验证 guarded 的 strong_unresolved_alternative_candidates 保留细粒度原因后，仍走竞争诊断动作池。
+# 验证 strong_unresolved_alternative_candidates 保留细粒度原因后，仍走竞争诊断动作池。
 def test_service_strong_unresolved_alternative_reason_uses_alternative_pool() -> None:
     tracker = StateTracker()
-    state = tracker.create_session("s4_guarded_alt")
+    state = tracker.create_session("s4_alt_reason")
     state.candidate_hypotheses = [
         HypothesisScore(node_id="pcp", label="Disease", name="肺孢子菌肺炎 (PCP)", score=1.0),
         HypothesisScore(node_id="tb", label="Disease", name="肺结核", score=0.94),
@@ -624,7 +621,7 @@ def test_service_strong_unresolved_alternative_reason_uses_alternative_pool() ->
     brain = _build_brain(rows, tracker)
 
     action = brain._choose_repair_action(
-        "s4_guarded_alt",
+        "s4_alt_reason",
         SearchResult(),
         {
             "reject_reason": "strong_unresolved_alternative_candidates",
@@ -690,7 +687,6 @@ def test_service_hard_negative_repair_stays_on_current_answer_and_follows_recomm
             "reject_reason": "hard_negative_key_evidence",
             "current_answer_id": "toxo",
             "current_answer_name": "弓形虫脑炎",
-            "guarded_acceptance_block_reason": "hard_negative_key_evidence",
             "recommended_next_evidence": ["获取头颅MRI正式报告以确认环状增强病灶"],
         },
     )

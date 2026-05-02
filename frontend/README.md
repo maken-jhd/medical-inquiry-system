@@ -126,7 +126,7 @@ TRAJECTORY_VERIFIER_ACCEPTANCE_PROFILE=guarded_lenient
 BRAIN_AGENT_EVAL_MODE=llm_verifier
 ```
 
-说明：`BRAIN_ACCEPTANCE_PROFILE` 控制结构化 stop gate，当前默认使用 `anchor_controlled`；`TRAJECTORY_VERIFIER_ACCEPTANCE_PROFILE` 只控制轨迹 verifier prompt，默认仍保留 `guarded_lenient` 以便由 observed anchor gate 做最终验收。
+说明：`BRAIN_ACCEPTANCE_PROFILE` 控制结构化 stop policy，当前默认使用打薄后的 `anchor_controlled`；`TRAJECTORY_VERIFIER_ACCEPTANCE_PROFILE` 只控制轨迹 verifier prompt，默认仍保留 `guarded_lenient` 作为 verifier 提示词口径，不再启用旧版 guarded/PCP 组合 stop gate。
 
 真实 API Key 不建议写入版本库。请复制本机私密配置模板：
 

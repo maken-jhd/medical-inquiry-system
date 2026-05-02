@@ -49,4 +49,3 @@ stop:
   min_final_score: 0.6
   require_verifier_accept_flag: true
   acceptance_profile: anchor_controlled
-  guarded_lenient_early_turn_index: 2

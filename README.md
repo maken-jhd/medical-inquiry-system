@@ -276,7 +276,7 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 - [brain/entity_linker.py](/Users/loki/Workspace/GraduationDesign/brain/entity_linker.py)：mention 到 KG 节点的阈值化链接器
 - [brain/search_tree.py](/Users/loki/Workspace/GraduationDesign/brain/search_tree.py)：显式搜索树结构
 - [brain/trajectory_evaluator.py](/Users/loki/Workspace/GraduationDesign/brain/trajectory_evaluator.py)：轨迹聚合与最终答案评分器
-- [brain/stop_rules.py](/Users/loki/Workspace/GraduationDesign/brain/stop_rules.py)：终止与降级规则
+- [brain/stop_rules.py](/Users/loki/Workspace/GraduationDesign/brain/stop_rules.py)：打薄后的通用终止与降级规则，当前只处理真实 observed anchor、强备选、硬反证、verifier 拒绝与基础阈值，不再内置疾病专门证据合同
 - [brain/report_builder.py](/Users/loki/Workspace/GraduationDesign/brain/report_builder.py)：结构化结果汇总
 - [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)：A1-A4 问诊编排层
 
@@ -289,6 +289,7 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 - `A2`：已支持患者上下文 + R1 候选排序，并可保留 `recommended_next_evidence`
 - `A3`：已支持 R2 检索、动作构造、区分性 gain 与问句生成
 - `A4`：已支持目标感知 LLM 解释、LLM deductive judge 与显式路由
+- `Observed Anchor`：当前按 evidence role 与特异度重排候选，病原体/定义性检查/疾病特异检查优先，CD4/HIV/发热等高连接背景证据降权
 - `SearchTree + UCT + rollout`：已支持多次 rollout 的 `select -> expand -> simulate -> backpropagate`
 - `TrajectoryEvaluator`：已支持路径聚类、相似度驱动 diversity 和可选 LLM verifier 模式
 - `llm_verifier`：当前会对齐 stop rule 的最早接受窗口；在 `turn_index` 或 `trajectory_count` 尚未达到可停止条件前，会先延后 verifier 调用并退回轻量 fallback 评分，避免 competitive replay 在早期追问轮次反复支付高成本评审
@@ -640,12 +641,9 @@ MAX_TURNS_SWEEP=3 STOP_PROFILES=baseline ./scripts/run_acceptance_sweep.sh
 - 最近一次 sweep 输出目录会写入 `test_outputs/simulator_replay/latest_verifier_acceptance_sweep_output.txt`
 - 该脚本重点观察 `verifier_called_count`、`accepted_with_verifier_metadata_count`、`accepted_without_verifier_metadata_count`、`accepted_on_turn1_count`、`wrong_accept_on_turn1_count`
 - 同时继续观察 `first_correct_best_answer_turn`、`first_verifier_accept_turn`、`first_verifier_accept_turn_for_final_answer`、`correct_but_rejected_span`、`accepted_correct_count`、`accepted_wrong_count`
-- 新增 guarded safety 指标：`wrong_accept_reason_counts`、`final_answer_changed_after_first_accept_count`、`accepted_after_negative_key_evidence_count`、`accepted_after_recent_hypothesis_switch_count`、`accepted_with_nonempty_alternative_candidates_count`
-- 继续观察 gate 协同指标：`guarded_block_reason_counts`、`verifier_positive_but_gate_rejected_count`、`accept_candidate_without_confirmed_combo_count`
-- 每个 profile 的 `baseline/guarded_gate_audit.jsonl` 会逐条记录 verifier positive 但 guarded gate 拒绝的 turn，包括 `block_reason`、已确认证据 family、缺失 family、强替代候选、最近关键证据状态，以及 hard/soft negative evidence 分层
-- 节点级归因指标会统计 `guarded_negative_evidence_node_counts`、`guarded_negative_evidence_family_counts`、`guarded_negative_evidence_tier_counts`、`guarded_negative_evidence_scope_counts`，用于定位到底是哪几个节点把 guarded 接受率压低
-- missing-family-first repair 指标会统计 `missing_family_first_selected_count`、`combo_anchor_selected_before_turn3_count`、`family_recorded_after_question_count`，用于区分“缺口没被问到”和“问到了但没进 confirmed family”
-- `guarded_lenient` 会对 PCP、结核、真菌性肺部感染等高混淆呼吸道诊断全程要求 confirmed key evidence，并对 PCP 使用有限组合模板闸门，如影像+免疫/实验室、影像+病原/PCP-specific、影像+氧合+免疫、影像+典型呼吸道表现+免疫
+- 当前 stop gate 已打薄，旧 `guarded_lenient` / PCP combo 组合闸门不再作为结构化 stop 规则；`guarded_lenient` 仍可作为 verifier prompt profile 做消融观察
+- 重点观察 `anchor_controlled_block_reason`、`observed_anchor_score`、`anchor_tier`、`missing_evidence_roles`、`anchored alternative` 与 `hard_negative_key_evidence` 等通用证据角色指标
+- repair 指标应优先看下一问是否补到了 `disease_specific_anchor / definition_anchor / clear_confirmation`，而不是继续追共享背景证据
 
 真实 focused acceptance validation：
 

@@ -20,6 +20,27 @@ ANCHOR_RELATION_TYPES = {
     "DETECTED_BY",
 }
 DETAIL_DEFINITION_RELATION_TYPES = {"DIAGNOSED_BY", "REQUIRES_DETAIL"}
+DISEASE_SELF_ANCHOR_RELATION_TYPE = "SELF_DISEASE_MATCH"
+BACKGROUND_FAMILY_TAGS = {
+    "immune_status",
+    "underlying_infection",
+    "general_risk",
+    "constitutional_symptom",
+}
+SPECIFIC_ANCHOR_FAMILY_TAGS = {
+    "pathogen",
+    "imaging",
+    "disease_specific_lab",
+    "serology",
+    "tumor_marker",
+    "pathology",
+    "oxygenation",
+}
+DEFINITION_FAMILY_TAGS = {
+    "detail",
+    "metabolic_definition",
+    "blood_count",
+}
 
 
 @dataclass
@@ -40,6 +61,7 @@ class EvidenceAnchorConfig:
             "DIAGNOSED_BY": 1.0,
             "CONFIRMED_BY": 1.0,
             "DETECTED_BY": 1.0,
+            DISEASE_SELF_ANCHOR_RELATION_TYPE: 1.0,
             "HAS_LAB_FINDING": 0.85,
             "HAS_IMAGING_FINDING": 0.85,
             "MANIFESTS_AS": 0.45,
@@ -58,6 +80,7 @@ class EvidenceAnchorConfig:
             "ClinicalFinding": 0.35,
             "RiskFactor": 0.25,
             "PopulationGroup": 0.2,
+            "Disease": 1.0,
         }
     )
 
@@ -104,6 +127,7 @@ class EvidenceAnchorAnalyzer:
             enriched,
             key=lambda item: (
                 -self._anchor_tier_priority(str(item.metadata.get("anchor_tier") or "")),
+                -float(item.metadata.get("role_specificity_score", 0.0)),
                 -float(item.metadata.get("observed_anchor_score", 0.0)),
                 -float(item.score),
                 item.name,
@@ -217,7 +241,9 @@ class EvidenceAnchorAnalyzer:
         match_frequency: dict[str, int],
     ) -> dict:
         strong: list[dict] = []
+        definition: list[dict] = []
         provisional: list[dict] = []
+        phenotype: list[dict] = []
         background: list[dict] = []
         negative: list[dict] = []
         observed_families: set[str] = set()
@@ -244,6 +270,18 @@ class EvidenceAnchorAnalyzer:
                     match_frequency.get(item.node_id, self.config.default_disease_degree),
                 ),
             )
+            role = self._classify_evidence_role(
+                item=item,
+                relation_type=relation_type,
+                label=label,
+                evidence_name=evidence_name,
+                candidate_name=hypothesis.name,
+                evidence_tags=evidence_tags,
+                disease_degree=max(
+                    int(payload.get("disease_degree") or 0),
+                    match_frequency.get(item.node_id, self.config.default_disease_degree),
+                ),
+            )
             compact = {
                 "node_id": item.node_id,
                 "name": evidence_name,
@@ -252,13 +290,14 @@ class EvidenceAnchorAnalyzer:
                 "polarity": item.polarity,
                 "resolution": item.resolution,
                 "relation_type": relation_type,
+                "evidence_role": role,
                 "anchor_score": round(score, 4),
                 "source": item.source,
                 "source_turns": list(item.source_turns),
                 "evidence_tags": sorted(evidence_tags),
             }
 
-            if self._is_negative_anchor(item, relation_type, label):
+            if self._is_negative_anchor(item, relation_type, label, role):
                 negative.append(compact)
                 continue
 
@@ -268,47 +307,59 @@ class EvidenceAnchorAnalyzer:
             if item.resolution == "clear":
                 observed_families.update(tag for tag in evidence_tags if not tag.startswith("type:"))
 
-            if self._is_background_evidence(evidence_name, hypothesis.name):
+            if role == "background_context":
                 background.append(compact)
                 continue
 
-            if self._is_high_value_anchor(label, relation_type):
+            if role == "definition_anchor":
+                if item.resolution == "clear":
+                    definition.append(compact)
+                else:
+                    provisional.append(compact)
+                continue
+
+            if role == "disease_specific_anchor":
                 if item.resolution == "clear":
                     strong.append(compact)
                 else:
                     provisional.append(compact)
                 continue
 
-            if len(evidence_tags & {"pathogen", "imaging", "oxygenation", "pcp_specific"}) > 0:
-                if item.resolution == "clear":
-                    strong.append(compact)
-                else:
-                    provisional.append(compact)
+            if role == "phenotype_support":
+                phenotype.append(compact)
             else:
                 background.append(compact)
 
         strong_score = sum(float(item.get("anchor_score", 0.0)) for item in strong)
+        definition_score = sum(float(item.get("anchor_score", 0.0)) for item in definition)
         provisional_score = sum(float(item.get("anchor_score", 0.0)) for item in provisional)
+        phenotype_score = sum(float(item.get("anchor_score", 0.0)) for item in phenotype)
         background_score = sum(float(item.get("anchor_score", 0.0)) for item in background)
         negative_score = sum(float(item.get("anchor_score", 0.0)) for item in negative)
-        tier = self._select_anchor_tier(strong, provisional, background, negative)
+        tier = self._select_anchor_tier(strong, definition, provisional, phenotype, background, negative)
         missing_families, minimum_groups_available = self._minimum_family_gaps(hypothesis, observed_families)
 
         return {
-            "observed_anchor_score": round(strong_score + provisional_score * 0.65, 4),
+            "observed_anchor_score": round(strong_score + definition_score + provisional_score * 0.65, 4),
             "strong_anchor_score": round(strong_score, 4),
+            "definition_anchor_score": round(definition_score, 4),
             "provisional_anchor_score": round(provisional_score, 4),
+            "phenotype_support_score": round(phenotype_score, 4),
             "background_support_score": round(background_score, 4),
             "anchor_negative_score": round(negative_score, 4),
+            "role_specificity_score": round(strong_score + definition_score + provisional_score * 0.65 + phenotype_score * 0.25, 4),
             "anchor_tier": tier,
-            "anchor_supporting_evidence": strong,
+            "anchor_supporting_evidence": strong + definition,
+            "definition_anchor_evidence": definition,
             "provisional_anchor_evidence": provisional,
+            "phenotype_supporting_evidence": phenotype,
             "background_supporting_evidence": background,
             "anchor_negative_evidence": negative,
             "observed_evidence_families": sorted(observed_families),
             "anchor_missing_evidence_families": missing_families,
             "minimum_evidence_groups_available": minimum_groups_available,
             "minimum_evidence_family_coverage_satisfied": len(missing_families) == 0,
+            "missing_evidence_roles": self._missing_evidence_roles(tier),
         }
 
     def _apply_summary_to_hypothesis(self, hypothesis: HypothesisScore, summary: dict) -> HypothesisScore:
@@ -316,7 +367,9 @@ class EvidenceAnchorAnalyzer:
         base_score = float(existing_metadata.get("pre_anchor_score", hypothesis.score))
         bonus = (
             float(summary.get("strong_anchor_score", 0.0)) * self.config.strong_anchor_bonus
+            + float(summary.get("definition_anchor_score", 0.0)) * self.config.strong_anchor_bonus
             + float(summary.get("provisional_anchor_score", 0.0)) * self.config.provisional_anchor_bonus
+            + float(summary.get("phenotype_support_score", 0.0)) * 0.35
             + float(summary.get("background_support_score", 0.0)) * self.config.background_support_bonus
             - float(summary.get("anchor_negative_score", 0.0)) * self.config.negative_anchor_penalty
         )
@@ -351,10 +404,14 @@ class EvidenceAnchorAnalyzer:
                     "candidate_name": hypothesis.name,
                     "anchor_tier": str(summary.get("anchor_tier") or "speculative"),
                     "observed_anchor_score": float(summary.get("observed_anchor_score", 0.0)),
+                    "role_specificity_score": float(summary.get("role_specificity_score", 0.0)),
                     "background_support_score": float(summary.get("background_support_score", 0.0)),
                     "anchor_negative_score": float(summary.get("anchor_negative_score", 0.0)),
                     "anchor_supporting_evidence": summary.get("anchor_supporting_evidence", []),
+                    "definition_anchor_evidence": summary.get("definition_anchor_evidence", []),
+                    "phenotype_supporting_evidence": summary.get("phenotype_supporting_evidence", []),
                     "anchor_negative_evidence": summary.get("anchor_negative_evidence", []),
+                    "missing_evidence_roles": summary.get("missing_evidence_roles", []),
                 }
             )
 
@@ -374,16 +431,25 @@ class EvidenceAnchorAnalyzer:
             ],
             "candidate_anchor_summary": candidates,
             "strong_anchor_candidates": [
-                item for item in candidates if str(item.get("anchor_tier") or "") == "strong_anchor"
+                item for item in candidates if str(item.get("anchor_tier") or "") in {"strong_anchor", "definition_anchor"}
             ],
             "anchored_candidate_ids": [
                 str(item.get("candidate_id"))
                 for item in candidates
-                if str(item.get("anchor_tier") or "") in {"strong_anchor", "provisional_anchor"}
+                if str(item.get("anchor_tier") or "") in {"strong_anchor", "definition_anchor", "provisional_anchor"}
             ],
         }
 
     def _best_payload_match(self, item: ObservedEvidenceItem, hypothesis: HypothesisScore) -> dict | None:
+        if item.node_id == hypothesis.node_id or self._normalize_text(item.name) == self._normalize_text(hypothesis.name):
+            return {
+                "node_id": hypothesis.node_id,
+                "name": hypothesis.name,
+                "label": "Disease",
+                "relation_type": DISEASE_SELF_ANCHOR_RELATION_TYPE,
+                "disease_degree": 1,
+            }
+
         best_score = 0.0
         best_payload: dict | None = None
 
@@ -480,18 +546,76 @@ class EvidenceAnchorAnalyzer:
 
         return label == "ClinicalAttribute" and relation_type in DETAIL_DEFINITION_RELATION_TYPES
 
-    def _is_negative_anchor(self, item: ObservedEvidenceItem, relation_type: str, label: str) -> bool:
+    def _classify_evidence_role(
+        self,
+        *,
+        item: ObservedEvidenceItem,
+        relation_type: str,
+        label: str,
+        evidence_name: str,
+        candidate_name: str,
+        evidence_tags: set[str],
+        disease_degree: int,
+    ) -> str:
+        if relation_type == DISEASE_SELF_ANCHOR_RELATION_TYPE:
+            return "disease_specific_anchor"
+
+        if self._is_background_evidence(evidence_name, candidate_name, evidence_tags, disease_degree):
+            return "background_context"
+
+        if label == "Pathogen" or relation_type == "HAS_PATHOGEN" or "type:pathogen" in evidence_tags:
+            return "disease_specific_anchor"
+
+        if label == "Disease":
+            return "disease_specific_anchor"
+
+        if relation_type in DETAIL_DEFINITION_RELATION_TYPES or len(evidence_tags & DEFINITION_FAMILY_TAGS) > 0:
+            return "definition_anchor"
+
+        if relation_type in ANCHOR_RELATION_TYPES and label in {"LabFinding", "LabTest", "ImagingFinding"}:
+            return "disease_specific_anchor"
+
+        if len(evidence_tags & SPECIFIC_ANCHOR_FAMILY_TAGS) > 0:
+            return "disease_specific_anchor"
+
+        if label == "ClinicalAttribute":
+            return "definition_anchor"
+
+        if label in {"RiskFactor", "PopulationGroup"} or relation_type in {"RISK_FACTOR_FOR", "APPLIES_TO"}:
+            return "risk_or_comorbidity"
+
+        if label == "ClinicalFinding" or relation_type == "MANIFESTS_AS":
+            return "phenotype_support"
+
+        if self._is_high_value_anchor(label, relation_type):
+            return "disease_specific_anchor"
+
+        return "background_context"
+
+    def _is_negative_anchor(self, item: ObservedEvidenceItem, relation_type: str, label: str, role: str) -> bool:
         if item.polarity != "absent" or item.resolution != "clear":
             return False
 
-        return relation_type in ANCHOR_RELATION_TYPES or self._is_high_value_anchor(label, relation_type)
+        return role in {"disease_specific_anchor", "definition_anchor"} or relation_type in ANCHOR_RELATION_TYPES
 
-    def _is_background_evidence(self, evidence_name: str, candidate_name: str) -> bool:
+    def _is_background_evidence(
+        self,
+        evidence_name: str,
+        candidate_name: str,
+        evidence_tags: set[str],
+        disease_degree: int,
+    ) -> bool:
         evidence_text = self._normalize_text(evidence_name)
         candidate_text = self._normalize_text(candidate_name)
 
         if self._is_hiv_specific_marker(evidence_text):
             return not any(keyword in candidate_text for keyword in ("hiv", "艾滋", "获得性免疫缺陷"))
+
+        if len(evidence_tags & BACKGROUND_FAMILY_TAGS) > 0 and len(evidence_tags & SPECIFIC_ANCHOR_FAMILY_TAGS) == 0:
+            return True
+
+        if disease_degree >= 6 and len(evidence_tags & SPECIFIC_ANCHOR_FAMILY_TAGS) == 0:
+            return True
 
         return any(
             keyword in evidence_text
@@ -537,13 +661,20 @@ class EvidenceAnchorAnalyzer:
 
         normalized = self._normalize_text(str(payload.get("name") or item.name))
         family_rules = {
-            "immune_status": ("cd4", "t淋巴", "免疫", "hiv感染"),
+            "immune_status": ("cd4", "t淋巴", "免疫", "hiv感染", "艾滋"),
+            "underlying_infection": ("hiv感染", "hiv/aids", "艾滋"),
+            "general_risk": ("既往病史", "年龄", "性别", "高危"),
+            "constitutional_symptom": ("发热", "发烧", "乏力", "盗汗", "体重下降"),
             "pathogen": ("病原", "病毒", "细菌", "真菌", "pcr", "核酸", "阳性", "检出"),
+            "disease_specific_lab": ("抗体阳性", "pcr", "核酸", "培养", "抗酸", "xpert", "葡聚糖"),
             "imaging": ("ct", "胸片", "影像", "磨玻璃", "mri"),
             "oxygenation": ("低氧", "血氧", "氧分压", "pao2", "spo2"),
             "respiratory": ("咳", "气促", "呼吸困难", "胸闷"),
             "tuberculosis": ("结核", "抗酸", "分枝杆菌", "mtb", "xpert"),
-            "pcp_specific": ("肺孢子", "pcp", "pneumocystis", "βd葡聚糖", "bdg"),
+            "serology": ("igg", "igm", "抗体", "血清"),
+            "metabolic_definition": ("ldl", "hdl", "甘油三酯", "总胆固醇", "血脂", "bmi"),
+            "tumor_marker": ("afp", "肿瘤标志物", "甲胎蛋白"),
+            "pathology": ("病理", "活检", "组织学", "免疫组化"),
         }
 
         for family, keywords in family_rules.items():
@@ -581,14 +712,20 @@ class EvidenceAnchorAnalyzer:
     def _select_anchor_tier(
         self,
         strong: Sequence[dict],
+        definition: Sequence[dict],
         provisional: Sequence[dict],
+        phenotype: Sequence[dict],
         background: Sequence[dict],
         negative: Sequence[dict],
     ) -> str:
         if len(strong) > 0:
             return "strong_anchor"
+        if len(definition) > 0:
+            return "definition_anchor"
         if len(provisional) > 0:
             return "provisional_anchor"
+        if len(phenotype) > 0:
+            return "phenotype_supported"
         if len(background) > 0:
             return "background_supported"
         if len(negative) > 0:
@@ -598,11 +735,22 @@ class EvidenceAnchorAnalyzer:
     def _anchor_tier_priority(self, tier: str) -> int:
         return {
             "strong_anchor": 4,
+            "definition_anchor": 4,
             "provisional_anchor": 3,
-            "background_supported": 2,
+            "phenotype_supported": 2,
+            "background_supported": 1,
             "speculative": 1,
             "negative_anchor": 0,
         }.get(tier, 1)
+
+    def _missing_evidence_roles(self, tier: str) -> list[str]:
+        if tier == "provisional_anchor":
+            return ["clear_confirmation"]
+        if tier in {"background_supported", "speculative", "negative_anchor"}:
+            return ["disease_specific_anchor", "definition_anchor"]
+        if tier == "phenotype_supported":
+            return ["disease_specific_anchor", "definition_anchor"]
+        return []
 
     def _observed_item_priority(self, item: ObservedEvidenceItem) -> int:
         if item.polarity == "present" and item.resolution == "clear":

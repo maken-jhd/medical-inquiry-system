@@ -64,6 +64,85 @@ def test_observed_pathogen_anchor_reranks_candidate_over_background() -> None:
     assert index["strong_anchor_candidates"][0]["candidate_id"] == "vzv"
 
 
+# 真实会话直接命中疾病节点时，应按疾病自身锚点处理，避免被 CD4 等背景证据压住。
+def test_observed_disease_self_match_becomes_strong_anchor() -> None:
+    state = SessionState(session_id="anchor_self")
+    state.evidence_states["cmv"] = EvidenceState(
+        node_id="cmv",
+        polarity="present",
+        existence="exist",
+        resolution="clear",
+        metadata={"target_node_name": "巨细胞病毒感染", "target_node_label": "Disease"},
+    )
+    state.evidence_states["cd4"] = EvidenceState(
+        node_id="cd4",
+        polarity="present",
+        existence="exist",
+        resolution="clear",
+        metadata={"target_node_name": "CD4+ T淋巴细胞计数 < 200/μL", "target_node_label": "LabFinding"},
+    )
+    hypotheses = [
+        HypothesisScore(
+            node_id="ks",
+            label="Disease",
+            name="卡波西肉瘤",
+            score=2.0,
+            metadata={
+                "evidence_payloads": [
+                    {
+                        "node_id": "cd4",
+                        "name": "CD4+ T淋巴细胞计数 < 200/μL",
+                        "label": "LabFinding",
+                        "relation_type": "RISK_FACTOR_FOR",
+                    }
+                ]
+            },
+        ),
+        HypothesisScore(node_id="cmv", label="Disease", name="巨细胞病毒感染", score=0.6, metadata={}),
+    ]
+
+    ranked, _ = EvidenceAnchorAnalyzer().rerank_hypotheses(state, hypotheses)
+
+    assert ranked[0].node_id == "cmv"
+    assert ranked[0].metadata["anchor_tier"] == "strong_anchor"
+    assert ranked[0].metadata["anchor_supporting_evidence"][0]["evidence_role"] == "disease_specific_anchor"
+
+
+# 定义性 detail / 数值证据应形成 definition anchor，而非普通背景支持。
+def test_definition_detail_anchor_is_role_driven() -> None:
+    state = SessionState(session_id="anchor_definition")
+    state.evidence_states["ldl"] = EvidenceState(
+        node_id="ldl",
+        polarity="present",
+        existence="exist",
+        resolution="clear",
+        metadata={"target_node_name": "LDL-C ≥ 2.6 mmol/L", "target_node_label": "ClinicalAttribute"},
+    )
+    hypotheses = [
+        HypothesisScore(
+            node_id="dyslipidemia",
+            label="Disease",
+            name="血脂异常",
+            score=0.8,
+            metadata={
+                "evidence_payloads": [
+                    {
+                        "node_id": "ldl",
+                        "name": "LDL-C ≥ 2.6 mmol/L",
+                        "label": "ClinicalAttribute",
+                        "relation_type": "REQUIRES_DETAIL",
+                    }
+                ]
+            },
+        )
+    ]
+
+    ranked, _ = EvidenceAnchorAnalyzer().rerank_hypotheses(state, hypotheses)
+
+    assert ranked[0].metadata["anchor_tier"] == "definition_anchor"
+    assert ranked[0].metadata["definition_anchor_evidence"][0]["evidence_role"] == "definition_anchor"
+
+
 # rollout 中模拟出来的阳性证据不能进入 observed anchor。
 def test_rollout_simulated_positive_is_ignored_by_anchor_index() -> None:
     state = SessionState(session_id="anchor_simulated")
