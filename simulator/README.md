@@ -87,11 +87,11 @@
 - 病人 opening 的检查类关键锚点会被显式保留，避免首轮证据在自然语言压缩后丢失图谱锚点
 - 检查/病原/疾病定义性问题 no-match 时不再默认强阴性，降低缺槽位对 guarded acceptance 的误伤
 - 自动回放和基础评测已经能批量跑通
-- 当前图谱驱动病例 catalog-QC 正式输出已固定落盘到 `test_outputs/simulator_cases/graph_cases_20260502_catalog_qc/`，并可按固定随机种子抽取四类各 5 条样本，便于人工复核
-- 当前新增 10 例 smoke 输入到 `test_outputs/simulator_cases/graph_cases_20260502_catalog_qc/smoke10/`；该批按 `ordinary=3 / low_cost=2 / exam_driven=3 / competitive=2` 均衡抽样，全部来自 `benchmark_qc_status=eligible` 病例
+- 当前图谱驱动病例 role-QC 正式输出已固定落盘到 `test_outputs/simulator_cases/graph_cases_20260502_role_qc/`；生成器会写入 `case_qc_score / case_qc_status / case_qc_reasons`，避免只按 family 数量判断病例质量
+- 当前新增 20 例 smoke 输入到 `test_outputs/simulator_cases/graph_cases_20260502_role_qc/smoke20/`；该批全部来自 `case_qc_status=eligible` 病例，类型分布为 `ordinary=9 / low_cost=1 / exam_driven=5 / competitive=5`
 - 当前已根据本机 Neo4j 导出症状证据族目录到 `test_outputs/evidence_family/disease_symptom_catalog_20260502/`，其中包含 disease-symptom 查看版 Markdown、症状节点分类 JSON 和每个疾病的 symptom-only 最低证据组建议
 - 当前已根据本机 Neo4j 导出全证据族目录到 `test_outputs/evidence_family/disease_evidence_catalog_20260502/`，其中包含 symptom / risk / detail / lab / imaging / pathogen 六类证据节点和每个疾病的 full-evidence 最低证据组建议
-- 当前已将 full-evidence 最低证据组接入病例生成器，并重新生成病例集到 `test_outputs/simulator_cases/graph_cases_20260502_catalog_qc/`
+- 当前已将 full-evidence 最低证据组和 evidence-role case QC 接入病例生成器，并重新生成病例集到 `test_outputs/simulator_cases/graph_cases_20260502_role_qc/`
 - 路径缓存仍然是后续待完成模块
 
 因此，这个目录当前更适合被理解为：
@@ -153,6 +153,13 @@
 
 - [sample_graph_virtual_patients.py](/Users/loki/Workspace/GraduationDesign/scripts/sample_graph_virtual_patients.py)
   - 从 `cases.json` 或 `cases.jsonl` 中按病例类型固定抽样，输出 `sampled_cases_4x5.json` 和 `sampled_cases_4x5.md`，用于人工检查 opening 与 positive slots 质量。
+
+- [build_graph_case_smoke_set.py](/Users/loki/Workspace/GraduationDesign/scripts/build_graph_case_smoke_set.py)
+  - 从完整图谱病例中抽取可回放 smoke 输入。
+  - 默认只选择 `case_qc_status=eligible` 病例，优先按类型均衡；某一类型 eligible 数量不足时，用其他类型 eligible 病例补齐总数。
+
+- [run_role_qc_smoke20_replay.sh](/Users/loki/Workspace/GraduationDesign/scripts/run_role_qc_smoke20_replay.sh)
+  - 运行最新 `graph_cases_20260502_role_qc/smoke20` 的一键 replay 脚本。
 
 ## 详细方案文档
 

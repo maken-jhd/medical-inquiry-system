@@ -478,14 +478,22 @@ def test_generator_uses_catalog_minimum_evidence_groups(tmp_path: Path) -> None:
     record = _make_record(
         "merged_node_catalog_required",
         "目录约束病",
-        [
-            *[
-                _make_evidence(f"merged_node_sym_catalog_{index:03d}", f"普通症状{index}", "symptom", priority=2.0 - index * 0.01)
-                for index in range(1, 10)
+            [
+                *[
+                    _make_evidence(
+                        f"merged_node_sym_catalog_{index:03d}",
+                        symptom_name,
+                        "symptom",
+                        priority=2.0 - index * 0.01,
+                    )
+                    for index, symptom_name in enumerate(
+                        ["咳嗽", "头痛", "腹痛", "皮疹", "胸闷", "乏力", "视物模糊", "关节痛", "尿痛"],
+                        start=1,
+                    )
+                ],
+                _make_evidence("merged_node_lab_catalog_001", "动脉血氧分压 <60 mmHg", "lab", priority=0.5),
             ],
-            _make_evidence("merged_node_lab_catalog_001", "动脉血氧分压 <60 mmHg", "lab", priority=0.5),
-        ],
-    )
+        )
 
     result = GraphCaseGenerator(
         GraphCaseGeneratorConfig(minimum_evidence_groups_file=str(catalog_file))
@@ -497,6 +505,93 @@ def test_generator_uses_catalog_minimum_evidence_groups(tmp_path: Path) -> None:
     assert ordinary_case.metadata["benchmark_required_family_groups"] == [["oxygenation"]]
     assert ordinary_case.metadata["benchmark_qc_status"] == "eligible"
     assert result.manifest["minimum_evidence_requirement_catalog"]["requirement_count_by_id"] == 1
+
+
+# 验证病例 QC 不会把 CD4 / HIV / 年龄这类背景证据当成 benchmark 核心锚点。
+def test_generator_case_qc_rejects_background_only_positive_slots() -> None:
+    record = _make_record(
+        "merged_node_background_only",
+        "原发性肝细胞癌",
+        [
+            _make_evidence("merged_node_cd4_bg_001", "CD4+ T淋巴细胞计数 < 200/μL", "lab", priority=2.0),
+            _make_evidence("merged_node_risk_bg_001", "HIV感染者", "risk", priority=1.8),
+            _make_evidence("merged_node_age_bg_001", "年龄", "detail", priority=1.7),
+            _make_evidence("merged_node_history_bg_001", "既往病史", "risk", priority=1.6),
+        ],
+    )
+
+    result = GraphCaseGenerator().generate_from_records([record])
+    case = next(item for item in result.cases if item.metadata.get("case_type") == "ordinary")
+
+    assert case.metadata["case_qc_status"] == "not_benchmark_eligible"
+    assert case.metadata["benchmark_qc_status"] == "ineligible"
+    assert "missing_disease_specific_or_definition_anchor" in case.metadata["case_qc_reasons"]
+    assert "missing_primary_diagnostic_path_core_evidence" in case.metadata["case_qc_reasons"]
+
+
+# 验证感染类病例需要 pathogen / 特异实验室 / 特异影像中的核心证据，而不是只靠背景风险。
+def test_generator_case_qc_accepts_infection_specific_anchor() -> None:
+    record = _make_record(
+        "merged_node_infection_anchor",
+        "巨细胞病毒感染",
+        [
+            _make_evidence("merged_node_risk_cmv_001", "HIV感染者", "risk", priority=1.8),
+            _make_evidence("merged_node_lab_cmv_001", "CMV DNA阳性", "lab", priority=2.0),
+            _make_evidence("merged_node_path_cmv_001", "巨细胞病毒", "pathogen", priority=1.9),
+            _make_evidence("merged_node_img_cmv_001", "胸部CT提示间质性浸润", "imaging", priority=1.7),
+            _make_evidence("merged_node_sym_cmv_001", "发热", "symptom", priority=1.5),
+        ],
+    )
+
+    result = GraphCaseGenerator().generate_from_records([record])
+    case = next(item for item in result.cases if item.metadata.get("case_type") == "exam_driven")
+
+    assert case.metadata["case_qc_status"] == "eligible"
+    assert case.metadata["benchmark_qc_status"] == "eligible"
+    assert case.metadata["case_qc_positive_role_counts"]["disease_specific_anchor"] >= 1
+
+
+# 验证肿瘤类病例必须有影像、病理或肿瘤标志物，单独肿瘤分期不构成核心诊断路径。
+def test_generator_case_qc_requires_tumor_core_evidence() -> None:
+    weak_record = _make_record(
+        "merged_node_tumor_weak",
+        "肝癌",
+        [
+            _make_evidence("merged_node_risk_tumor_001", "HIV感染者", "risk", priority=1.8),
+            _make_evidence("merged_node_det_tumor_001", "肿瘤分期", "detail", priority=1.7),
+            _make_evidence("merged_node_sym_tumor_001", "腹胀", "symptom", priority=1.6),
+            _make_evidence("merged_node_sym_tumor_002", "消瘦", "symptom", priority=1.5),
+        ],
+    )
+    strong_record = _make_record(
+        "merged_node_tumor_strong",
+        "宫颈癌",
+        [
+            _make_evidence("merged_node_sym_tumor_101", "阴道出血", "symptom", priority=1.5),
+            _make_evidence("merged_node_img_tumor_101", "盆腔MRI提示宫颈肿块", "imaging", priority=2.0),
+            _make_evidence("merged_node_lab_tumor_101", "病理活检提示鳞癌", "lab", priority=1.9),
+            _make_evidence("merged_node_lab_tumor_102", "肿瘤标志物升高", "lab", priority=1.8),
+            _make_evidence("merged_node_det_tumor_101", "肿瘤分期", "detail", priority=1.4),
+        ],
+    )
+
+    result = GraphCaseGenerator().generate_from_records([weak_record, strong_record])
+    weak_case = next(
+        item
+        for item in result.cases
+        if item.metadata.get("case_type") == "low_cost"
+        and item.metadata.get("disease_id") == weak_record.disease_id
+    )
+    strong_case = next(
+        item
+        for item in result.cases
+        if item.metadata.get("case_type") == "exam_driven"
+        and item.metadata.get("disease_id") == strong_record.disease_id
+    )
+
+    assert weak_case.metadata["case_qc_status"] == "not_benchmark_eligible"
+    assert "tumor_imaging_pathology_marker_or_definition" in weak_case.metadata["case_qc_missing_core_roles"]
+    assert strong_case.metadata["case_qc_status"] == "eligible"
 
 
 # 验证竞争负例不会把目标病名称或核心定义误写成阴性槽位。

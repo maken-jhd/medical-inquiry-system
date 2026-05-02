@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from .case_schema import SlotTruth, VirtualPatientCase
-from .evidence_family_catalog import classify_evidence_families
+from .evidence_family_catalog import GENERIC_FAMILIES, classify_evidence_families
 from .generate_cases import write_cases_json, write_cases_jsonl
 
 
@@ -78,6 +78,77 @@ BACKGROUND_OPENING_RISK_TERMS = (
 )
 BENCHMARK_QC_ELIGIBLE = "eligible"
 BENCHMARK_QC_INELIGIBLE = "ineligible"
+CASE_QC_ELIGIBLE = "eligible"
+CASE_QC_WEAK_ANCHOR = "weak_anchor"
+CASE_QC_NOT_BENCHMARK_ELIGIBLE = "not_benchmark_eligible"
+BACKGROUND_CONTEXT_FAMILIES = {
+    "immune_status",
+    "underlying_infection",
+    "art_or_reconstitution",
+    "exposure_risk",
+    "medication_risk",
+    "comorbidity_risk",
+    "population_risk",
+    "general_risk",
+    "general_detail",
+    "general_symptom",
+    "constitutional_symptom",
+}
+DEFINITION_ANCHOR_FAMILIES = {
+    "metabolic_definition",
+    "pathology",
+}
+DISEASE_SPECIFIC_ANCHOR_FAMILIES = {
+    "pathogen",
+    "fungal_pathogen",
+    "mycobacterial_pathogen",
+    "viral_pathogen",
+    "parasitic_pathogen",
+    "bacterial_pathogen",
+    "disease_specific_lab",
+    "serology",
+    "fungal_marker",
+    "cns_lab",
+    "oxygenation",
+    "viral_load",
+    "imaging",
+    "pulmonary_imaging",
+    "cns_imaging",
+    "abdominal_imaging",
+    "lymph_node_imaging",
+    "cardiovascular_imaging",
+    "bone_imaging",
+}
+NEURO_CORE_FAMILIES = {
+    "neurologic_symptom",
+    "cns_imaging",
+    "cns_lab",
+}
+INFECTION_CORE_FAMILIES = {
+    "pathogen",
+    "fungal_pathogen",
+    "mycobacterial_pathogen",
+    "viral_pathogen",
+    "parasitic_pathogen",
+    "bacterial_pathogen",
+    "disease_specific_lab",
+    "serology",
+    "fungal_marker",
+    "cns_lab",
+    "pulmonary_imaging",
+    "cns_imaging",
+    "abdominal_imaging",
+}
+TUMOR_CORE_FAMILIES = {
+    "imaging",
+    "abdominal_imaging",
+    "lymph_node_imaging",
+    "cns_imaging",
+    "pulmonary_imaging",
+    "pathology",
+    "disease_specific_lab",
+}
+METABOLIC_CORE_FAMILIES = {"metabolic_definition"}
 
 
 @dataclass(frozen=True)
@@ -197,15 +268,20 @@ def sample_cases_by_type(
     sample_size_per_type: int = 5,
     seed: int = 42,
     case_types: Sequence[str] | None = None,
+    qc_statuses: Sequence[str] | None = None,
 ) -> dict[str, list[VirtualPatientCase]]:
     """按病例类型分组抽样，便于人工检查。"""
 
     requested_case_types = tuple(case_types or CASE_TYPE_ORDER)
     rng = random.Random(seed)
     grouped_cases: dict[str, list[VirtualPatientCase]] = {case_type: [] for case_type in requested_case_types}
+    allowed_qc_statuses = {str(status) for status in qc_statuses or [] if str(status)}
 
     for case in cases:
         case_type = str(case.metadata.get("case_type") or "")
+        case_qc_status = str(case.metadata.get("case_qc_status") or case.metadata.get("benchmark_qc_status") or "")
+        if allowed_qc_statuses and case_qc_status not in allowed_qc_statuses:
+            continue
         if case_type in grouped_cases:
             grouped_cases[case_type].append(case)
 
@@ -228,6 +304,7 @@ def build_case_type_sample_payload(
     seed: int = 42,
     source_file: Path | None = None,
     case_types: Sequence[str] | None = None,
+    qc_statuses: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """构造按病例类型抽样后的可落盘 JSON 负载。"""
 
@@ -236,15 +313,27 @@ def build_case_type_sample_payload(
         sample_size_per_type=sample_size_per_type,
         seed=seed,
         case_types=case_types,
+        qc_statuses=qc_statuses,
     )
     ordered_case_types = tuple(case_types or CASE_TYPE_ORDER)
+    allowed_qc_statuses = {str(status) for status in qc_statuses or [] if str(status)}
     return {
         "source_file": str(source_file) if source_file is not None else None,
         "sample_size_per_type": sample_size_per_type,
         "seed": seed,
+        "qc_statuses": sorted(allowed_qc_statuses),
         "requested_case_types": list(ordered_case_types),
         "available_case_count_by_type": {
-            case_type: sum(1 for case in cases if str(case.metadata.get("case_type") or "") == case_type)
+            case_type: sum(
+                1
+                for case in cases
+                if str(case.metadata.get("case_type") or "") == case_type
+                and (
+                    not allowed_qc_statuses
+                    or str(case.metadata.get("case_qc_status") or case.metadata.get("benchmark_qc_status") or "")
+                    in allowed_qc_statuses
+                )
+            )
             for case_type in ordered_case_types
         },
         "sampled_case_count": sum(len(items) for items in sampled_cases.values()),
@@ -275,6 +364,7 @@ def render_case_type_sample_markdown(payload: dict[str, Any]) -> str:
         f"- source_file: {payload.get('source_file') or '-'}",
         f"- sample_size_per_type: {int(payload.get('sample_size_per_type') or 0)}",
         f"- seed: {int(payload.get('seed') or 0)}",
+        f"- qc_statuses: {_join_markdown_values(payload.get('qc_statuses') or [])}",
         f"- sampled_case_count: {int(payload.get('sampled_case_count') or 0)}",
         "",
         "## 抽样概览",
@@ -317,6 +407,9 @@ def render_case_type_sample_markdown(payload: dict[str, Any]) -> str:
                     f"- opening_slot_names: {_join_markdown_values(metadata.get('opening_slot_names') or [])}",
                     f"- selected_positive_slots: {_join_markdown_values(metadata.get('selected_positive_slots') or [])}",
                     f"- selected_negative_slots: {_join_markdown_values(metadata.get('selected_negative_slots') or [])}",
+                    f"- case_qc_status: `{metadata.get('case_qc_status') or '-'}`",
+                    f"- case_qc_score: `{metadata.get('case_qc_score') if metadata.get('case_qc_score') is not None else '-'}`",
+                    f"- case_qc_reasons: {_join_markdown_values(metadata.get('case_qc_reasons') or [])}",
                     f"- red_flags: {_join_markdown_values(case.get('red_flags') or [])}",
                     f"- hidden_slots: {_join_markdown_values(case.get('hidden_slots') or [])}",
                     f"- slot_truth_positive: {_join_markdown_values(_collect_slot_truth_names(case, expected_value=True))}",
@@ -391,6 +484,8 @@ class GraphCaseGenerator:
         self.minimum_evidence_requirements_by_id = requirements_by_id
         self.minimum_evidence_requirements_by_name = requirements_by_name
         self.minimum_evidence_requirement_catalog_path = requirement_catalog_path
+        self.evidence_connectivity_counts: dict[str, int] = {}
+        self.evidence_connectivity_threshold = 0
 
     def generate_from_audit_root(self, audit_root: Path) -> GraphCaseGenerationResult:
         """从审计目录读取报告并生成病例。"""
@@ -408,6 +503,8 @@ class GraphCaseGenerator:
         """直接从已解析的审计记录生成病例。"""
 
         profiles = [self._build_profile(record) for record in records]
+        self.evidence_connectivity_counts = _compute_evidence_connectivity_counts(profiles)
+        self.evidence_connectivity_threshold = _compute_high_connectivity_threshold(len(profiles))
         cases: list[VirtualPatientCase] = []
         disease_entries: list[dict[str, Any]] = []
         generated_case_count_by_type = {case_type: 0 for case_type in CASE_TYPE_ORDER}
@@ -512,6 +609,8 @@ class GraphCaseGenerator:
 
         disease_entries.sort(key=lambda item: (str(item.get("disease_name") or ""), str(item.get("disease_id") or "")))
         cases.sort(key=lambda item: item.case_id)
+        case_qc_count_by_status = _count_cases_by_metadata_value(cases, "case_qc_status")
+        case_qc_reason_counts = _count_case_qc_reasons(cases)
         benchmark_qc_count_by_status = _count_cases_by_metadata_value(cases, "benchmark_qc_status")
         benchmark_eligible_count_by_type = {
             case_type: sum(
@@ -533,6 +632,9 @@ class GraphCaseGenerator:
             },
             "generated_case_count": len(cases),
             "generated_case_count_by_type": generated_case_count_by_type,
+            "case_qc_count_by_status": case_qc_count_by_status,
+            "case_qc_reason_counts": case_qc_reason_counts,
+            "case_qc_high_connectivity_threshold": self.evidence_connectivity_threshold,
             "benchmark_qc_count_by_status": benchmark_qc_count_by_status,
             "benchmark_eligible_count_by_type": benchmark_eligible_count_by_type,
             "skipped_case_count_by_reason": dict(sorted(skipped_case_count_by_reason.items())),
@@ -1011,6 +1113,7 @@ class GraphCaseGenerator:
         opening_items = _filter_opening_items(opening_items, positive_items)
         qc_summary = _build_benchmark_qc_summary(
             disease_name=profile.record.disease_name,
+            opening_items=opening_items,
             positive_items=positive_items,
             negative_items=negative_items,
             required_groups=profile.required_family_groups,
@@ -1018,6 +1121,8 @@ class GraphCaseGenerator:
             catalog_required_groups=profile.catalog_required_family_groups,
             catalog_required_groups_by_evidence_group=profile.catalog_required_family_groups_by_evidence_group,
             catalog_unavailable_groups=profile.catalog_unavailable_family_groups,
+            evidence_connectivity_counts=self.evidence_connectivity_counts,
+            high_connectivity_threshold=self.evidence_connectivity_threshold,
         )
         slot_truth_map: dict[str, SlotTruth] = {}
         opening_node_ids = [
@@ -1120,6 +1225,9 @@ def render_generation_summary_markdown(manifest: dict[str, Any]) -> str:
             "## Benchmark QC",
             "",
             f"- minimum_evidence_requirement_catalog: {(manifest.get('minimum_evidence_requirement_catalog') or {}).get('path') or '-'}",
+            f"- case_qc_count_by_status: {manifest.get('case_qc_count_by_status') or {}}",
+            f"- case_qc_reason_counts: {manifest.get('case_qc_reason_counts') or {}}",
+            f"- case_qc_high_connectivity_threshold: {int(manifest.get('case_qc_high_connectivity_threshold') or 0)}",
             f"- benchmark_qc_count_by_status: {manifest.get('benchmark_qc_count_by_status') or {}}",
             "",
             "| case_type | eligible_count |",
@@ -1195,6 +1303,19 @@ def _count_cases_by_metadata_value(cases: Sequence[VirtualPatientCase], key: str
         if not value:
             continue
         counts[value] = counts.get(value, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _count_case_qc_reasons(cases: Sequence[VirtualPatientCase]) -> dict[str, int]:
+    """统计病例 QC 失败或降级原因，便于从 manifest 快速定位系统性问题。"""
+
+    counts: dict[str, int] = {}
+    for case in cases:
+        for reason in case.metadata.get("case_qc_reasons") or []:
+            reason_name = str(reason).strip()
+            if not reason_name:
+                continue
+            counts[reason_name] = counts.get(reason_name, 0) + 1
     return dict(sorted(counts.items()))
 
 
@@ -1727,6 +1848,34 @@ def _evidence_key(item: dict[str, Any]) -> str:
     return group
 
 
+def _evidence_connectivity_key(item: dict[str, Any]) -> str:
+    """优先用图谱节点 ID 统计证据跨疾病连接度，缺失时退回归一化名称。"""
+
+    node_id = str(item.get("target_node_id") or "").strip()
+    if node_id:
+        return f"id::{node_id}"
+    return f"name::{_evidence_key(item)}"
+
+
+def _compute_evidence_connectivity_counts(profiles: Sequence[DiseaseProfile]) -> dict[str, int]:
+    """统计每条证据出现在多少个疾病证据池中，用于识别高连接背景线索。"""
+
+    counts: dict[str, int] = {}
+    for profile in profiles:
+        disease_keys = {_evidence_connectivity_key(item) for item in profile.all_evidence}
+        for key in disease_keys:
+            counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _compute_high_connectivity_threshold(disease_count: int) -> int:
+    """按疾病总数给出高连接证据阈值，小图测试时保持阈值不过低。"""
+
+    if disease_count <= 0:
+        return 0
+    return max(3, math.ceil(disease_count * 0.08))
+
+
 def _sort_evidence_items(items: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(
         [dict(item) for item in items],
@@ -1871,6 +2020,7 @@ def _items_cover_family_group(items: Sequence[dict[str, Any]], required_group: s
 def _build_benchmark_qc_summary(
     *,
     disease_name: str,
+    opening_items: Sequence[dict[str, Any]],
     positive_items: Sequence[dict[str, Any]],
     negative_items: Sequence[dict[str, Any]],
     required_groups: Sequence[set[str]] | None = None,
@@ -1878,14 +2028,29 @@ def _build_benchmark_qc_summary(
     catalog_required_groups: Sequence[set[str]] | None = None,
     catalog_required_groups_by_evidence_group: dict[str, Sequence[set[str]]] | None = None,
     catalog_unavailable_groups: Sequence[set[str]] | None = None,
+    evidence_connectivity_counts: Mapping[str, int] | None = None,
+    high_connectivity_threshold: int = 0,
 ) -> dict[str, Any]:
     active_required_groups = list(required_groups or _benchmark_required_family_groups(disease_name))
     positive_coverage = _collect_evidence_family_coverage(positive_items)
     negative_coverage = _collect_evidence_family_coverage(negative_items)
     missing_groups = _missing_required_family_groups(active_required_groups, positive_coverage)
+    case_qc = _compute_case_qc_summary(
+        disease_name=disease_name,
+        opening_items=opening_items,
+        positive_items=positive_items,
+        required_groups=active_required_groups,
+        missing_required_groups=missing_groups,
+        evidence_connectivity_counts=evidence_connectivity_counts or {},
+        high_connectivity_threshold=high_connectivity_threshold,
+    )
 
     return {
-        "benchmark_qc_status": BENCHMARK_QC_ELIGIBLE if not missing_groups else BENCHMARK_QC_INELIGIBLE,
+        "benchmark_qc_status": (
+            BENCHMARK_QC_ELIGIBLE
+            if case_qc["case_qc_status"] == CASE_QC_ELIGIBLE
+            else BENCHMARK_QC_INELIGIBLE
+        ),
         "benchmark_requirement_source": requirement_source,
         "benchmark_required_family_groups": _serialize_family_groups(active_required_groups),
         "benchmark_required_family_group_count": len(active_required_groups),
@@ -1897,7 +2062,349 @@ def _build_benchmark_qc_summary(
             catalog_required_groups_by_evidence_group or {}
         ),
         "benchmark_catalog_unavailable_family_groups": _serialize_family_groups(catalog_unavailable_groups or []),
+        **case_qc,
     }
+
+
+def _compute_case_qc_summary(
+    *,
+    disease_name: str,
+    opening_items: Sequence[dict[str, Any]],
+    positive_items: Sequence[dict[str, Any]],
+    required_groups: Sequence[set[str]],
+    missing_required_groups: Sequence[Sequence[str]],
+    evidence_connectivity_counts: Mapping[str, int],
+    high_connectivity_threshold: int,
+) -> dict[str, Any]:
+    """按证据角色和疾病大类计算病例级 benchmark 质量。"""
+
+    disease_categories = _infer_case_qc_disease_categories(disease_name, positive_items, required_groups)
+    positive_roles = [_case_evidence_role(item, disease_name=disease_name) for item in positive_items]
+    opening_roles = [_case_evidence_role(item, disease_name=disease_name) for item in opening_items]
+    role_counts = _count_values(positive_roles)
+    opening_background_only = bool(opening_items) and all(role == "background_context" for role in opening_roles)
+    high_connectivity_items = [
+        str(item.get("target_name") or "")
+        for item, role in zip(positive_items, positive_roles)
+        if _is_high_connectivity_case_evidence(
+            item,
+            role=role,
+            evidence_connectivity_counts=evidence_connectivity_counts,
+            high_connectivity_threshold=high_connectivity_threshold,
+        )
+    ]
+    all_positive_high_connectivity = bool(positive_items) and len(high_connectivity_items) == len(positive_items)
+    generic_required_groups_only = _required_groups_are_background_or_generic_only(required_groups)
+    core_ok, missing_core_roles = _case_qc_core_requirement_status(
+        disease_categories=disease_categories,
+        disease_name=disease_name,
+        positive_items=positive_items,
+    )
+    has_anchor = bool(
+        role_counts.get("disease_specific_anchor", 0) or role_counts.get("definition_anchor", 0)
+    )
+
+    reasons: list[str] = []
+    score = 100
+    if not positive_items:
+        reasons.append("no_positive_slots")
+        score -= 80
+    if not has_anchor:
+        reasons.append("missing_disease_specific_or_definition_anchor")
+        score -= 40
+    if not core_ok:
+        reasons.append("missing_primary_diagnostic_path_core_evidence")
+        score -= 35
+    if missing_required_groups:
+        reasons.append("missing_required_family_coverage")
+        score -= 20
+    if generic_required_groups_only:
+        reasons.append("required_family_covered_by_generic_or_background_only")
+        score -= 15
+    if opening_background_only:
+        reasons.append("opening_background_only")
+        score -= 15
+    if all_positive_high_connectivity:
+        reasons.append("all_positive_slots_high_connectivity_or_background")
+        score -= 25
+
+    score = max(0, min(100, score))
+    hard_fail_reasons = {
+        "no_positive_slots",
+        "missing_disease_specific_or_definition_anchor",
+        "missing_primary_diagnostic_path_core_evidence",
+        "missing_required_family_coverage",
+        "all_positive_slots_high_connectivity_or_background",
+    }
+    if any(reason in hard_fail_reasons for reason in reasons):
+        status = CASE_QC_NOT_BENCHMARK_ELIGIBLE
+    elif reasons:
+        status = CASE_QC_WEAK_ANCHOR
+    else:
+        status = CASE_QC_ELIGIBLE
+
+    return {
+        "case_qc_status": status,
+        "case_qc_score": score,
+        "case_qc_reasons": reasons,
+        "case_qc_disease_categories": sorted(disease_categories),
+        "case_qc_positive_role_counts": dict(sorted(role_counts.items())),
+        "case_qc_opening_roles": opening_roles,
+        "case_qc_missing_core_roles": missing_core_roles,
+        "case_qc_high_connectivity_positive_slots": high_connectivity_items,
+        "case_qc_high_connectivity_threshold": high_connectivity_threshold,
+        "case_qc_opening_background_only": opening_background_only,
+        "case_qc_all_positive_high_connectivity": all_positive_high_connectivity,
+        "case_qc_required_groups_background_only": generic_required_groups_only,
+    }
+
+
+def _infer_case_qc_disease_categories(
+    disease_name: str,
+    positive_items: Sequence[dict[str, Any]],
+    required_groups: Sequence[set[str]],
+) -> set[str]:
+    """从疾病名称、已选证据和 catalog family 推断病例应满足的核心路径类型。"""
+
+    normalized_name = _normalize_text(disease_name)
+    coverage = _collect_evidence_family_coverage(positive_items)
+    required_families = set().union(*required_groups) if required_groups else set()
+    families = coverage | required_families
+    categories: set[str] = set()
+
+    if any(
+        term in normalized_name
+        for term in (
+            "感染",
+            "肺炎",
+            "结核",
+            "分枝杆菌",
+            "隐球菌",
+            "念珠菌",
+            "曲霉",
+            "组织胞浆",
+            "马尔尼菲",
+            "梅毒",
+            "疱疹",
+            "巨细胞",
+            "cmv",
+            "弓形虫",
+            "黑热",
+            "猴痘",
+            "新冠",
+            "病毒",
+            "细菌",
+            "真菌",
+        )
+    ) or bool(families & INFECTION_CORE_FAMILIES):
+        categories.add("infection")
+
+    if any(term in normalized_name for term in ("代谢", "肥胖", "血脂", "糖尿", "骨质疏松", "肾脏病", "肾功能")) or bool(
+        families & METABOLIC_CORE_FAMILIES
+    ):
+        categories.add("metabolic_or_definition")
+
+    if any(term in normalized_name for term in ("癌", "肿瘤", "肉瘤", "淋巴瘤", "恶性", "癌症")):
+        categories.add("tumor")
+
+    if any(term in normalized_name for term in ("脑", "脑膜", "神经", "中枢", "脊髓", "痴呆", "白质")) or bool(
+        families & NEURO_CORE_FAMILIES
+    ):
+        categories.add("neurologic")
+
+    if not categories:
+        categories.add("general")
+    return categories
+
+
+def _case_qc_core_requirement_status(
+    *,
+    disease_categories: set[str],
+    disease_name: str,
+    positive_items: Sequence[dict[str, Any]],
+) -> tuple[bool, list[str]]:
+    """检查不同疾病大类的核心诊断路径是否有至少一个可用锚点。"""
+
+    missing: list[str] = []
+    if "infection" in disease_categories and not any(
+        _item_satisfies_infection_core(item, disease_name=disease_name) for item in positive_items
+    ):
+        missing.append("infection_specific_pathogen_lab_or_imaging")
+
+    if "metabolic_or_definition" in disease_categories and not any(
+        _item_satisfies_metabolic_core(item) for item in positive_items
+    ):
+        missing.append("definition_lab_or_detail")
+
+    if "tumor" in disease_categories and not any(_item_satisfies_tumor_core(item) for item in positive_items):
+        missing.append("tumor_imaging_pathology_marker_or_definition")
+
+    if "neurologic" in disease_categories and not any(_item_satisfies_neuro_core(item) for item in positive_items):
+        missing.append("neurologic_phenotype_or_neuro_exam")
+
+    if disease_categories == {"general"} and not any(
+        _case_evidence_role(item, disease_name=disease_name)
+        in {"disease_specific_anchor", "definition_anchor"}
+        for item in positive_items
+    ):
+        missing.append("general_specific_or_definition_anchor")
+
+    return not missing, missing
+
+
+def _case_evidence_role(item: dict[str, Any], *, disease_name: str) -> str:
+    """将单条病例证据映射到通用 QC 角色，而不是按疾病名写补丁。"""
+
+    group = str(item.get("group") or "")
+    relation_type = str(item.get("relation_type") or "")
+    families = _infer_evidence_families(item)
+    name = str(item.get("target_name") or "")
+
+    if _is_background_context_evidence(item, disease_name=disease_name, families=families):
+        return "background_context"
+
+    if families & DEFINITION_ANCHOR_FAMILIES:
+        return "definition_anchor"
+
+    if _looks_like_tumor_marker_or_pathology(name):
+        return "definition_anchor"
+
+    if group == "pathogen" or relation_type == "HAS_PATHOGEN" or families & {
+        "pathogen",
+        "fungal_pathogen",
+        "mycobacterial_pathogen",
+        "viral_pathogen",
+        "parasitic_pathogen",
+        "bacterial_pathogen",
+    }:
+        return "disease_specific_anchor"
+
+    if families & DISEASE_SPECIFIC_ANCHOR_FAMILIES and group in {"lab", "imaging", "pathogen"}:
+        return "disease_specific_anchor"
+
+    if group == "symptom" or families & {
+        "respiratory_symptom",
+        "neurologic_symptom",
+        "dermatologic_symptom",
+        "gastrointestinal_symptom",
+        "ocular_symptom",
+        "metabolic_symptom",
+        "severe_systemic_symptom",
+    }:
+        return "phenotype_support"
+
+    if group in {"risk", "detail"}:
+        return "risk_or_context"
+
+    return "supporting_context"
+
+
+def _is_background_context_evidence(
+    item: dict[str, Any],
+    *,
+    disease_name: str,
+    families: set[str],
+) -> bool:
+    """识别 HIV/CD4/年龄/既往史等只能提供背景、不能独立成案的线索。"""
+
+    name = str(item.get("target_name") or "")
+    normalized_name = _normalize_text(name)
+    normalized_disease = _normalize_text(disease_name)
+
+    if "hiv" in normalized_name or "艾滋" in normalized_name or "aids" in normalized_name:
+        return "hiv" not in normalized_disease and "艾滋" not in normalized_disease and "aids" not in normalized_disease
+    if "cd4" in normalized_name or "免疫抑制" in normalized_name or "免疫功能低下" in normalized_name:
+        return True
+    if "年龄" in normalized_name or "老年" in normalized_name or "儿童" in normalized_name or "妊娠" in normalized_name:
+        return True
+    if "病史" in normalized_name or "既往" in normalized_name or "家族史" in normalized_name:
+        return True
+    if families and families.issubset(BACKGROUND_CONTEXT_FAMILIES):
+        return True
+    return False
+
+
+def _item_satisfies_infection_core(item: dict[str, Any], *, disease_name: str) -> bool:
+    role = _case_evidence_role(item, disease_name=disease_name)
+    if role != "disease_specific_anchor":
+        return False
+    group = str(item.get("group") or "")
+    return group in {"pathogen", "lab", "imaging"} or bool(_infer_evidence_families(item) & INFECTION_CORE_FAMILIES)
+
+
+def _item_satisfies_metabolic_core(item: dict[str, Any]) -> bool:
+    families = _infer_evidence_families(item)
+    group = str(item.get("group") or "")
+    return "metabolic_definition" in families and group in {"lab", "detail", "risk"}
+
+
+def _item_satisfies_tumor_core(item: dict[str, Any]) -> bool:
+    families = _infer_evidence_families(item)
+    group = str(item.get("group") or "")
+    name = str(item.get("target_name") or "")
+    if "pathology" in families or _looks_like_tumor_marker_or_pathology(name):
+        return True
+    if group == "imaging" and bool(families & TUMOR_CORE_FAMILIES):
+        return True
+    if group == "lab" and "disease_specific_lab" in families and _looks_like_tumor_marker_or_pathology(name):
+        return True
+    return False
+
+
+def _item_satisfies_neuro_core(item: dict[str, Any]) -> bool:
+    return bool(_infer_evidence_families(item) & NEURO_CORE_FAMILIES)
+
+
+def _looks_like_tumor_marker_or_pathology(name: str) -> bool:
+    normalized_name = _normalize_text(name)
+    return any(
+        term in normalized_name
+        for term in (
+            "病理",
+            "活检",
+            "组织学",
+            "细胞学",
+            "肿瘤标志物",
+            "甲胎蛋白",
+            "afp",
+            "ca125",
+            "ca199",
+            "癌胚抗原",
+            "cea",
+            "ki67",
+            "免疫组化",
+        )
+    )
+
+
+def _required_groups_are_background_or_generic_only(required_groups: Sequence[set[str]]) -> bool:
+    if not required_groups:
+        return False
+    allowed = BACKGROUND_CONTEXT_FAMILIES | GENERIC_FAMILIES
+    return all(bool(group) and set(group).issubset(allowed) for group in required_groups)
+
+
+def _is_high_connectivity_case_evidence(
+    item: dict[str, Any],
+    *,
+    role: str,
+    evidence_connectivity_counts: Mapping[str, int],
+    high_connectivity_threshold: int,
+) -> bool:
+    if role == "background_context":
+        return True
+    key = _evidence_connectivity_key(item)
+    count = int(evidence_connectivity_counts.get(key) or 0)
+    return high_connectivity_threshold > 0 and count >= high_connectivity_threshold
+
+
+def _count_values(values: Sequence[str]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for value in values:
+        if not value:
+            continue
+        counts[value] = counts.get(value, 0) + 1
+    return counts
 
 
 def _benchmark_required_family_groups(disease_name: str) -> list[set[str]]:

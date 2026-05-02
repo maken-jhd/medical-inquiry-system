@@ -10,6 +10,7 @@
 !scripts/run_verifier_acceptance_sweep.sh
 !scripts/run_focused_acceptance_validation.sh
 !scripts/run_streamlit_realtime.sh
+!scripts/run_role_qc_smoke20_replay.sh
 
 # macOS 系统自动生成的隐藏文件
 .DS_Store

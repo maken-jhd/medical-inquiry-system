@@ -321,6 +321,8 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 - [simulator/path_cache_builder.py](/Users/loki/Workspace/GraduationDesign/simulator/path_cache_builder.py)
 - [scripts/export_disease_evidence_family_catalog.py](/Users/loki/Workspace/GraduationDesign/scripts/export_disease_evidence_family_catalog.py)：基于 Neo4j 导出全证据族 catalog 和疾病最低证据组
 - [scripts/generate_graph_virtual_patients.py](/Users/loki/Workspace/GraduationDesign/scripts/generate_graph_virtual_patients.py)：基于疾病审计结果生成图谱驱动病例骨架
+- [scripts/build_graph_case_smoke_set.py](/Users/loki/Workspace/GraduationDesign/scripts/build_graph_case_smoke_set.py)：从 role-QC eligible 病例中抽取 replay smoke 输入
+- [scripts/run_role_qc_smoke20_replay.sh](/Users/loki/Workspace/GraduationDesign/scripts/run_role_qc_smoke20_replay.sh)：运行最新 role-QC smoke20 replay 的一键脚本
 - [scripts/run_batch_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_batch_replay.py)：批量虚拟病人回放与评测入口
 
 当前实现的要点包括：
@@ -328,6 +330,9 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 - 图谱病例生成器直接消费疾病级图谱审计 JSON，而不是直接从 Neo4j 读全图
 - 当前已导出 full-evidence catalog，覆盖 `80` 个疾病、`850` 个证据节点和 `1562` 条 disease-evidence 边
 - `graph_case_generator.py` 当前优先读取 `disease_minimum_evidence_groups.json`，按 disease-level evidence family 约束选择病例阳性槽位
+- `graph_case_generator.py` 当前会在病例生成后计算 `case_qc_score / case_qc_status / case_qc_reasons`，不再只按 family 数量判断 benchmark 可用性
+- 病例 QC 会区分 `disease_specific_anchor / definition_anchor / phenotype_support / risk_or_context / background_context`；CD4、HIV、年龄、既往史、ART 等背景线索不能单独构成 benchmark 病例
+- 感染类、代谢/定义类、肿瘤类和神经类病例会按通用核心诊断路径检查，不对单个 smoke 病例写补丁
 - 病例类型分为 `ordinary / low_cost / exam_driven / competitive`
 - `slot_truth_map` 使用真实图谱 `target_node_id` 作为 key，中文证据名称写入 `aliases`
 - 当前已同时支持输出 `cases.jsonl` 和便于人工查看的 `cases.json`
@@ -357,14 +362,14 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 - [all_diseases_20260420_disease_aliases_only](/Users/loki/Workspace/GraduationDesign/test_outputs/graph_audit/all_diseases_20260420_disease_aliases_only)
 - [disease_minimum_evidence_groups.json](/Users/loki/Workspace/GraduationDesign/test_outputs/evidence_family/disease_evidence_catalog_20260502/disease_minimum_evidence_groups.json)
 
-生成了一轮 catalog-QC 图谱驱动病例输出：
+生成了一轮 role-QC 图谱驱动病例输出：
 
-- [cases.json](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260502_catalog_qc/cases.json)
-- [cases.jsonl](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260502_catalog_qc/cases.jsonl)
-- [manifest.json](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260502_catalog_qc/manifest.json)
-- [summary.md](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260502_catalog_qc/summary.md)
-- [smoke10/cases.jsonl](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260502_catalog_qc/smoke10/cases.jsonl)
-- [smoke10/summary.md](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260502_catalog_qc/smoke10/summary.md)
+- [cases.json](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260502_role_qc/cases.json)
+- [cases.jsonl](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260502_role_qc/cases.jsonl)
+- [manifest.json](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260502_role_qc/manifest.json)
+- [summary.md](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260502_role_qc/summary.md)
+- [smoke20/cases.jsonl](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260502_role_qc/smoke20/cases.jsonl)
+- [smoke20/summary.md](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260502_role_qc/smoke20/summary.md)
 
 当前这轮共生成：
 
@@ -374,17 +379,23 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 - `competitive = 51`
 - 总数 `227`
 
-当前 benchmark QC 结果为：
+当前 case QC 结果为：
 
-- `eligible = 175`
-- `ineligible = 52`
+- `eligible = 112`
+- `weak_anchor = 46`
+- `not_benchmark_eligible = 69`
 
-当前 smoke10 输入从 eligible 病例中均衡抽样：
+兼容字段 `benchmark_qc_status` 为：
 
-- `ordinary = 3`
-- `low_cost = 2`
-- `exam_driven = 3`
-- `competitive = 2`
+- `eligible = 112`
+- `ineligible = 115`
+
+当前 smoke20 输入只从 `case_qc_status=eligible` 病例中抽样；由于 low-cost eligible 只有 1 例，抽样优先均衡后由其他类型补齐：
+
+- `ordinary = 9`
+- `low_cost = 1`
+- `exam_driven = 5`
+- `competitive = 5`
 
 当前抽样检查仍可使用固定随机种子重新抽取四类病例，各 `5` 条，共 `20` 条，便于在规则修复后快速复核：
 
@@ -577,15 +588,21 @@ conda run --no-capture-output -n GraduationDesign python scripts/run_batch_repla
 - `A1 -> A2 -> A3/A4 -> search -> report`
 - 虚拟病人自动回放
 
-使用最新 catalog-QC 的 10 例 smoke 输入：
+使用最新 role-QC 的 20 例 smoke 输入：
+
+```bash
+./scripts/run_role_qc_smoke20_replay.sh
+```
+
+等价的展开命令是：
 
 ```bash
 conda run --no-capture-output -n GraduationDesign python scripts/run_batch_replay.py \
-  --cases-file test_outputs/simulator_cases/graph_cases_20260502_catalog_qc/smoke10/cases.jsonl \
-  --output-root test_outputs/simulator_replay/graph_cases_20260502_catalog_qc_smoke10 \
+  --cases-file test_outputs/simulator_cases/graph_cases_20260502_role_qc/smoke20/cases.jsonl \
+  --output-root test_outputs/simulator_replay/graph_cases_20260502_role_qc_smoke20 \
   --max-turns 8 \
   --case-concurrency 4 \
-  --limit 10
+  --limit 20
 ```
 
 真实 focused baseline ablation：

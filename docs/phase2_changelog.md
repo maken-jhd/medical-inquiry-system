@@ -10,6 +10,84 @@
 - `phase2_execution_checklist.md` 更偏“路线设计与待办清单”
 - 本文更偏“已经发生过哪些阶段性变化、分别解决了什么问题”
 
+## 近期更新：2026-05-02 虚拟病人病例生成 role-QC 升级
+
+### 本次目标
+
+- 让病例生成 catalog 从“满足 family 数量”升级为“同时保证 family 质量”
+- 不针对 smoke10 个例写补丁，而是用 evidence role 和疾病大类核心路径做通用病例 QC
+- 过滤 CD4、HIV、年龄、既往病史、ART 等纯背景线索独立构成 benchmark 病例的情况
+- 重新生成一份 role-QC 病例集，并抽取 20 例 smoke 输入
+
+### 本次改动
+
+- [simulator/graph_case_generator.py](/Users/loki/Workspace/GraduationDesign/simulator/graph_case_generator.py)
+  - 新增病例级 `case_qc_score / case_qc_status / case_qc_reasons`
+  - 新增 evidence role：`disease_specific_anchor / definition_anchor / phenotype_support / risk_or_context / background_context`
+  - 新增疾病大类核心路径检查：
+    - 感染类要求 pathogen / disease-specific lab / serology / imaging 至少一类特异证据
+    - 代谢/定义类要求 metabolic definition lab/detail/risk
+    - 肿瘤类要求 imaging / pathology / tumor marker / 肿瘤相关定义证据
+    - 神经类要求 neurologic phenotype / CNS imaging / CNS lab
+  - 新增高连接证据统计，跨疾病出现过多或背景型证据不能单独撑起病例
+  - 保留兼容字段：只有 `case_qc_status=eligible` 时 `benchmark_qc_status=eligible`
+- [scripts/build_graph_case_smoke_set.py](/Users/loki/Workspace/GraduationDesign/scripts/build_graph_case_smoke_set.py)
+  - 新增 smoke 抽样脚本，默认只抽 `case_qc_status=eligible`
+  - 优先类型均衡；若某类 eligible 不足，用其他 eligible 类型补齐总数
+- [scripts/run_role_qc_smoke20_replay.sh](/Users/loki/Workspace/GraduationDesign/scripts/run_role_qc_smoke20_replay.sh)
+  - 新增 role-QC smoke20 一键 replay 脚本
+- [.gitignore](/Users/loki/Workspace/GraduationDesign/.gitignore)
+  - 放行新增的一键 replay shell 脚本
+- [docs/virtual_patient_generation_scheme.md](/Users/loki/Workspace/GraduationDesign/docs/virtual_patient_generation_scheme.md)、[README.md](/Users/loki/Workspace/GraduationDesign/README.md)、[simulator/README.md](/Users/loki/Workspace/GraduationDesign/simulator/README.md)
+  - 同步更新设计方案、输出目录、QC 口径和复现实验命令
+
+### 输出结果
+
+- 完整病例集：
+  - `test_outputs/simulator_cases/graph_cases_20260502_role_qc/cases.jsonl`
+  - `test_outputs/simulator_cases/graph_cases_20260502_role_qc/cases.json`
+  - `test_outputs/simulator_cases/graph_cases_20260502_role_qc/manifest.json`
+  - `test_outputs/simulator_cases/graph_cases_20260502_role_qc/summary.md`
+- 病例总数：
+  - `ordinary = 66`
+  - `low_cost = 49`
+  - `exam_driven = 61`
+  - `competitive = 51`
+  - total = `227`
+- case QC：
+  - `eligible = 112`
+  - `weak_anchor = 46`
+  - `not_benchmark_eligible = 69`
+- benchmark 兼容字段：
+  - `eligible = 112`
+  - `ineligible = 115`
+- smoke20：
+  - `test_outputs/simulator_cases/graph_cases_20260502_role_qc/smoke20/cases.jsonl`
+  - `ordinary = 9`
+  - `low_cost = 1`
+  - `exam_driven = 5`
+  - `competitive = 5`
+
+### 验证结果
+
+- 已执行：
+
+```bash
+python -m py_compile simulator/graph_case_generator.py scripts/build_graph_case_smoke_set.py
+conda run -n GraduationDesign python -m pytest tests/test_graph_case_generator.py -q
+conda run -n GraduationDesign python -m pytest tests/test_graph_case_generator.py tests/test_evidence_family_catalog.py tests/test_run_batch_replay.py -q
+conda run -n GraduationDesign python -m pytest -q
+conda run -n GraduationDesign python scripts/generate_graph_virtual_patients.py --audit-root test_outputs/graph_audit/all_diseases_20260420_disease_aliases_only --minimum-evidence-groups-file test_outputs/evidence_family/disease_evidence_catalog_20260502/disease_minimum_evidence_groups.json --output-file test_outputs/simulator_cases/graph_cases_20260502_role_qc/cases.jsonl --output-json-file test_outputs/simulator_cases/graph_cases_20260502_role_qc/cases.json --manifest-file test_outputs/simulator_cases/graph_cases_20260502_role_qc/manifest.json --summary-file test_outputs/simulator_cases/graph_cases_20260502_role_qc/summary.md
+conda run -n GraduationDesign python scripts/build_graph_case_smoke_set.py --cases-file test_outputs/simulator_cases/graph_cases_20260502_role_qc/cases.jsonl --output-root test_outputs/simulator_cases/graph_cases_20260502_role_qc/smoke20 --total-size 20 --target-size-per-type 5 --seed 42
+```
+
+- 结果：
+  - `28 passed`
+  - `45 passed`
+  - `204 passed`
+  - 生成完整病例 `227` 例
+  - 抽取 smoke `20` 例，全部为 `case_qc_status=eligible`
+
 ## 近期更新：2026-05-02 stop rule 打薄与 evidence role 驱动排序
 
 ### 本次目标
