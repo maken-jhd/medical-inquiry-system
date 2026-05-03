@@ -10,7 +10,12 @@ from typing import Any, Sequence
 from .types import EvidenceState, HypothesisScore, SessionState, SlotState
 
 
+# 这些标签通常代表病原、检查结果或检查项目本身；
+# 一旦在真实会话里被明确命中，后续会优先作为强锚点或准强锚点参与排序。
 STRONG_ANCHOR_LABELS = {"Pathogen", "LabFinding", "ImagingFinding", "LabTest"}
+
+# 这组关系表示“疾病 <-> 证据”之间较强的诊断、确认或检查支持链路；
+# 命中这些关系时，会优先把证据视作 anchor 候选，而不是普通背景线索。
 ANCHOR_RELATION_TYPES = {
     "HAS_PATHOGEN",
     "DIAGNOSED_BY",
@@ -19,19 +24,34 @@ ANCHOR_RELATION_TYPES = {
     "CONFIRMED_BY",
     "DETECTED_BY",
 }
+
+# 这组关系更偏“诊断标准 / 定义性细节”；
+# 命中后即使不是病原或影像，也可能进入 definition_anchor 分支。
 DETAIL_DEFINITION_RELATION_TYPES = {"DIAGNOSED_BY", "REQUIRES_DETAIL"}
+
+# 当真实会话直接提到某个疾病节点自身时，不走普通 KG 证据边，
+# 而是统一挂一个伪关系类型，方便后续按“疾病自身命中”处理强锚点。
 DISEASE_SELF_ANCHOR_RELATION_TYPE = "SELF_DISEASE_MATCH"
+
+# 这些 family tag 大多是高连接、低区分度的背景信息；
+# 它们可以提供背景支持，但不能单独构成足以接受最终答案的强锚点。
 BACKGROUND_FAMILY_TAGS = {
     "immune_status",
     "underlying_infection",
     "general_risk",
     "constitutional_symptom",
 }
+
+# low-cost evidence profile 只统计“低成本且有区分度”的真实阳性线索；
+# 因此需要把背景族、viral load、人群泛风险这类共享信号排除掉。
 LOW_COST_PROFILE_EXCLUDED_FAMILY_TAGS = {
     *BACKGROUND_FAMILY_TAGS,
     "viral_load",
     "population_risk",
 }
+
+# 这些 family tag 代表病原、影像、特异实验室检查、病理等更能区分疾病的证据族；
+# 只要真实会话命中它们，通常会优先归入 disease_specific_anchor。
 SPECIFIC_ANCHOR_FAMILY_TAGS = {
     "pathogen",
     "imaging",
@@ -41,6 +61,9 @@ SPECIFIC_ANCHOR_FAMILY_TAGS = {
     "pathology",
     "oxygenation",
 }
+
+# 这些 family tag 更接近定义阈值、诊断标准或关键细节要求；
+# 命中后即使不是最强病原证据，也会优先进入 definition_anchor 判断。
 DEFINITION_FAMILY_TAGS = {
     "detail",
     "metabolic_definition",

@@ -10,6 +10,45 @@
 - `phase2_execution_checklist.md` 更偏“路线设计与待办清单”
 - 本文更偏“已经发生过哪些阶段性变化、分别解决了什么问题”
 
+## 近期更新：2026-05-03 为 evidence anchor 常量补充中文注释约定
+
+### 本次目标
+
+- 给 `brain/evidence_anchor.py` 中一组较难直观看懂的 anchor 常量补充中文用途注释
+- 把“新增常量定义也要带中文注释”固化进仓库级 agent 约定
+- 同步把这条注释规范写入 `brain/README.md`
+
+### 本次改动
+
+- [brain/evidence_anchor.py](/Users/loki/Workspace/GraduationDesign/brain/evidence_anchor.py)
+  - 为下列常量补充中文注释，解释它们在 anchor 分类、low-cost profile 和 evidence role 判断中的作用：
+    - `STRONG_ANCHOR_LABELS`
+    - `ANCHOR_RELATION_TYPES`
+    - `DETAIL_DEFINITION_RELATION_TYPES`
+    - `DISEASE_SELF_ANCHOR_RELATION_TYPE`
+    - `BACKGROUND_FAMILY_TAGS`
+    - `LOW_COST_PROFILE_EXCLUDED_FAMILY_TAGS`
+    - `SPECIFIC_ANCHOR_FAMILY_TAGS`
+    - `DEFINITION_FAMILY_TAGS`
+- [AGENTS.md](/Users/loki/Workspace/GraduationDesign/AGENTS.md)
+  - 新增长期约定：模块级常量，尤其是标签集合、关系集合、family tag、状态枚举、阈值分组等定义前，要补中文用途注释
+  - 明确以后新增常量时也默认遵守该约定
+- [brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
+  - 在代码注释规范中补充“模块级常量也要有中文用途注释”
+
+### 验证结果
+
+- 已执行：
+
+```bash
+python -m py_compile brain/evidence_anchor.py
+conda run -n GraduationDesign python -m pytest tests/test_evidence_anchor.py -q
+```
+
+- 结果：
+  - `brain/evidence_anchor.py` 语法检查通过
+  - `tests/test_evidence_anchor.py` 通过
+
 ## 近期更新：2026-05-03 清理仓库内无引用的历史函数
 
 ### 本次目标
