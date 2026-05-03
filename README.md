@@ -13,16 +13,16 @@
 
 一句话概括当前状态：
 
-- 第一阶段：当前活跃版本已切换为服务 `R1 / R2 / A3 / A4` 的搜索专用图谱；旧版治疗、推荐、证据链图谱已移至 `knowledge_graph_bak/`
-- 第二阶段：已经进入“select -> expand -> simulate -> backpropagate 多次 rollout 可跑”的阶段，并已切换到 `LLM-first + 显式错误传播 + 集中 normalization` 的抽取 / 解释链路；当前 intake / A4 统一使用 `mention_state + resolution` 语义，不再把自述症状表述成“医学 certainty”
-- 前端演示：已支持中文 Streamlit 页面，可展示多轮问诊、A1/A2/A3/A4、候选诊断、下一问、搜索摘要与安全机制
+- 第一阶段：当前活跃版本已切换为服务候选诊断生成、关键证据检索与下一问构造的搜索专用图谱；旧版治疗、推荐、证据链图谱已移至 `knowledge_graph_bak/`
+- 第二阶段：已经进入“select -> expand -> simulate -> backpropagate 多次 rollout 可跑”的阶段，并已切换到 `LLM-first + 显式错误传播 + 集中 normalization` 的抽取 / 解释链路；当前 intake / pending action interpretation 统一使用 `mention_state + resolution` 语义，不再把自述症状表述成“医学 certainty”
+- 前端演示：已支持中文 Streamlit 页面，可展示多轮问诊、A1/A2/A3、pending action 解释、候选诊断、下一问、搜索摘要与安全机制
 
 更详细的局部说明可分别查看：
 
 - 第一阶段搜索专用知识图谱处理链：[knowledge_graph/README.md](/Users/loki/Workspace/GraduationDesign/knowledge_graph/README.md)
 - 旧版全量指南图谱备份：[knowledge_graph_bak/README.md](/Users/loki/Workspace/GraduationDesign/knowledge_graph_bak/README.md)
 - 第二阶段问诊大脑：[brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
-- 第二阶段问诊大脑详细运行链路指南：[brain_runtime_call_chain_guide.md](/Users/loki/Workspace/GraduationDesign/docs/brain_runtime_call_chain_guide.md)
+- 第二阶段问诊大脑详细运行链路指南（当前按 `A1 / A2 / A3 + anchor` 口径说明）：[brain_runtime_call_chain_guide.md](/Users/loki/Workspace/GraduationDesign/docs/brain_runtime_call_chain_guide.md)
 - 虚拟病人与离线回放：[simulator/README.md](/Users/loki/Workspace/GraduationDesign/simulator/README.md)
 - 图谱驱动虚拟病人详细方案：[virtual_patient_generation_scheme.md](/Users/loki/Workspace/GraduationDesign/docs/virtual_patient_generation_scheme.md)
 - 前端演示界面：[frontend/README.md](/Users/loki/Workspace/GraduationDesign/frontend/README.md)
@@ -80,7 +80,7 @@ GraduationDesign/
 
 ## 第一阶段：搜索专用知识图谱处理链
 
-第一阶段的当前活跃脚本整理在 [knowledge_graph](/Users/loki/Workspace/GraduationDesign/knowledge_graph)。这一版已经不再维护“全量医学指南图谱”，而是为问诊搜索树量身定制：支持 `R1` 候选诊断生成、`R2` 关键证据检索、`A3` 下一问构造和 `A4` 证据更新。
+第一阶段的当前活跃脚本整理在 [knowledge_graph](/Users/loki/Workspace/GraduationDesign/knowledge_graph)。这一版已经不再维护“全量医学指南图谱”，而是为问诊搜索树量身定制：支持 `R1` 候选诊断生成、`R2` 关键证据检索、`A3` 下一问构造，以及统一回答解释后的证据落槽与状态更新。
 
 旧版全量指南图谱已经移到 [knowledge_graph_bak](/Users/loki/Workspace/GraduationDesign/knowledge_graph_bak)，该目录只作历史备份，不建议用于当前 Neo4j 入库、replay 或实时问诊。
 
@@ -278,7 +278,7 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 - [brain/trajectory_evaluator.py](/Users/loki/Workspace/GraduationDesign/brain/trajectory_evaluator.py)：轨迹聚合与最终答案评分器
 - [brain/stop_rules.py](/Users/loki/Workspace/GraduationDesign/brain/stop_rules.py)：打薄后的通用终止与降级规则，当前只处理真实 observed anchor、强备选、硬反证、verifier 拒绝与基础阈值，不再内置疾病专门证据合同
 - [brain/report_builder.py](/Users/loki/Workspace/GraduationDesign/brain/report_builder.py)：结构化结果汇总
-- [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)：A1-A4 问诊编排层
+- [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)：`A1 / A2 / A3 + pending action + anchor acceptance` 问诊编排层
 
 ## 当前与 Med-MCTS 的对齐状态
 
@@ -288,7 +288,7 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 - `A1`：当前已切换为 LLM-first 抽取，长文本不再静默回退规则词典
 - `A2`：已支持患者上下文 + R1 候选排序，并可保留 `recommended_next_evidence`
 - `A3`：已支持 R2 检索、动作构造、区分性 gain 与问句生成
-- `A4`：已支持目标感知 LLM 解释、LLM deductive judge 与显式路由
+- `Pending action interpretation`：已支持目标感知 LLM 解释、检查上下文消化、证据写回与显式路由
 - `Observed Anchor`：当前按 evidence role 与特异度重排候选，病原体/定义性检查/疾病特异检查优先，CD4/HIV/发热等高连接背景证据降权
 - `SearchTree + UCT + rollout`：已支持多次 rollout 的 `select -> expand -> simulate -> backpropagate`
 - `TrajectoryEvaluator`：已支持路径聚类、相似度驱动 diversity 和可选 LLM verifier 模式
@@ -412,7 +412,7 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 主要展示内容：
 
 - 左侧展示多轮问诊对话、患者输入、系统追问与最终结论
-- 右侧展示当前会话状态、A1 关键线索提取、A2 候选诊断排序、A3 下一问选择、A4 回答解释与路由
+- 右侧展示当前会话状态、A1 关键线索提取、A2 候选诊断排序、A3 下一问选择、pending action 回答解释与路由
 - 搜索摘要展示 rollout 次数、树节点数量、当前 best answer、一致性、路径多样性与代理评估 / 复核器结果
 - 安全机制模块展示复核器是否允许停止、安全接受闸门是否阻止停止、搜索树是否换根、缺失关键证据与竞争诊断信息
 - 实验复盘模式可直接浏览 [test_outputs/simulator_replay](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_replay) 下的历史 replay / sweep / ablation 输出
@@ -585,7 +585,7 @@ conda run --no-capture-output -n GraduationDesign python scripts/run_batch_repla
 
 - 真实 Neo4j 图谱检索
 - `brain/service.py` 的默认构造逻辑
-- `A1 -> A2 -> A3/A4 -> search -> report`
+- `统一回答解释 -> A1/A2/A3 -> search -> anchor acceptance / repair -> report`
 - 虚拟病人自动回放
 
 使用最新 role-QC 的 20 例 smoke 输入：

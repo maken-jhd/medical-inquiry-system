@@ -10,6 +10,105 @@
 - `phase2_execution_checklist.md` 更偏“路线设计与待办清单”
 - 本文更偏“已经发生过哪些阶段性变化、分别解决了什么问题”
 
+## 近期更新：2026-05-03 清理仓库内无引用的历史函数
+
+### 本次目标
+
+- 扫描当前仓库中已经没有调用链的历史兼容接口与残留辅助函数
+- 只删除“静态扫描无引用 + 人工复核确认不在当前主链路”的函数，避免误删仍在间接使用的公共工具
+- 用最小范围测试确认当前问诊主流程、前端适配和图谱审计没有被清理影响
+
+### 本次改动
+
+- [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - 删除仓库内无引用的旧兼容接口：
+    - `apply_updates()`
+    - `get_next_question()`
+    - `ingest_patient_turn()`
+- [brain/retriever.py](/Users/loki/Workspace/GraduationDesign/brain/retriever.py)
+  - 删除无引用的旧兼容检索包装：
+    - `get_forward_hypotheses()`
+    - `get_reverse_validation_questions()`
+- [brain/evidence_parser.py](/Users/loki/Workspace/GraduationDesign/brain/evidence_parser.py)
+  - 删除旧 A1 / exam-context 残留辅助函数：
+    - `build_slot_updates_from_a1()`
+    - `_run_a1_with_llm()`
+    - `_infer_exam_availability()`
+    - `_extract_mentioned_exam_results()`
+    - `_coerce_resolution_value()`
+- [brain/normalization.py](/Users/loki/Workspace/GraduationDesign/brain/normalization.py)
+  - 删除无引用的旧包装：
+    - `expand_graph_mentions()`
+    - `_template_graph_mentions()`
+- [brain/state_tracker.py](/Users/loki/Workspace/GraduationDesign/brain/state_tracker.py)
+  - 删除无引用的状态克隆包装：
+    - `clone_session_state()`
+- [brain/stop_rules.py](/Users/loki/Workspace/GraduationDesign/brain/stop_rules.py)
+  - 删除已不再被当前搜索主流程调用的旧 stop/fallback 包装：
+    - `should_fallback()`
+    - `should_stop_rollout()`
+    - `should_stop_search()`
+- [frontend/ui_adapter.py](/Users/loki/Workspace/GraduationDesign/frontend/ui_adapter.py)
+  - 删除无引用展示翻译函数：
+    - `translate_existence()`
+    - `translate_certainty()`
+- [simulator/graph_audit.py](/Users/loki/Workspace/GraduationDesign/simulator/graph_audit.py)
+  - 删除未再接入当前规则审计主路径的历史辅助函数：
+    - `_audit_single_evidence_item()`
+    - `_audit_duplicate_evidence()`
+- [brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
+  - 同步记录本轮已清理无引用历史接口，当前默认只保留主链路仍在消费的入口
+
+### 验证结果
+
+- 已执行：
+
+```bash
+python -m py_compile brain/service.py brain/retriever.py brain/evidence_parser.py brain/normalization.py brain/state_tracker.py brain/stop_rules.py frontend/ui_adapter.py simulator/graph_audit.py
+conda run -n GraduationDesign python -m pytest tests/test_service_stop_flow.py tests/test_service_repair_flow.py tests/test_exam_context_flow.py tests/test_retriever.py tests/test_stop_rules.py tests/test_frontend_ui_adapter.py tests/test_graph_audit.py -q
+```
+
+- 结果：
+  - `py_compile` 通过
+  - 相关测试 `54 passed`
+
+## 近期更新：2026-05-03 运行链路文档切换到三阶段与 anchor 口径
+
+### 本次目标
+
+- 更新 `brain` 运行链路说明，去掉旧 `A1/A2/A3/A4 + stop rule` 叙述
+- 让仓库内对外说明与当前代码实现保持一致
+- 明确当前主流程已经是 `A1 / A2 / A3 + pending action + anchor-controlled acceptance/repair`
+
+### 本次改动
+
+- [docs/brain_runtime_call_chain_guide.md](/Users/loki/Workspace/GraduationDesign/docs/brain_runtime_call_chain_guide.md)
+  - 整体重写运行链路说明
+  - 将主流程改写为：
+    - 每轮统一 `turn_interpreter`
+    - 先消化 `pending_action`
+    - 再在 `A1 / A2 / A3` 三阶段间切换
+    - 最后由 `observed anchor + verifier repair` 决定停机或继续追问
+  - 明确说明旧 `A4` 当前主要拆散到 `pending action` 解释、证据写回和路由阶段
+  - 明确说明 [`brain/stop_rules.py`](/Users/loki/Workspace/GraduationDesign/brain/stop_rules.py) 文件名虽保留，但默认语义已是 `anchor_controlled acceptance gate`
+- [brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
+  - 在运行链路入口处补充说明，提示当前详细文档已切到三阶段 + anchor 口径
+- [README.md](/Users/loki/Workspace/GraduationDesign/README.md)
+  - 在总 README 的运行链路指南入口处补充当前口径说明
+
+### 验证结果
+
+- 已执行：
+
+```bash
+rg -n "A4|stop rule|anchor|pending action|A1 / A2 / A3" docs/brain_runtime_call_chain_guide.md brain/README.md README.md
+```
+
+- 结果：
+  - 新版运行链路文档已改为三阶段主流程描述
+  - README 入口文字已同步到 `A1 / A2 / A3 + anchor` 口径
+  - 本次为文档更新，未运行 Python 单元测试
+
 ## 近期更新：2026-05-03 benchmark 最终答案指标收口
 
 ### 本次目标

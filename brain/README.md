@@ -231,6 +231,7 @@
 - A1/A2/A3 与 `pending action interpretation` 的第一批模块已建立
 - UCT、局部 simulation 和轨迹评分都已接成默认主路径
 - `service.py` 已经能够跑通多次 rollout 的最小搜索闭环
+- 已清理仓库内无引用的历史兼容接口与残留辅助函数，当前 `service / retriever / evidence_parser / stop_rules / normalization` 默认只保留主链路仍在消费的入口
 - 但还没有完全复现论文中的更深 rollout、完整 verifier 和最终轨迹判别器
 
 也就是说，当前目录已经从“空脚手架”进入“可持续填充核心逻辑”的阶段。
@@ -259,6 +260,7 @@
 
 - 详细运行链路说明：
   - [brain_runtime_call_chain_guide.md](/Users/loki/Workspace/GraduationDesign/docs/brain_runtime_call_chain_guide.md)
+  - 当前文档已按 `A1 / A2 / A3 + pending action + anchor-controlled acceptance/repair` 的实现口径重写，可直接对照 `process_turn()` 阅读。
 
 - 当前诊断系统待办清单：
   - [diagnosis_system_todolist.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_system_todolist.md)

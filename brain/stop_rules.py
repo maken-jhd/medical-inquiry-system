@@ -81,33 +81,6 @@ class StopRuleEngine:
 
         return StopDecision(False, "insufficient_evidence")
 
-    # 判断当前会话是否应进入降级或兜底流程。
-    def should_fallback(self, session_state: SessionState) -> StopDecision:
-        if session_state.fail_count >= self.config.max_fail_count:
-            return StopDecision(True, "fallback_due_to_fail_count")
-
-        return StopDecision(False, "continue")
-
-    # 判断单条 rollout 是否应停止继续向下扩展。
-    def should_stop_rollout(self, current_depth: int, fail_count: int = 0) -> StopDecision:
-        if current_depth >= self.config.max_tree_depth:
-            return StopDecision(True, "max_tree_depth_reached")
-
-        if fail_count >= self.config.max_fail_count:
-            return StopDecision(True, "rollout_fail_threshold_reached")
-
-        return StopDecision(False, "continue_rollout")
-
-    # 判断当前搜索过程是否应整体停止。
-    def should_stop_search(self, rollout_count: int, fail_count: int = 0) -> StopDecision:
-        if rollout_count >= self.config.max_rollouts:
-            return StopDecision(True, "max_rollouts_reached")
-
-        if fail_count >= self.config.max_fail_count:
-            return StopDecision(True, "search_fail_threshold_reached")
-
-        return StopDecision(False, "continue_search")
-
     # 判断最终答案评分是否足以被接受为当前结果。
     def should_accept_final_answer(
         self,

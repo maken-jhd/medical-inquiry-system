@@ -178,10 +178,6 @@ class NameNormalizer:
 
         return self._clean_name(raw_name)
 
-    # 为实体链接提供多个候选 surface form，解决患者口语表达和图谱规范名之间的轻量错位。
-    def expand_graph_mentions(self, raw_name: str) -> list[str]:
-        return [item["surface"] for item in self.expand_graph_mention_details(raw_name)]
-
     # 为实体链接提供可解释的 surface form 扩展记录，便于复盘具体模板来源。
     def expand_graph_mention_details(self, raw_name: str) -> list[dict[str, str]]:
         cleaned_name = self._clean_name(raw_name)
@@ -235,10 +231,6 @@ class NameNormalizer:
     def candidate_exam_aliases(self, normalized_name: str) -> list[str]:
         aliases = self.config.exam_aliases.get(normalized_name, [])
         return [normalized_name, *aliases]
-
-    # 这些规则是“患者表达到图谱节点”的接口层归一化，不参与疾病推理打分。
-    def _template_graph_mentions(self, raw_name: str) -> list[str]:
-        return [item[0] for item in self._template_graph_mention_details(raw_name)]
 
     def _template_graph_mention_details(self, raw_name: str) -> list[tuple[str, str]]:
         normalized = self.normalize_exam_text(raw_name)

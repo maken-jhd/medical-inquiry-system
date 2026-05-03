@@ -523,39 +523,6 @@ class GraphRetriever:
             ],
         }
 
-    # 兼容旧接口：根据当前阳性槽位向前检索候选疾病、阶段或并发问题。
-    def get_forward_hypotheses(self, session_state: SessionState, top_k: int | None = None) -> List[HypothesisScore]:
-        candidates = self.retrieve_r1_candidates([], None, session_state, top_k)
-        return self._build_hypothesis_scores(candidates)
-
-    # 兼容旧接口：从候选假设反向检索最值得继续验证的节点。
-    def get_reverse_validation_questions(
-        self,
-        hypotheses: List[HypothesisScore],
-        session_state: SessionState,
-        top_k: int | None = None,
-    ) -> List[QuestionCandidate]:
-        if len(hypotheses) == 0:
-            return []
-
-        rows = self.retrieve_r2_expected_evidence(hypotheses[0], session_state, top_k)
-        return [
-            QuestionCandidate(
-                node_id=row["node_id"],
-                label=row["label"],
-                name=row["name"],
-                topic_id=row.get("topic_id"),
-                priority=float(row.get("priority", 0.0)),
-                red_flag_score=1.0 if bool(row.get("is_red_flag", False)) else 0.0,
-                metadata={
-                    "relation_type": row.get("relation_type"),
-                    "acquisition_mode": row.get("acquisition_mode", ""),
-                    "evidence_cost": row.get("evidence_cost", ""),
-                },
-            )
-            for row in rows
-        ]
-
     # 从 A1 核心特征、实体链接结果和当前槽位中汇总阳性特征名称。
     def _collect_positive_feature_names(
         self,

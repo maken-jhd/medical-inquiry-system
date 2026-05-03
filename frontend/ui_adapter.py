@@ -207,20 +207,12 @@ def _normalize_demo_turn(turn: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def translate_existence(value: Any) -> str:
-    return EXISTENCE_LABELS.get(value, str(value or "未知"))
-
-
 def translate_polarity(value: Any) -> str:
     return POLARITY_LABELS.get(value, str(value or "未知"))
 
 
 def translate_resolution(value: Any) -> str:
     return RESOLUTION_LABELS.get(value, str(value or "未知"))
-
-
-def translate_certainty(value: Any) -> str:
-    return translate_resolution(value)
 
 
 def translate_stage(value: Any) -> str:

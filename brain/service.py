@@ -145,31 +145,6 @@ class ConsultationBrain:
     def start_session(self, session_id: str) -> SessionState:
         return self.deps.state_tracker.create_session(session_id)
 
-    # 兼容旧接口：批量应用槽位更新并刷新候选假设。
-    def apply_updates(self, session_id: str, updates: Iterable[SlotUpdate]) -> SessionState:
-        state = self.deps.state_tracker.apply_slot_updates(session_id, updates)
-        hypotheses = self.deps.retriever.get_forward_hypotheses(state)
-        self.deps.state_tracker.set_candidate_hypotheses(session_id, hypotheses)
-        return self.deps.state_tracker.get_session(session_id)
-
-    # 兼容旧接口：优先从最近一次搜索结果中返回下一问。
-    def get_next_question(self, session_id: str) -> Optional[str]:
-        state = self.deps.state_tracker.get_session(session_id)
-        search_result = state.metadata.get("last_search_result")
-
-        if isinstance(search_result, SearchResult) and search_result.selected_action is not None:
-            return self.deps.action_builder.render_question_text(search_result.selected_action)
-
-        candidate = self.deps.question_selector.select_next_question(
-            self.deps.retriever.get_cold_start_questions(),
-            state,
-        )
-
-        if candidate is None:
-            return None
-
-        return f"我想先了解一下：是否存在“{candidate.name}”相关情况？"
-
     # 兼容旧接口：根据当前状态输出最终报告。
     def finalize(self, session_id: str) -> dict:
         state = self.deps.state_tracker.get_session(session_id)
@@ -182,11 +157,6 @@ class ConsultationBrain:
 
         stop_decision = self.deps.stop_rule_engine.check_sufficiency(state, state.candidate_hypotheses)
         return self.deps.report_builder.build_final_report(state, stop_decision)
-
-    # 将患者原话抽成论文中的结构化上下文 P/C。
-    def ingest_patient_turn(self, session_id: str, patient_text: str) -> PatientContext:
-        _ = session_id
-        return self.deps.med_extractor.extract_patient_context(patient_text)
 
     def _prepare_turn_mentions(
         self,

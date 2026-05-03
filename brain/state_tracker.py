@@ -52,10 +52,6 @@ class StateTracker:
     def get_rollout_session_copy(self, session_id: str) -> SessionState:
         return self.build_rollout_session_snapshot(self.get_session(session_id))
 
-    # 克隆当前会话状态，供 rollout 或分支推演时使用。
-    def clone_session_state(self, session_id: str) -> SessionState:
-        return self.get_session_copy(session_id)
-
     # 只保留推演所需字段，切断 search_tree / last_search_result / trajectories 等重量级引用。
     @staticmethod
     def build_rollout_session_snapshot(state: SessionState) -> SessionState:
