@@ -23,6 +23,7 @@
 - 旧版全量指南图谱备份：[knowledge_graph_bak/README.md](/Users/loki/Workspace/GraduationDesign/knowledge_graph_bak/README.md)
 - 第二阶段问诊大脑：[brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
 - 第二阶段问诊大脑详细运行链路指南（当前按 `A1 / A2 / A3 + anchor` 口径说明）：[brain_runtime_call_chain_guide.md](/Users/loki/Workspace/GraduationDesign/docs/brain_runtime_call_chain_guide.md)
+- Med-MCTS 论文实现与当前系统实现对照、启发参数来源与后续优化方向：[med_mcts_vs_current_system.md](/Users/loki/Workspace/GraduationDesign/docs/med_mcts_vs_current_system.md)
 - 虚拟病人与离线回放：[simulator/README.md](/Users/loki/Workspace/GraduationDesign/simulator/README.md)
 - 图谱驱动虚拟病人详细方案：[virtual_patient_generation_scheme.md](/Users/loki/Workspace/GraduationDesign/docs/virtual_patient_generation_scheme.md)
 - 前端演示界面：[frontend/README.md](/Users/loki/Workspace/GraduationDesign/frontend/README.md)
@@ -488,6 +489,7 @@ streamlit run frontend/app.py --server.port 8514
 - [tests/test_benchmark.py](/Users/loki/Workspace/GraduationDesign/tests/test_benchmark.py)
 - [phase2_execution_checklist.md](/Users/loki/Workspace/GraduationDesign/docs/phase2_execution_checklist.md)：第二阶段与虚拟病人开发清单
 - [diagnosis_system_todolist.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_system_todolist.md)：当前诊断系统待完善点与后续迭代顺序
+- [med_mcts_vs_current_system.md](/Users/loki/Workspace/GraduationDesign/docs/med_mcts_vs_current_system.md)：整理论文实现与当前动态问诊实现的差异、启发式参数来源及后续优化方向
 - [phase2_changelog.md](/Users/loki/Workspace/GraduationDesign/docs/phase2_changelog.md)：第二阶段实现历程、问题改进与论文写作素材整理
 - [virtual_patient_generation_scheme.md](/Users/loki/Workspace/GraduationDesign/docs/virtual_patient_generation_scheme.md)：图谱驱动虚拟病人详细方案、病例类型规则、骨架字段与论文写作素材整理
 - [scripts/run_brain_demo.py](/Users/loki/Workspace/GraduationDesign/scripts/run_brain_demo.py)：最小命令行问诊演示入口
@@ -515,6 +517,7 @@ streamlit run frontend/app.py --server.port 8514
 - [simulator/README.md](/Users/loki/Workspace/GraduationDesign/simulator/README.md) 说明虚拟病人与离线回放目录结构与文件职责
 - [frontend/README.md](/Users/loki/Workspace/GraduationDesign/frontend/README.md) 说明 Streamlit 前端启动、回放模式、实时模式与配置方式
 - [tests/README.md](/Users/loki/Workspace/GraduationDesign/tests/README.md) 说明第二阶段测试组织方式与当前覆盖范围
+- [med_mcts_vs_current_system.md](/Users/loki/Workspace/GraduationDesign/docs/med_mcts_vs_current_system.md) 记录论文实现与当前系统实现的关键差异，并整理启发式参数的来源与下一步优化方向
 - [phase2_changelog.md](/Users/loki/Workspace/GraduationDesign/docs/phase2_changelog.md) 重点记录第二阶段各轮改进分别解决了什么问题，适合作为论文写作材料
 - [diagnosis_system_todolist.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_system_todolist.md) 记录当前诊断系统仍待完善的点，适合作为后续实现顺序与回归目标清单
 

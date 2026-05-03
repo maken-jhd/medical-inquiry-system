@@ -262,6 +262,10 @@
   - [brain_runtime_call_chain_guide.md](/Users/loki/Workspace/GraduationDesign/docs/brain_runtime_call_chain_guide.md)
   - 当前文档已按 `A1 / A2 / A3 + pending action + anchor-controlled acceptance/repair` 的实现口径重写，可直接对照 `process_turn()` 阅读。
 
+- 论文对照与启发式参数说明：
+  - [med_mcts_vs_current_system.md](/Users/loki/Workspace/GraduationDesign/docs/med_mcts_vs_current_system.md)
+  - 当前文档集中说明 Med-MCTS 论文实现与本系统动态问诊实现的差异，并整理启发式参数的主要来源、当前定位和后续优化方向。
+
 - 当前诊断系统待办清单：
   - [diagnosis_system_todolist.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_system_todolist.md)
 
