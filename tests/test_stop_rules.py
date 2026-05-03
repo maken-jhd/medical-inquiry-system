@@ -10,6 +10,7 @@ def _answer_score(
     *,
     trajectory_count: int = 3,
     verifier_should_accept: bool = True,
+    verifier_reject_reason: str = "",
 ) -> FinalAnswerScore:
     return FinalAnswerScore(
         answer_id=answer_id,
@@ -23,6 +24,7 @@ def _answer_score(
             "verifier_mode": "llm_verifier",
             "verifier_should_accept": verifier_should_accept,
             "verifier_accept_reason": "key_support_sufficient",
+            "verifier_reject_reason": verifier_reject_reason,
         },
     )
 
@@ -165,3 +167,88 @@ def test_strong_anchor_uses_lower_trajectory_threshold(monkeypatch) -> None:
 
     assert decision.should_stop is True
     assert decision.reason == "final_answer_accepted"
+
+
+# 验证低成本多族证据在开启 evidence-profile 模式后可作为放行依据。
+def test_anchor_controlled_accepts_low_cost_profile_without_strong_anchor(monkeypatch) -> None:
+    monkeypatch.delenv("BRAIN_ACCEPTANCE_PROFILE", raising=False)
+    engine = StopRuleEngine(
+        StopRuleConfig(
+            acceptance_profile="anchor_controlled",
+            enable_evidence_profile_acceptance=True,
+            min_low_cost_profile_families=2,
+            min_low_cost_profile_present_clear_count=2,
+            min_low_cost_profile_stable_top_count=2,
+        )
+    )
+    state = SessionState(session_id="anchor_stop", turn_index=3)
+    state.metadata["answer_candidate_history"] = [
+        {"turn_index": 2, "answer_id": "d1", "answer_name": "候选疾病"},
+        {"turn_index": 3, "answer_id": "d1", "answer_name": "候选疾病"},
+    ]
+    state.candidate_hypotheses = [
+        HypothesisScore(
+            node_id="d1",
+            label="Disease",
+            name="候选疾病",
+            score=1.1,
+            metadata={
+                "anchor_tier": "phenotype_supported",
+                "observed_anchor_score": 0.0,
+                "low_cost_profile_satisfied": True,
+                "low_cost_core_family_count": 2,
+                "low_cost_present_clear_count": 2,
+                "evidence_profile_acceptance_candidate": True,
+            },
+        )
+    ]
+
+    decision = engine.should_accept_final_answer(_answer_score("d1", "候选疾病"), state)
+
+    assert decision.should_stop is True
+    assert decision.reason == "final_answer_accepted"
+
+
+# 若 verifier 给出硬拒绝，即使存在低成本 profile 也不应被覆盖。
+def test_anchor_controlled_keeps_hard_verifier_rejection(monkeypatch) -> None:
+    monkeypatch.delenv("BRAIN_ACCEPTANCE_PROFILE", raising=False)
+    engine = StopRuleEngine(
+        StopRuleConfig(
+            acceptance_profile="anchor_controlled",
+            enable_evidence_profile_acceptance=True,
+        )
+    )
+    state = SessionState(session_id="anchor_stop", turn_index=3)
+    state.metadata["answer_candidate_history"] = [
+        {"turn_index": 2, "answer_id": "d1", "answer_name": "候选疾病"},
+        {"turn_index": 3, "answer_id": "d1", "answer_name": "候选疾病"},
+    ]
+    state.candidate_hypotheses = [
+        HypothesisScore(
+            node_id="d1",
+            label="Disease",
+            name="候选疾病",
+            score=1.1,
+            metadata={
+                "anchor_tier": "phenotype_supported",
+                "observed_anchor_score": 0.0,
+                "low_cost_profile_satisfied": True,
+                "low_cost_core_family_count": 2,
+                "low_cost_present_clear_count": 2,
+                "evidence_profile_acceptance_candidate": True,
+            },
+        )
+    ]
+
+    decision = engine.should_accept_final_answer(
+        _answer_score(
+            "d1",
+            "候选疾病",
+            verifier_should_accept=False,
+            verifier_reject_reason="hard_negative_key_evidence",
+        ),
+        state,
+    )
+
+    assert decision.should_stop is False
+    assert decision.reason == "verifier_rejected_stop"

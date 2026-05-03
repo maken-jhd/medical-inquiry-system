@@ -1,0 +1,162 @@
+[2026-05-03T15:26:18] 启动 batch replay：总病例 80，已完成 0，待运行 80，并发 4，resume=on，llm_available=true
+[2026-05-03T15:26:18] 病例启动：case_id=kg_competitive_1094c4fa_vs_77bbd6d1_001，title=弓形虫脑炎免疫重建炎症综合征 - 竞争病例（vs 进行性多灶性白质脑病），已启动 1/80
+[2026-05-03T15:26:18] 病例启动：case_id=kg_competitive_35e92097_vs_1c77f9ad_001，title=肥胖 - 竞争病例（vs 血脂异常），已启动 2/80
+[2026-05-03T15:26:18] 病例启动：case_id=kg_competitive_77bbd6d1_vs_3cea9960_001，title=进行性多灶性白质脑病 - 竞争病例（vs 隐球菌性脑膜炎），已启动 3/80
+[2026-05-03T15:26:18] 病例启动：case_id=kg_competitive_99291df5_vs_6ec2005e_001，title=肝癌 - 竞争病例（vs 进行性播散性组织胞浆菌病），已启动 4/80
+[2026-05-03T15:27:15] 病例完成：case_id=kg_competitive_35e92097_vs_1c77f9ad_001，status=completed，turns=1，total_seconds=56.67，opening_seconds=5.12，initial_brain_seconds=18.06，patient_answer_seconds_total=0.0000，brain_turn_seconds_total=33.49，finalize_seconds=0.0000，slowest_turn=1:33.49s，本轮完成 1/80，累计完成 1/80
+[2026-05-03T15:27:15] 病例启动：case_id=kg_competitive_b6b0ace2_vs_25228069_001，title=脓肿分枝杆菌病 - 竞争病例（vs 偶然分枝杆菌病），已启动 5/80
+[2026-05-03T15:28:55] 病例完成：case_id=kg_competitive_b6b0ace2_vs_25228069_001，status=completed，turns=2，total_seconds=99.90，opening_seconds=3.62，initial_brain_seconds=18.28，patient_answer_seconds_total=5.68，brain_turn_seconds_total=72.32，finalize_seconds=0.0000，slowest_turn=2:43.82s，本轮完成 2/80，累计完成 2/80
+[2026-05-03T15:28:55] 病例启动：case_id=kg_competitive_b18b3f9e_vs_32e052bf_001，title=治疗矛盾型结核相关免疫重建炎症综合征 - 竞争病例（vs 隐球菌性脑膜脑炎），已启动 6/80
+[2026-05-03T15:30:24] 病例完成：case_id=kg_competitive_77bbd6d1_vs_3cea9960_001，status=max_turn_reached，turns=8，total_seconds=245.54，opening_seconds=4.43，initial_brain_seconds=17.54，patient_answer_seconds_total=40.11，brain_turn_seconds_total=183.46，finalize_seconds=0.0012，slowest_turn=1:46.61s，本轮完成 3/80，累计完成 3/80
+[2026-05-03T15:30:24] 病例启动：case_id=kg_competitive_d92cff90_vs_8ed19863_001，title=皮肤隐球菌病 - 竞争病例（vs 非结核分枝杆菌病），已启动 7/80
+[2026-05-03T15:30:57] 病例完成：case_id=kg_competitive_1094c4fa_vs_77bbd6d1_001，status=max_turn_reached，turns=8，total_seconds=278.52，opening_seconds=4.86，initial_brain_seconds=22.64，patient_answer_seconds_total=43.07，brain_turn_seconds_total=207.96，finalize_seconds=0.0012，slowest_turn=1:51.10s，本轮完成 4/80，累计完成 4/80
+[2026-05-03T15:30:57] 病例启动：case_id=kg_competitive_d39c858e_vs_47ce2e38_001，title=纵隔淋巴结炎 - 竞争病例（vs 侵袭性曲霉病），已启动 8/80
+[2026-05-03T15:31:20] 病例完成：case_id=kg_competitive_99291df5_vs_6ec2005e_001，status=max_turn_reached，turns=8，total_seconds=301.82，opening_seconds=4.73，initial_brain_seconds=17.63，patient_answer_seconds_total=41.97，brain_turn_seconds_total=237.50，finalize_seconds=0.0012，slowest_turn=6:45.37s，本轮完成 5/80，累计完成 5/80
+[2026-05-03T15:31:20] 病例启动：case_id=kg_exam_driven_00100780_001，title=巨细胞病毒感染 - 检查驱动病例，已启动 9/80
+[2026-05-03T15:32:30] 病例完成：case_id=kg_exam_driven_00100780_001，status=completed，turns=1，total_seconds=69.99，opening_seconds=4.91，initial_brain_seconds=25.07，patient_answer_seconds_total=0.0000，brain_turn_seconds_total=40.01，finalize_seconds=0.0000，slowest_turn=1:40.01s，本轮完成 6/80，累计完成 6/80
+[2026-05-03T15:32:30] 病例启动：case_id=kg_competitive_fca01ccd_vs_07cce8da_001，title=宫颈癌 - 竞争病例（vs 原发性肝细胞癌），已启动 10/80
+[2026-05-03T15:33:37] 病例完成：case_id=kg_competitive_d92cff90_vs_8ed19863_001，status=max_turn_reached，turns=8，total_seconds=192.69，opening_seconds=4.10，initial_brain_seconds=20.25，patient_answer_seconds_total=32.91，brain_turn_seconds_total=135.43，finalize_seconds=0.0010，slowest_turn=1:29.82s，本轮完成 7/80，累计完成 7/80
+[2026-05-03T15:33:37] 病例启动：case_id=kg_exam_driven_0d1b0992_001，title=弓形虫病 - 检查驱动病例，已启动 11/80
+[2026-05-03T15:34:03] 病例完成：case_id=kg_competitive_b18b3f9e_vs_32e052bf_001，status=max_turn_reached，turns=8，total_seconds=308.08，opening_seconds=3.28，initial_brain_seconds=19.15，patient_answer_seconds_total=43.71，brain_turn_seconds_total=241.94，finalize_seconds=0.0011，slowest_turn=1:51.56s，本轮完成 8/80，累计完成 8/80
+[2026-05-03T15:34:03] 病例启动：case_id=kg_exam_driven_0d685ef5_001，title=免疫重建炎症综合征 - 检查驱动病例，已启动 12/80
+[2026-05-03T15:34:43] 病例完成：case_id=kg_exam_driven_0d1b0992_001，status=completed，turns=1，total_seconds=66.21，opening_seconds=4.34，initial_brain_seconds=18.33，patient_answer_seconds_total=0.0000，brain_turn_seconds_total=43.54，finalize_seconds=0.0000，slowest_turn=1:43.54s，本轮完成 9/80，累计完成 9/80
+[2026-05-03T15:34:43] 病例启动：case_id=kg_exam_driven_127afa16_001，title=乙型肝炎病毒感染 - 检查驱动病例，已启动 13/80
+[2026-05-03T15:35:32] 病例完成：case_id=kg_competitive_d39c858e_vs_47ce2e38_001，status=max_turn_reached，turns=8，total_seconds=275.28，opening_seconds=4.80，initial_brain_seconds=20.11，patient_answer_seconds_total=43.21，brain_turn_seconds_total=207.16，finalize_seconds=0.0013，slowest_turn=1:43.93s，本轮完成 10/80，累计完成 10/80
+[2026-05-03T15:35:32] 病例启动：case_id=kg_exam_driven_25228069_001，title=偶然分枝杆菌病 - 检查驱动病例，已启动 14/80
+[2026-05-03T15:35:33] 病例完成：case_id=kg_exam_driven_127afa16_001，status=completed，turns=1，total_seconds=49.59，opening_seconds=4.68，initial_brain_seconds=11.69，patient_answer_seconds_total=0.0000，brain_turn_seconds_total=33.22，finalize_seconds=0.0000，slowest_turn=1:33.22s，本轮完成 11/80，累计完成 11/80
+[2026-05-03T15:35:33] 病例启动：case_id=kg_exam_driven_3597acb1_001，title=肺孢子菌肺炎 - 检查驱动病例，已启动 15/80
+[2026-05-03T15:37:03] 病例完成：case_id=kg_exam_driven_25228069_001，status=completed，turns=2，total_seconds=91.06，opening_seconds=4.15，initial_brain_seconds=14.05，patient_answer_seconds_total=5.20，brain_turn_seconds_total=67.66，finalize_seconds=0.0000，slowest_turn=2:40.85s，本轮完成 12/80，累计完成 12/80
+[2026-05-03T15:37:03] 病例启动：case_id=kg_exam_driven_58c11dd3_001，title=利福平耐药结核病 - 检查驱动病例，已启动 16/80
+[2026-05-03T15:37:18] 病例完成：case_id=kg_competitive_fca01ccd_vs_07cce8da_001，status=max_turn_reached，turns=8，total_seconds=287.84，opening_seconds=5.35，initial_brain_seconds=20.99，patient_answer_seconds_total=44.31，brain_turn_seconds_total=217.19，finalize_seconds=0.0008，slowest_turn=6:48.45s，本轮完成 13/80，累计完成 13/80
+[2026-05-03T15:37:18] 病例启动：case_id=kg_exam_driven_47ce2e38_001，title=侵袭性曲霉病 - 检查驱动病例，已启动 17/80
+[2026-05-03T15:37:22] 病例完成：case_id=kg_exam_driven_3597acb1_001，status=max_turn_reached，turns=8，total_seconds=109.53，opening_seconds=6.76，initial_brain_seconds=6.60，patient_answer_seconds_total=50.21，brain_turn_seconds_total=45.97，finalize_seconds=0.0002，slowest_turn=5:13.21s，本轮完成 14/80，累计完成 14/80
+[2026-05-03T15:37:22] 病例启动：case_id=kg_exam_driven_81ab2752_001，title=肺隐球菌感染 - 检查驱动病例，已启动 18/80
+[2026-05-03T15:38:02] 病例完成：case_id=kg_exam_driven_0d685ef5_001，status=max_turn_reached，turns=8，total_seconds=238.91，opening_seconds=4.76，initial_brain_seconds=4.82，patient_answer_seconds_total=46.89，brain_turn_seconds_total=182.45，finalize_seconds=0.0013，slowest_turn=4:43.82s，本轮完成 15/80，累计完成 15/80
+[2026-05-03T15:38:02] 病例启动：case_id=kg_exam_driven_95566e9a_001，title=代谢综合征 - 检查驱动病例，已启动 19/80
+[2026-05-03T15:38:35] 病例完成：case_id=kg_exam_driven_81ab2752_001，status=completed，turns=1，total_seconds=73.00，opening_seconds=5.60，initial_brain_seconds=17.15，patient_answer_seconds_total=0.0000，brain_turn_seconds_total=50.24，finalize_seconds=0.0000，slowest_turn=1:50.24s，本轮完成 16/80，累计完成 16/80
+[2026-05-03T15:38:35] 病例启动：case_id=kg_exam_driven_9abac428_001，title=龟分枝杆菌病 - 检查驱动病例，已启动 20/80
+[2026-05-03T15:38:41] 病例完成：case_id=kg_exam_driven_58c11dd3_001，status=max_turn_reached，turns=8，total_seconds=97.45，opening_seconds=3.73，initial_brain_seconds=4.79，patient_answer_seconds_total=47.08，brain_turn_seconds_total=41.84，finalize_seconds=0.0002，slowest_turn=7:12.70s，本轮完成 17/80，累计完成 17/80
+[2026-05-03T15:38:41] 病例启动：case_id=kg_exam_driven_b18b3f9e_001，title=治疗矛盾型结核相关免疫重建炎症综合征 - 检查驱动病例，已启动 21/80
+[2026-05-03T15:39:08] 病例完成：case_id=kg_exam_driven_95566e9a_001，status=completed，turns=1，total_seconds=65.63，opening_seconds=4.44，initial_brain_seconds=21.31，patient_answer_seconds_total=0.0000，brain_turn_seconds_total=39.89，finalize_seconds=0.0000，slowest_turn=1:39.89s，本轮完成 18/80，累计完成 18/80
+[2026-05-03T15:39:08] 病例启动：case_id=kg_exam_driven_e1356ac0_001，title=HIV急性感染 - 检查驱动病例，已启动 22/80
+[2026-05-03T15:40:53] 病例完成：case_id=kg_exam_driven_e1356ac0_001，status=max_turn_reached，turns=8，total_seconds=105.53，opening_seconds=4.44，initial_brain_seconds=4.56，patient_answer_seconds_total=55.59，brain_turn_seconds_total=40.94，finalize_seconds=0.0002，slowest_turn=8:14.34s，本轮完成 19/80，累计完成 19/80
+[2026-05-03T15:40:53] 病例启动：case_id=kg_low_cost_0cbaaf2d_001，title=HIV感染 - 低成本病例，已启动 23/80
+[2026-05-03T15:40:55] 病例完成：case_id=kg_exam_driven_9abac428_001，status=completed，turns=3，total_seconds=139.35，opening_seconds=3.02，initial_brain_seconds=15.10，patient_answer_seconds_total=8.60，brain_turn_seconds_total=112.62，finalize_seconds=0.0000，slowest_turn=2:44.78s，本轮完成 20/80，累计完成 20/80
+[2026-05-03T15:40:55] 病例启动：case_id=kg_low_cost_1094c4fa_001，title=弓形虫脑炎免疫重建炎症综合征 - 低成本病例，已启动 24/80
+[2026-05-03T15:41:27] 病例完成：case_id=kg_exam_driven_47ce2e38_001，status=max_turn_reached，turns=8，total_seconds=248.84，opening_seconds=4.54，initial_brain_seconds=22.92，patient_answer_seconds_total=40.49，brain_turn_seconds_total=180.89，finalize_seconds=0.0011，slowest_turn=1:42.50s，本轮完成 21/80，累计完成 21/80
+[2026-05-03T15:41:27] 病例启动：case_id=kg_low_cost_0d685ef5_001，title=免疫重建炎症综合征 - 低成本病例，已启动 25/80
+[2026-05-03T15:43:05] 病例完成：case_id=kg_low_cost_1094c4fa_001，status=max_turn_reached，turns=8，total_seconds=130.06，opening_seconds=3.82，initial_brain_seconds=15.75，patient_answer_seconds_total=37.34，brain_turn_seconds_total=73.15，finalize_seconds=0.0003，slowest_turn=1:24.17s，本轮完成 22/80，累计完成 22/80
+[2026-05-03T15:43:05] 病例启动：case_id=kg_low_cost_1ff93afb_001，title=非结核分枝杆菌肺病 - 低成本病例，已启动 26/80
+[2026-05-03T15:43:09] 病例完成：case_id=kg_low_cost_0cbaaf2d_001，status=max_turn_reached，turns=8，total_seconds=135.40，opening_seconds=4.43，initial_brain_seconds=15.52，patient_answer_seconds_total=30.07，brain_turn_seconds_total=85.38，finalize_seconds=0.0003，slowest_turn=1:24.56s，本轮完成 23/80，累计完成 23/80
+[2026-05-03T15:43:09] 病例启动：case_id=kg_exam_driven_fca01ccd_001，title=宫颈癌 - 检查驱动病例，已启动 27/80
+[2026-05-03T15:44:11] 病例完成：case_id=kg_exam_driven_b18b3f9e_001，status=max_turn_reached，turns=8，total_seconds=329.76，opening_seconds=4.84，initial_brain_seconds=19.73，patient_answer_seconds_total=45.61，brain_turn_seconds_total=259.58，finalize_seconds=0.0010，slowest_turn=1:63.26s，本轮完成 24/80，累计完成 24/80
+[2026-05-03T15:44:11] 病例启动：case_id=kg_low_cost_2102c689_001，title=巨细胞病毒(CMV)肺炎 - 低成本病例，已启动 28/80
+[2026-05-03T15:44:22] 病例完成：case_id=kg_low_cost_0d685ef5_001，status=max_turn_reached，turns=8，total_seconds=174.64，opening_seconds=4.73，initial_brain_seconds=21.19，patient_answer_seconds_total=37.42，brain_turn_seconds_total=111.29，finalize_seconds=0.0004，slowest_turn=3:31.62s，本轮完成 25/80，累计完成 25/80
+[2026-05-03T15:44:22] 病例启动：case_id=kg_low_cost_3597acb1_001，title=肺孢子菌肺炎 - 低成本病例，已启动 29/80
+[2026-05-03T15:44:48] 病例完成：case_id=kg_low_cost_1ff93afb_001，status=max_turn_reached，turns=8，total_seconds=103.57，opening_seconds=3.18，initial_brain_seconds=6.60，patient_answer_seconds_total=48.89，brain_turn_seconds_total=44.91，finalize_seconds=0.0001，slowest_turn=8:14.34s，本轮完成 26/80，累计完成 26/80
+[2026-05-03T15:44:48] 病例启动：case_id=kg_low_cost_3726b8b4_001，title=新型冠状病毒感染 - 低成本病例，已启动 30/80
+[2026-05-03T15:47:41] 病例完成：case_id=kg_exam_driven_fca01ccd_001，status=max_turn_reached，turns=8，total_seconds=271.68，opening_seconds=5.54，initial_brain_seconds=22.97，patient_answer_seconds_total=38.97，brain_turn_seconds_total=204.20，finalize_seconds=0.0011，slowest_turn=1:48.10s，本轮完成 27/80，累计完成 27/80
+[2026-05-03T15:47:41] 病例启动：case_id=kg_low_cost_3cea9960_001，title=隐球菌性脑膜炎 - 低成本病例，已启动 31/80
+[2026-05-03T15:48:05] 病例完成：case_id=kg_low_cost_2102c689_001，status=max_turn_reached，turns=8，total_seconds=234.24，opening_seconds=3.39，initial_brain_seconds=17.08，patient_answer_seconds_total=29.56，brain_turn_seconds_total=184.21，finalize_seconds=0.0009，slowest_turn=7:32.86s，本轮完成 28/80，累计完成 28/80
+[2026-05-03T15:48:05] 病例启动：case_id=kg_low_cost_39cea610_001，title=单纯疱疹病毒感染 - 低成本病例，已启动 32/80
+[2026-05-03T15:48:32] 病例完成：case_id=kg_low_cost_3597acb1_001，status=max_turn_reached，turns=8，total_seconds=249.75，opening_seconds=9.82，initial_brain_seconds=18.64，patient_answer_seconds_total=38.25，brain_turn_seconds_total=183.04，finalize_seconds=0.0013，slowest_turn=4:37.99s，本轮完成 29/80，累计完成 29/80
+[2026-05-03T15:48:32] 病例启动：case_id=kg_low_cost_3d0c1682_001，title=巨细胞病毒(CMV)结肠炎 - 低成本病例，已启动 33/80
+[2026-05-03T15:48:47] 病例完成：case_id=kg_low_cost_3726b8b4_001，status=max_turn_reached，turns=8，total_seconds=238.79，opening_seconds=3.57，initial_brain_seconds=15.95，patient_answer_seconds_total=38.81，brain_turn_seconds_total=180.46，finalize_seconds=0.0014，slowest_turn=7:37.45s，本轮完成 30/80，累计完成 30/80
+[2026-05-03T15:48:47] 病例启动：case_id=kg_low_cost_4045bc8b_001，title=CMV食管炎或肠炎 - 低成本病例，已启动 34/80
+[2026-05-03T15:49:53] 病例完成：case_id=kg_low_cost_3cea9960_001，status=max_turn_reached，turns=8，total_seconds=132.09，opening_seconds=4.27，initial_brain_seconds=17.19，patient_answer_seconds_total=30.45，brain_turn_seconds_total=80.18，finalize_seconds=0.0005，slowest_turn=1:25.40s，本轮完成 31/80，累计完成 31/80
+[2026-05-03T15:49:53] 病例启动：case_id=kg_low_cost_47ce2e38_001，title=侵袭性曲霉病 - 低成本病例，已启动 35/80
+[2026-05-03T15:51:37] 病例完成：case_id=kg_low_cost_3d0c1682_001，status=max_turn_reached，turns=8，total_seconds=184.93，opening_seconds=4.24，initial_brain_seconds=20.44，patient_answer_seconds_total=31.42，brain_turn_seconds_total=128.83，finalize_seconds=0.0007，slowest_turn=5:28.39s，本轮完成 32/80，累计完成 32/80
+[2026-05-03T15:51:37] 病例启动：case_id=kg_low_cost_48f3ab11_001，title=隐球菌相关性免疫重建炎症综合征 - 低成本病例，已启动 36/80
+[2026-05-03T15:51:57] 病例完成：case_id=kg_low_cost_39cea610_001，status=max_turn_reached，turns=8，total_seconds=232.21，opening_seconds=5.08，initial_brain_seconds=17.35，patient_answer_seconds_total=30.51，brain_turn_seconds_total=179.27，finalize_seconds=0.0011，slowest_turn=1:33.17s，本轮完成 33/80，累计完成 33/80
+[2026-05-03T15:51:57] 病例启动：case_id=kg_low_cost_69ae4b26_001，title=弓形虫脑炎 - 低成本病例，已启动 37/80
+[2026-05-03T15:52:54] 病例完成：case_id=kg_low_cost_4045bc8b_001，status=max_turn_reached，turns=8，total_seconds=246.58，opening_seconds=4.36，initial_brain_seconds=18.90，patient_answer_seconds_total=30.43，brain_turn_seconds_total=192.88，finalize_seconds=0.0014，slowest_turn=6:36.17s，本轮完成 34/80，累计完成 34/80
+[2026-05-03T15:52:54] 病例启动：case_id=kg_low_cost_77bbd6d1_001，title=进行性多灶性白质脑病 - 低成本病例，已启动 38/80
+[2026-05-03T15:53:51] 病例完成：case_id=kg_low_cost_47ce2e38_001，status=max_turn_reached，turns=8，total_seconds=238.54，opening_seconds=3.83，initial_brain_seconds=23.25，patient_answer_seconds_total=30.35，brain_turn_seconds_total=181.11，finalize_seconds=0.0015，slowest_turn=7:33.97s，本轮完成 35/80，累计完成 35/80
+[2026-05-03T15:53:51] 病例启动：case_id=kg_low_cost_6ec2005e_001，title=进行性播散性组织胞浆菌病 - 低成本病例，已启动 39/80
+[2026-05-03T15:55:19] 病例完成：case_id=kg_low_cost_48f3ab11_001，status=max_turn_reached，turns=8，total_seconds=222.58，opening_seconds=4.52，initial_brain_seconds=20.41，patient_answer_seconds_total=34.24，brain_turn_seconds_total=163.41，finalize_seconds=0.0013，slowest_turn=5:35.77s，本轮完成 36/80，累计完成 36/80
+[2026-05-03T15:55:19] 病例启动：case_id=kg_low_cost_742d6a21_001，title=巨细胞病毒(CMV)食管炎 - 低成本病例，已启动 40/80
+[2026-05-03T15:55:26] 病例完成：case_id=kg_low_cost_77bbd6d1_001，status=max_turn_reached，turns=8，total_seconds=151.73，opening_seconds=4.35，initial_brain_seconds=7.92，patient_answer_seconds_total=42.52，brain_turn_seconds_total=96.95，finalize_seconds=0.0011，slowest_turn=8:34.24s，本轮完成 37/80，累计完成 37/80
+[2026-05-03T15:55:26] 病例启动：case_id=kg_low_cost_7c026ed3_001，title=急性低氧性呼吸衰竭 - 低成本病例，已启动 41/80
+[2026-05-03T15:55:51] 病例完成：case_id=kg_low_cost_69ae4b26_001，status=max_turn_reached，turns=8，total_seconds=233.36，opening_seconds=4.89，initial_brain_seconds=19.52，patient_answer_seconds_total=31.28，brain_turn_seconds_total=177.66，finalize_seconds=0.0013，slowest_turn=5:34.63s，本轮完成 38/80，累计完成 38/80
+[2026-05-03T15:55:51] 病例启动：case_id=kg_low_cost_7f72da92_001，title=侵袭性真菌病 - 低成本病例，已启动 42/80
+[2026-05-03T15:57:47] 病例完成：case_id=kg_low_cost_6ec2005e_001，status=max_turn_reached，turns=8，total_seconds=235.89，opening_seconds=3.77，initial_brain_seconds=17.36，patient_answer_seconds_total=29.87，brain_turn_seconds_total=184.88，finalize_seconds=0.0011，slowest_turn=6:33.65s，本轮完成 39/80，累计完成 39/80
+[2026-05-03T15:57:47] 病例启动：case_id=kg_low_cost_81ab2752_001，title=肺隐球菌感染 - 低成本病例，已启动 43/80
+[2026-05-03T15:58:44] 病例完成：case_id=kg_low_cost_7f72da92_001，status=max_turn_reached，turns=8，total_seconds=172.98，opening_seconds=5.13，initial_brain_seconds=23.42，patient_answer_seconds_total=33.02，brain_turn_seconds_total=111.41，finalize_seconds=0.0005，slowest_turn=3:29.19s，本轮完成 40/80，累计完成 40/80
+[2026-05-03T15:58:44] 病例启动：case_id=kg_low_cost_865a6fce_001，title=巨细胞病毒(CMV)视网膜炎 - 低成本病例，已启动 44/80
+[2026-05-03T15:59:08] 病例完成：case_id=kg_low_cost_742d6a21_001，status=max_turn_reached，turns=8，total_seconds=228.74，opening_seconds=4.70，initial_brain_seconds=18.47，patient_answer_seconds_total=28.10，brain_turn_seconds_total=177.47，finalize_seconds=0.0007，slowest_turn=1:32.43s，本轮完成 41/80，累计完成 41/80
+[2026-05-03T15:59:08] 病例启动：case_id=kg_low_cost_893f1fc0_001，title=恶性淋巴瘤 - 低成本病例，已启动 45/80
+[2026-05-03T15:59:32] 病例完成：case_id=kg_low_cost_7c026ed3_001，status=max_turn_reached，turns=8，total_seconds=246.38，opening_seconds=3.97，initial_brain_seconds=18.83，patient_answer_seconds_total=32.03，brain_turn_seconds_total=191.55，finalize_seconds=0.0014，slowest_turn=7:36.76s，本轮完成 42/80，累计完成 42/80
+[2026-05-03T15:59:32] 病例启动：case_id=kg_low_cost_8963c583_001，title=马尔尼菲篮状菌病 - 低成本病例，已启动 46/80
+[2026-05-03T16:00:38] 病例完成：case_id=kg_low_cost_81ab2752_001，status=max_turn_reached，turns=8，total_seconds=170.49，opening_seconds=4.01，initial_brain_seconds=19.21，patient_answer_seconds_total=31.76，brain_turn_seconds_total=115.51，finalize_seconds=0.0007，slowest_turn=4:29.79s，本轮完成 43/80，累计完成 43/80
+[2026-05-03T16:00:38] 病例启动：case_id=kg_low_cost_8ed19863_001，title=非结核分枝杆菌病 - 低成本病例，已启动 47/80
+[2026-05-03T16:01:35] 病例完成：case_id=kg_low_cost_865a6fce_001，status=completed，turns=6，total_seconds=171.21，opening_seconds=5.55，initial_brain_seconds=17.07，patient_answer_seconds_total=24.35，brain_turn_seconds_total=124.23，finalize_seconds=0.0000，slowest_turn=1:30.84s，本轮完成 44/80，累计完成 44/80
+[2026-05-03T16:01:35] 病例启动：case_id=kg_low_cost_a14440d2_001，title=慢性肾脏病 - 低成本病例，已启动 48/80
+[2026-05-03T16:02:06] 病例完成：case_id=kg_low_cost_8963c583_001，status=max_turn_reached，turns=8，total_seconds=153.90，opening_seconds=4.13，initial_brain_seconds=19.15，patient_answer_seconds_total=32.11，brain_turn_seconds_total=98.50，finalize_seconds=0.0006，slowest_turn=2:32.99s，本轮完成 45/80，累计完成 45/80
+[2026-05-03T16:02:06] 病例启动：case_id=kg_low_cost_99291df5_001，title=肝癌 - 低成本病例，已启动 49/80
+[2026-05-03T16:02:15] 病例完成：case_id=kg_low_cost_a14440d2_001，status=completed，turns=1，total_seconds=39.85，opening_seconds=4.80，initial_brain_seconds=22.13，patient_answer_seconds_total=3.47，brain_turn_seconds_total=9.45，finalize_seconds=0.0000，slowest_turn=1:12.93s，本轮完成 46/80，累计完成 46/80
+[2026-05-03T16:02:15] 病例启动：case_id=kg_low_cost_93340b37_001，title=巨细胞病毒脑炎 - 低成本病例，已启动 50/80
+[2026-05-03T16:02:32] 病例完成：case_id=kg_low_cost_893f1fc0_001，status=max_turn_reached，turns=8，total_seconds=203.71，opening_seconds=3.29，initial_brain_seconds=15.19，patient_answer_seconds_total=32.00，brain_turn_seconds_total=153.23，finalize_seconds=0.0011，slowest_turn=4:33.07s，本轮完成 47/80，累计完成 47/80
+[2026-05-03T16:02:32] 病例启动：case_id=kg_low_cost_b0b28e15_001，title=卡波西肉瘤 - 低成本病例，已启动 51/80
+[2026-05-03T16:04:23] 病例完成：case_id=kg_low_cost_8ed19863_001，status=max_turn_reached，turns=8，total_seconds=224.74，opening_seconds=5.59，initial_brain_seconds=16.62，patient_answer_seconds_total=30.11，brain_turn_seconds_total=172.42，finalize_seconds=0.0010，slowest_turn=8:31.31s，本轮完成 48/80，累计完成 48/80
+[2026-05-03T16:04:23] 病例启动：case_id=kg_low_cost_b18b3f9e_001，title=治疗矛盾型结核相关免疫重建炎症综合征 - 低成本病例，已启动 52/80
+[2026-05-03T16:04:24] 病例完成：case_id=kg_low_cost_99291df5_001，status=max_turn_reached，turns=8，total_seconds=137.65，opening_seconds=0.0000，initial_brain_seconds=4.86，patient_answer_seconds_total=46.77，brain_turn_seconds_total=86.01，finalize_seconds=0.0017，slowest_turn=6:28.66s，本轮完成 49/80，累计完成 49/80
+[2026-05-03T16:04:24] 病例启动：case_id=kg_low_cost_b2bda1db_001，title=组织胞浆菌病 - 低成本病例，已启动 53/80
+[2026-05-03T16:05:35] 病例完成：case_id=kg_low_cost_b0b28e15_001，status=completed，turns=8，total_seconds=182.87，opening_seconds=5.38，initial_brain_seconds=22.85，patient_answer_seconds_total=32.85，brain_turn_seconds_total=121.80，finalize_seconds=0.0000，slowest_turn=6:35.00s，本轮完成 50/80，累计完成 50/80
+[2026-05-03T16:05:35] 病例启动：case_id=kg_low_cost_b247711a_001，title=CMV脑炎 - 低成本病例，已启动 54/80
+[2026-05-03T16:06:28] 病例完成：case_id=kg_low_cost_93340b37_001，status=max_turn_reached，turns=8，total_seconds=252.97，opening_seconds=4.40，initial_brain_seconds=18.82，patient_answer_seconds_total=39.12，brain_turn_seconds_total=190.62，finalize_seconds=0.0011，slowest_turn=1:34.32s，本轮完成 51/80，累计完成 51/80
+[2026-05-03T16:06:28] 病例启动：case_id=kg_low_cost_b4059736_001，title=结核病 - 低成本病例，已启动 55/80
+[2026-05-03T16:07:50] 病例完成：case_id=kg_low_cost_b2bda1db_001，status=max_turn_reached，turns=8，total_seconds=205.71，opening_seconds=3.51，initial_brain_seconds=18.74，patient_answer_seconds_total=27.18，brain_turn_seconds_total=156.28，finalize_seconds=0.0007，slowest_turn=2:29.81s，本轮完成 52/80，累计完成 52/80
+[2026-05-03T16:07:50] 病例启动：case_id=kg_low_cost_c96d7604_001，title=活动性结核病 - 低成本病例，已启动 56/80
+[2026-05-03T16:08:23] 病例完成：case_id=kg_low_cost_b18b3f9e_001，status=max_turn_reached，turns=8，total_seconds=240.00，opening_seconds=3.60，initial_brain_seconds=18.97，patient_answer_seconds_total=38.29，brain_turn_seconds_total=179.14，finalize_seconds=0.0015，slowest_turn=6:33.28s，本轮完成 53/80，累计完成 53/80
+[2026-05-03T16:08:23] 病例启动：case_id=kg_low_cost_cdb4a4c4_001，title=肠道播散型荚膜组织胞浆菌病 - 低成本病例，已启动 57/80
+[2026-05-03T16:09:11] 病例完成：case_id=kg_low_cost_b247711a_001，status=max_turn_reached，turns=8，total_seconds=215.79，opening_seconds=5.79，initial_brain_seconds=17.51，patient_answer_seconds_total=32.00，brain_turn_seconds_total=160.48，finalize_seconds=0.0009，slowest_turn=7:28.47s，本轮完成 54/80，累计完成 54/80
+[2026-05-03T16:09:11] 病例启动：case_id=kg_low_cost_d0c8e771_001，title=结核性脑膜炎 - 低成本病例，已启动 58/80
+[2026-05-03T16:10:16] 病例完成：case_id=kg_low_cost_b4059736_001，status=max_turn_reached，turns=8，total_seconds=227.68，opening_seconds=5.17，initial_brain_seconds=17.95，patient_answer_seconds_total=29.41，brain_turn_seconds_total=175.15，finalize_seconds=0.0006，slowest_turn=6:38.22s，本轮完成 55/80，累计完成 55/80
+[2026-05-03T16:10:16] 病例启动：case_id=kg_low_cost_d92cff90_001，title=皮肤隐球菌病 - 低成本病例，已启动 59/80
+[2026-05-03T16:11:16] 病例完成：case_id=kg_low_cost_d0c8e771_001，status=max_turn_reached，turns=8，total_seconds=125.52，opening_seconds=4.67，initial_brain_seconds=19.06，patient_answer_seconds_total=29.09，brain_turn_seconds_total=72.71，finalize_seconds=0.0005，slowest_turn=1:25.26s，本轮完成 56/80，累计完成 56/80
+[2026-05-03T16:11:16] 病例启动：case_id=kg_low_cost_d39c858e_001，title=纵隔淋巴结炎 - 低成本病例，已启动 60/80
+[2026-05-03T16:11:18] 病例完成：case_id=kg_low_cost_cdb4a4c4_001，status=max_turn_reached，turns=8，total_seconds=175.25，opening_seconds=3.67，initial_brain_seconds=17.35，patient_answer_seconds_total=34.69，brain_turn_seconds_total=119.54，finalize_seconds=0.0008，slowest_turn=5:30.66s，本轮完成 57/80，累计完成 57/80
+[2026-05-03T16:11:18] 病例启动：case_id=kg_low_cost_dcdfabc6_001，title=猴痘 - 低成本病例，已启动 61/80
+[2026-05-03T16:11:30] 病例完成：case_id=kg_low_cost_c96d7604_001，status=max_turn_reached，turns=8，total_seconds=220.64，opening_seconds=3.31，initial_brain_seconds=15.23，patient_answer_seconds_total=30.67，brain_turn_seconds_total=171.42，finalize_seconds=0.0006，slowest_turn=7:39.16s，本轮完成 58/80，累计完成 58/80
+[2026-05-03T16:11:30] 病例启动：case_id=kg_low_cost_de85c33f_001，title=HIV相关骨质疏松 - 低成本病例，已启动 62/80
+[2026-05-03T16:12:36] 病例完成：case_id=kg_low_cost_d92cff90_001，status=max_turn_reached，turns=8，total_seconds=140.55，opening_seconds=4.16，initial_brain_seconds=7.50，patient_answer_seconds_total=45.30，brain_turn_seconds_total=83.59，finalize_seconds=0.0013，slowest_turn=6:27.92s，本轮完成 59/80，累计完成 59/80
+[2026-05-03T16:12:36] 病例启动：case_id=kg_low_cost_e81c4fcd_001，title=HPV感染 - 低成本病例，已启动 63/80
+[2026-05-03T16:14:32] 病例完成：case_id=kg_low_cost_de85c33f_001，status=max_turn_reached，turns=8，total_seconds=181.81，opening_seconds=3.88，initial_brain_seconds=4.05，patient_answer_seconds_total=52.13，brain_turn_seconds_total=121.75，finalize_seconds=0.0011，slowest_turn=3:47.70s，本轮完成 60/80，累计完成 60/80
+[2026-05-03T16:14:32] 病例启动：case_id=kg_low_cost_ef64932a_001，title=急性肺组织胞浆菌病 - 低成本病例，已启动 64/80
+[2026-05-03T16:15:07] 病例完成：case_id=kg_low_cost_e81c4fcd_001，status=max_turn_reached，turns=8，total_seconds=150.96，opening_seconds=3.93，initial_brain_seconds=4.24，patient_answer_seconds_total=49.91，brain_turn_seconds_total=92.88，finalize_seconds=0.0012，slowest_turn=7:29.80s，本轮完成 61/80，累计完成 61/80
+[2026-05-03T16:15:07] 病例启动：case_id=kg_low_cost_fca01ccd_001，title=宫颈癌 - 低成本病例，已启动 65/80
+[2026-05-03T16:15:21] 病例完成：case_id=kg_low_cost_d39c858e_001，status=max_turn_reached，turns=8，total_seconds=244.78，opening_seconds=3.89，initial_brain_seconds=14.03，patient_answer_seconds_total=37.56，brain_turn_seconds_total=189.30，finalize_seconds=0.0023，slowest_turn=5:34.77s，本轮完成 62/80，累计完成 62/80
+[2026-05-03T16:15:21] 病例启动：case_id=kg_low_cost_f21678b8_001，title=PCP相关免疫重建炎症综合征 - 低成本病例，已启动 66/80
+[2026-05-03T16:15:23] 病例完成：case_id=kg_low_cost_dcdfabc6_001，status=max_turn_reached，turns=8，total_seconds=245.18，opening_seconds=3.47，initial_brain_seconds=20.63，patient_answer_seconds_total=33.39，brain_turn_seconds_total=187.68，finalize_seconds=0.0022，slowest_turn=1:39.31s，本轮完成 63/80，累计完成 63/80
+[2026-05-03T16:15:23] 病例启动：case_id=kg_ordinary_07cce8da_001，title=原发性肝细胞癌 - 普通病例，已启动 67/80
+[2026-05-03T16:16:27] 病例完成：case_id=kg_low_cost_ef64932a_001，status=max_turn_reached，turns=8，total_seconds=114.61，opening_seconds=3.67，initial_brain_seconds=13.87，patient_answer_seconds_total=32.04，brain_turn_seconds_total=65.02，finalize_seconds=0.0006，slowest_turn=1:25.27s，本轮完成 64/80，累计完成 64/80
+[2026-05-03T16:16:27] 病例启动：case_id=kg_ordinary_0d685ef5_001，title=免疫重建炎症综合征 - 普通病例，已启动 68/80
+[2026-05-03T16:17:25] 病例完成：case_id=kg_low_cost_fca01ccd_001，status=max_turn_reached，turns=8，total_seconds=137.25，opening_seconds=0.0000，initial_brain_seconds=5.09，patient_answer_seconds_total=45.27，brain_turn_seconds_total=86.89，finalize_seconds=0.0017，slowest_turn=6:30.42s，本轮完成 65/80，累计完成 65/80
+[2026-05-03T16:17:25] 病例启动：case_id=kg_ordinary_0fb106b6_001，title=CMV-IRIS - 普通病例，已启动 69/80
+[2026-05-03T16:19:07] 病例完成：case_id=kg_low_cost_f21678b8_001，status=max_turn_reached，turns=8，total_seconds=225.56，opening_seconds=6.05，initial_brain_seconds=18.42，patient_answer_seconds_total=37.55，brain_turn_seconds_total=163.54，finalize_seconds=0.0011，slowest_turn=5:33.86s，本轮完成 66/80，累计完成 66/80
+[2026-05-03T16:19:07] 病例启动：case_id=kg_ordinary_1ff93afb_001，title=非结核分枝杆菌肺病 - 普通病例，已启动 70/80
+[2026-05-03T16:19:43] 病例完成：case_id=kg_ordinary_07cce8da_001，status=max_turn_reached，turns=8，total_seconds=259.33，opening_seconds=5.96，initial_brain_seconds=20.54，patient_answer_seconds_total=32.11，brain_turn_seconds_total=200.71，finalize_seconds=0.0009，slowest_turn=1:42.47s，本轮完成 67/80，累计完成 67/80
+[2026-05-03T16:19:43] 病例启动：case_id=kg_ordinary_25228069_001，title=偶然分枝杆菌病 - 普通病例，已启动 71/80
+[2026-05-03T16:20:42] 病例完成：case_id=kg_ordinary_1ff93afb_001，status=max_turn_reached，turns=8，total_seconds=95.45，opening_seconds=3.04，initial_brain_seconds=4.44，patient_answer_seconds_total=46.99，brain_turn_seconds_total=40.98，finalize_seconds=0.0001，slowest_turn=8:13.83s，本轮完成 68/80，累计完成 68/80
+[2026-05-03T16:20:42] 病例启动：case_id=kg_ordinary_2dca963f_001，title=非霍奇金淋巴瘤 - 普通病例，已启动 72/80
+[2026-05-03T16:20:53] 病例完成：case_id=kg_ordinary_0d685ef5_001，status=max_turn_reached，turns=8，total_seconds=266.48，opening_seconds=4.42，initial_brain_seconds=21.64，patient_answer_seconds_total=47.74，brain_turn_seconds_total=192.69，finalize_seconds=0.0007，slowest_turn=1:43.09s，本轮完成 69/80，累计完成 69/80
+[2026-05-03T16:20:53] 病例启动：case_id=kg_ordinary_3cea9960_001，title=隐球菌性脑膜炎 - 普通病例，已启动 73/80
+[2026-05-03T16:21:21] 病例完成：case_id=kg_ordinary_25228069_001，status=completed，turns=2，total_seconds=98.53，opening_seconds=4.01，initial_brain_seconds=19.93，patient_answer_seconds_total=6.03，brain_turn_seconds_total=68.56，finalize_seconds=0.0000，slowest_turn=2:38.15s，本轮完成 70/80，累计完成 70/80
+[2026-05-03T16:21:21] 病例启动：case_id=kg_ordinary_5224a330_001，title=结核相关免疫重建炎症综合征 - 普通病例，已启动 74/80
+[2026-05-03T16:21:51] 病例完成：case_id=kg_ordinary_0fb106b6_001，status=max_turn_reached，turns=8，total_seconds=266.53，opening_seconds=4.05，initial_brain_seconds=19.16，patient_answer_seconds_total=35.84，brain_turn_seconds_total=207.48，finalize_seconds=0.0012，slowest_turn=1:47.24s，本轮完成 71/80，累计完成 71/80
+[2026-05-03T16:21:51] 病例启动：case_id=kg_ordinary_99291df5_001，title=肝癌 - 普通病例，已启动 75/80
+[2026-05-03T16:25:06] 病例完成：case_id=kg_ordinary_3cea9960_001，status=max_turn_reached，turns=8，total_seconds=252.59，opening_seconds=3.87，initial_brain_seconds=20.50，patient_answer_seconds_total=42.69，brain_turn_seconds_total=185.52，finalize_seconds=0.0013，slowest_turn=1:41.78s，本轮完成 72/80，累计完成 72/80
+[2026-05-03T16:25:06] 病例启动：case_id=kg_ordinary_b18b3f9e_001，title=治疗矛盾型结核相关免疫重建炎症综合征 - 普通病例，已启动 76/80
+[2026-05-03T16:25:17] 病例完成：case_id=kg_ordinary_2dca963f_001，status=max_turn_reached，turns=8，total_seconds=275.30，opening_seconds=4.12，initial_brain_seconds=20.14，patient_answer_seconds_total=35.15，brain_turn_seconds_total=215.89，finalize_seconds=0.0012，slowest_turn=1:40.21s，本轮完成 73/80，累计完成 73/80
+[2026-05-03T16:25:17] 病例启动：case_id=kg_ordinary_d39c858e_001，title=纵隔淋巴结炎 - 普通病例，已启动 77/80
+[2026-05-03T16:25:56] 病例完成：case_id=kg_ordinary_5224a330_001，status=max_turn_reached，turns=8，total_seconds=274.73，opening_seconds=4.04，initial_brain_seconds=13.48，patient_answer_seconds_total=42.25，brain_turn_seconds_total=214.94，finalize_seconds=0.0011，slowest_turn=2:53.15s，本轮完成 74/80，累计完成 74/80
+[2026-05-03T16:25:56] 病例启动：case_id=kg_ordinary_de85c33f_001，title=HIV相关骨质疏松 - 普通病例，已启动 78/80
+[2026-05-03T16:26:26] 病例完成：case_id=kg_ordinary_99291df5_001，status=max_turn_reached，turns=8，total_seconds=275.13，opening_seconds=4.32，initial_brain_seconds=22.72，patient_answer_seconds_total=35.70，brain_turn_seconds_total=212.38，finalize_seconds=0.0011，slowest_turn=1:40.61s，本轮完成 75/80，累计完成 75/80
+[2026-05-03T16:26:26] 病例启动：case_id=kg_ordinary_fcdb6d83_001，title=支气管结石病 - 普通病例，已启动 79/80
+[2026-05-03T16:28:19] 病例完成：case_id=kg_ordinary_fcdb6d83_001，status=max_turn_reached，turns=8，total_seconds=112.58，opening_seconds=4.41，initial_brain_seconds=19.20，patient_answer_seconds_total=42.63，brain_turn_seconds_total=46.34，finalize_seconds=0.0007，slowest_turn=4:13.12s，本轮完成 76/80，累计完成 76/80
+[2026-05-03T16:28:19] 病例启动：case_id=kg_ordinary_fca01ccd_001，title=宫颈癌 - 普通病例，已启动 80/80
+[2026-05-03T16:29:31] 病例完成：case_id=kg_ordinary_d39c858e_001，status=max_turn_reached，turns=8，total_seconds=253.40，opening_seconds=3.40，initial_brain_seconds=16.43，patient_answer_seconds_total=39.90，brain_turn_seconds_total=193.67，finalize_seconds=0.0012，slowest_turn=1:38.80s，本轮完成 77/80，累计完成 77/80
+[2026-05-03T16:29:46] 病例完成：case_id=kg_ordinary_de85c33f_001，status=max_turn_reached，turns=8，total_seconds=230.21，opening_seconds=3.49，initial_brain_seconds=5.14，patient_answer_seconds_total=49.99，brain_turn_seconds_total=171.60，finalize_seconds=0.0012，slowest_turn=4:48.23s，本轮完成 78/80，累计完成 78/80
+[2026-05-03T16:30:34] 病例完成：case_id=kg_ordinary_b18b3f9e_001，status=max_turn_reached，turns=8，total_seconds=328.39，opening_seconds=4.41，initial_brain_seconds=16.97，patient_answer_seconds_total=45.41，brain_turn_seconds_total=261.61，finalize_seconds=0.0012，slowest_turn=7:53.77s，本轮完成 79/80，累计完成 79/80
+[2026-05-03T16:33:20] 病例完成：case_id=kg_ordinary_fca01ccd_001，status=max_turn_reached，turns=8，total_seconds=301.41，opening_seconds=5.64，initial_brain_seconds=23.62，patient_answer_seconds_total=42.73，brain_turn_seconds_total=229.41，finalize_seconds=0.0011，slowest_turn=5:53.63s，本轮完成 80/80，累计完成 80/80
+[2026-05-03T16:33:21] batch replay 完成：累计完成 80/80，completed=13

@@ -12,6 +12,14 @@ from .types import FinalAnswerScore, HypothesisScore, SessionState, StopDecision
 ANCHOR_CONTROLLED_PROFILES = {"anchor_controlled", "anchor-controlled", "anchor"}
 ACCEPTABLE_OBSERVED_ANCHOR_TIERS = {"strong_anchor", "definition_anchor", "provisional_anchor"}
 STRONG_OBSERVED_ANCHOR_TIERS = {"strong_anchor", "definition_anchor"}
+HARD_VERIFIER_REJECT_REASONS = {
+    "hard_negative_key_evidence",
+    "strong_alternative_not_ruled_out",
+    "anchored_alternative_exists",
+    "clear_negative_definition_evidence",
+    "major_contradiction",
+    "contradiction",
+}
 
 
 @dataclass
@@ -32,6 +40,11 @@ class StopRuleConfig:
     min_strong_anchor_trajectory_count_before_accept: int = 1
     require_verifier_accept_flag: bool = True
     acceptance_profile: str = "baseline"
+    enable_evidence_profile_acceptance: bool = False
+    min_low_cost_profile_families: int = 2
+    min_low_cost_profile_present_clear_count: int = 2
+    min_low_cost_profile_stable_top_count: int = 2
+    allow_soft_verifier_reject_with_evidence_profile: bool = True
 
 
 class StopRuleEngine:
@@ -112,15 +125,18 @@ class StopRuleEngine:
         if session_state is not None and session_state.turn_index < self.config.min_turn_index_before_final_answer:
             return StopDecision(False, "turn_index_too_low", float(session_state.turn_index))
 
+        anchor_decision = self._check_anchor_controlled_acceptance(answer_score, session_state, acceptance_profile)
+
         verifier_mode = str(answer_score.metadata.get("verifier_mode", ""))
         if (
             self.config.require_verifier_accept_flag
             and verifier_mode == "llm_verifier"
             and not bool(answer_score.metadata.get("verifier_should_accept", False))
         ):
-            return StopDecision(False, "verifier_rejected_stop", answer_score.agent_evaluation)
+            if not self._can_override_soft_verifier_reject(answer_score, anchor_decision):
+                return StopDecision(False, "verifier_rejected_stop", answer_score.agent_evaluation)
+            answer_score.metadata["verifier_soft_reject_overridden_by_evidence_profile"] = True
 
-        anchor_decision = self._check_anchor_controlled_acceptance(answer_score, session_state, acceptance_profile)
         if anchor_decision is not None and not anchor_decision.should_stop:
             return anchor_decision
 
@@ -184,11 +200,24 @@ class StopRuleEngine:
                 "background_support_score": answer_features.get("background_support_score", 0.0),
                 "anchor_negative_evidence": answer_features.get("anchor_negative_evidence", []),
                 "missing_evidence_roles": answer_features.get("missing_evidence_roles", []),
+                "low_cost_supporting_evidence": answer_features.get("low_cost_supporting_evidence", []),
+                "low_cost_support_families": answer_features.get("low_cost_support_families", []),
+                "low_cost_core_family_count": answer_features.get("low_cost_core_family_count", 0),
+                "low_cost_present_clear_count": answer_features.get("low_cost_present_clear_count", 0),
+                "low_cost_profile_satisfied": answer_features.get("low_cost_profile_satisfied", False),
+                "evidence_profile_acceptance_candidate": answer_features.get(
+                    "evidence_profile_acceptance_candidate", False
+                ),
+                "evidence_profile_acceptance_reason": answer_features.get("evidence_profile_acceptance_reason", ""),
             }
         )
 
         stronger_alternatives = self._stronger_anchor_alternatives(answer_score, session_state, answer_features)
         block_reason = self._select_anchor_controlled_block_reason(answer_features, stronger_alternatives)
+        if str(answer_features.get("evidence_profile_acceptance_reason") or ""):
+            answer_score.metadata["evidence_profile_acceptance_reason"] = answer_features[
+                "evidence_profile_acceptance_reason"
+            ]
 
         if len(block_reason) == 0:
             session_state.metadata["last_anchor_controlled_decision"] = {
@@ -246,6 +275,15 @@ class StopRuleEngine:
             "background_supporting_evidence": self._as_list(metadata.get("background_supporting_evidence", [])),
             "anchor_negative_evidence": self._as_list(metadata.get("anchor_negative_evidence", [])),
             "missing_evidence_roles": self._as_list(metadata.get("missing_evidence_roles", [])),
+            "low_cost_supporting_evidence": self._as_list(metadata.get("low_cost_supporting_evidence", [])),
+            "low_cost_support_families": self._as_list(metadata.get("low_cost_support_families", [])),
+            "low_cost_core_family_count": int(metadata.get("low_cost_core_family_count", 0) or 0),
+            "low_cost_present_clear_count": int(metadata.get("low_cost_present_clear_count", 0) or 0),
+            "low_cost_profile_satisfied": bool(metadata.get("low_cost_profile_satisfied", False)),
+            "evidence_profile_acceptance_candidate": bool(
+                metadata.get("evidence_profile_acceptance_candidate", False)
+            ),
+            "answer_stability_count": self._answer_stability_count(session_state, answer_score),
         }
 
     def _stronger_anchor_alternatives(
@@ -297,9 +335,53 @@ class StopRuleEngine:
         anchor_tier = str(answer_features.get("anchor_tier") or "")
         observed_anchor_score = float(answer_features.get("observed_anchor_score", 0.0) or 0.0)
         if anchor_tier not in ACCEPTABLE_OBSERVED_ANCHOR_TIERS or observed_anchor_score <= 0.0:
+            if self._evidence_profile_acceptance_ok(answer_features):
+                answer_features["evidence_profile_acceptance_reason"] = "low_cost_multifamily_stable_top"
+                return ""
             return "missing_required_anchor"
 
         return ""
+
+    def _evidence_profile_acceptance_ok(self, answer_features: dict) -> bool:
+        if not bool(self.config.enable_evidence_profile_acceptance):
+            return False
+
+        if not bool(answer_features.get("evidence_profile_acceptance_candidate", False)):
+            return False
+
+        if not bool(answer_features.get("low_cost_profile_satisfied", False)):
+            return False
+
+        if int(answer_features.get("low_cost_core_family_count", 0) or 0) < int(
+            self.config.min_low_cost_profile_families
+        ):
+            return False
+
+        if int(answer_features.get("low_cost_present_clear_count", 0) or 0) < int(
+            self.config.min_low_cost_profile_present_clear_count
+        ):
+            return False
+
+        if int(answer_features.get("answer_stability_count", 0) or 0) < int(
+            self.config.min_low_cost_profile_stable_top_count
+        ):
+            return False
+
+        return True
+
+    def _can_override_soft_verifier_reject(
+        self,
+        answer_score: FinalAnswerScore,
+        anchor_decision: StopDecision | None,
+    ) -> bool:
+        if not bool(self.config.allow_soft_verifier_reject_with_evidence_profile):
+            return False
+
+        reject_reason = str(answer_score.metadata.get("verifier_reject_reason") or "").strip()
+        if reject_reason in HARD_VERIFIER_REJECT_REASONS:
+            return False
+
+        return anchor_decision is not None and anchor_decision.should_stop
 
     def _map_anchor_block_to_repair_reason(self, block_reason: str) -> str:
         if block_reason == "anchored_alternative_exists":
@@ -358,6 +440,17 @@ class StopRuleEngine:
             history.append(entry)
 
         session_state.metadata["verifier_accept_history"] = history[-12:]
+
+    def _answer_stability_count(self, session_state: SessionState, answer_score: FinalAnswerScore) -> int:
+        history = self._get_history(session_state, "answer_candidate_history")
+        count = 0
+
+        for item in reversed(history):
+            if str(item.get("answer_id") or "") != answer_score.answer_id:
+                break
+            count += 1
+
+        return count
 
     def _find_hypothesis(
         self,

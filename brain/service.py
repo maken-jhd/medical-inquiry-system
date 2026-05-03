@@ -4051,6 +4051,17 @@ def build_default_brain(client: Neo4jClient, config_overrides: dict | None = Non
                 min_final_score=float(stop_config.get("min_final_score", 0.55)),
                 require_verifier_accept_flag=bool(stop_config.get("require_verifier_accept_flag", True)),
                 acceptance_profile=str(stop_config.get("acceptance_profile", "baseline")),
+                enable_evidence_profile_acceptance=bool(
+                    stop_config.get("enable_evidence_profile_acceptance", False)
+                ),
+                min_low_cost_profile_families=int(stop_config.get("min_low_cost_profile_families", 2)),
+                min_low_cost_profile_present_clear_count=int(
+                    stop_config.get("min_low_cost_profile_present_clear_count", 2)
+                ),
+                min_low_cost_profile_stable_top_count=int(stop_config.get("min_low_cost_profile_stable_top_count", 2)),
+                allow_soft_verifier_reject_with_evidence_profile=bool(
+                    stop_config.get("allow_soft_verifier_reject_with_evidence_profile", True)
+                ),
             )
         ),
         report_builder=ReportBuilder(),

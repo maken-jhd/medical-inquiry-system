@@ -49,3 +49,8 @@ stop:
   min_final_score: 0.6
   require_verifier_accept_flag: true
   acceptance_profile: anchor_controlled
+  enable_evidence_profile_acceptance: true
+  min_low_cost_profile_families: 2
+  min_low_cost_profile_present_clear_count: 2
+  min_low_cost_profile_stable_top_count: 2
+  allow_soft_verifier_reject_with_evidence_profile: true

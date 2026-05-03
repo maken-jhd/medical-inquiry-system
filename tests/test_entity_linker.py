@@ -16,7 +16,37 @@ class FakeNeo4jClient:
                 "node_id": "symptom_fever",
                 "label": "ClinicalFinding",
                 "canonical_name": "发热",
-                "aliases": ["发烧"],
+                "aliases": ["发烧", "高热"],
+            },
+            "免疫功能低下": {
+                "node_id": "risk_immune_low",
+                "label": "RiskFactor",
+                "canonical_name": "免疫功能低下",
+                "aliases": ["免疫力低下", "免疫力差"],
+            },
+            "血清 β-D 葡聚糖升高": {
+                "node_id": "lab_bdg_high",
+                "label": "LabFinding",
+                "canonical_name": "血清 β-D 葡聚糖升高",
+                "aliases": ["血清1,3-β-D葡聚糖升高", "BDG升高"],
+            },
+            "乙型肝炎病毒感染": {
+                "node_id": "disease_hbv",
+                "label": "Disease",
+                "canonical_name": "乙型肝炎病毒感染",
+                "aliases": ["乙肝病毒感染", "HBV感染"],
+            },
+            "空腹血糖>=6.1mmol/L": {
+                "node_id": "lab_fpg_high",
+                "label": "ClinicalAttribute",
+                "canonical_name": "空腹血糖>=6.1mmol/L",
+                "aliases": ["空腹血糖超过6.1"],
+            },
+            "甘油三酯 >= 1.7 mmol/L": {
+                "node_id": "lab_tg_high",
+                "label": "ClinicalAttribute",
+                "canonical_name": "甘油三酯 >= 1.7 mmol/L",
+                "aliases": ["甘油三酯大于1.7"],
             },
             "CD4+ T淋巴细胞计数 < 200/μL": {
                 "node_id": "lab_cd4_low",
@@ -108,3 +138,33 @@ def test_entity_linker_expands_patient_expression_variants() -> None:
     assert results[1].metadata["matched_mention"] == "双足麻木"
     assert results[2].metadata["matched_mention"] == "使用利奈唑胺"
     assert results[2].metadata["link_source"] == "template"
+
+
+# 验证常见医学口语表达会泛化扩展到图谱中的可用证据节点。
+def test_entity_linker_expands_common_medical_surface_forms() -> None:
+    linker = EntityLinker(FakeNeo4jClient())
+
+    results = linker.link_mentions(
+        [
+            "高烧不退",
+            "免疫力比较差",
+            "血清1,3-β-D葡聚糖超过80 pg/mL",
+            "乙肝病毒感染阳性",
+            "空腹血糖超过6.1",
+            "甘油三酯大于1.7",
+        ]
+    )
+
+    assert [item.node_id for item in results] == [
+        "symptom_fever",
+        "risk_immune_low",
+        "lab_bdg_high",
+        "disease_hbv",
+        "lab_fpg_high",
+        "lab_tg_high",
+    ]
+    assert all(item.is_trusted for item in results)
+    assert results[0].metadata["expansion_rule"] in {"high_fever", "alias_normalization"}
+    assert results[2].metadata["matched_mention"] == "血清 β-D 葡聚糖升高"
+    assert "bdg_high" in results[2].metadata["expansion_rules"]
+    assert results[3].metadata["expansion_rule"] in {"hbv_infection", "alias_normalization"}

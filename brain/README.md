@@ -80,6 +80,7 @@
   - 集中维护 alias、canonical name 和常见口语映射。
   - 当前供 `MedExtractor`、`A1`、`exam_context` 和 `EntityLinker` 共用，避免各模块各自维护一套零散词典。
   - 当前新增 `expand_graph_mentions()`，用于把患者口语表达扩展成若干图谱候选 surface form，例如 CD4 低值、HIV RNA 阳性、下肢/双足发麻、药物使用和腹型肥胖等接口层表达。
+  - 当前进一步补充高频通用医学表达扩展，例如高烧/高热、免疫力低下、BDG/β-D 葡聚糖升高、乙肝/HBV 感染、血糖偏高和甘油三酯偏高；这些扩展只服务于“患者表达 -> 图谱节点”的实体链接，不参与疾病推理规则。
 
 - [state_tracker.py](/Users/loki/Workspace/GraduationDesign/brain/state_tracker.py)
   - 负责维护会话中的槽位状态。
@@ -96,6 +97,7 @@
   - anchor 必须命中候选疾病自己的 KG evidence payload；仅带有历史 `hypothesis_id` 但没有 payload 匹配的证据不会给该候选加锚点。
   - 当真实会话直接命中候选疾病节点本身时，会按疾病自身强锚点参与 A2 排序，避免被 CD4/HIV 等背景证据压住。
   - minimum evidence family coverage 只统计 `present + clear` 的已观察证据，`absent / unclear / hedged` 不会补足 coverage。
+  - 当前额外计算 `low_cost_supporting_evidence / low_cost_support_families / low_cost_profile_satisfied`：只有 `present + clear`、低成本、非背景、跨多个证据族的线索才会进入 low-cost evidence profile，供没有强检查锚点的诊断路径作为保守放行依据。
 
 - [session_dag.py](/Users/loki/Workspace/GraduationDesign/brain/session_dag.py)
   - 负责维护单个患者会话的内存 DAG。
@@ -127,6 +129,7 @@
   - 当前 `acceptance_profile=anchor_controlled` 已打薄为通用 stop policy：只检查真实 observed anchor、是否存在更强 anchored alternative、clear negative definition evidence、verifier 明确拒绝、轨迹数量与基础分数阈值。
   - stop rule 不再内置 PCP、呼吸道感染或 minimum evidence family 的医学合同；疾病相关判断前移到 evidence role 排序和 repair/action 选择。
   - 已有 `strong_anchor / definition_anchor` 时可使用更低的 trajectory 门槛；只有 `background_supported / speculative` 的答案不会被接受为最终结论。
+  - 当前开启 evidence-profile aware 放行：没有强锚点但满足多族低成本真实阳性证据、top answer 连续稳定、无更强 anchored alternative、无 clear negative definition evidence、且 verifier 不是硬拒绝时，可以覆盖 soft verifier reject 并继续通过基础分数阈值。
   - 结构化 stop gate 优先读取显式 `StopRuleConfig` / [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml)，`BRAIN_ACCEPTANCE_PROFILE` 只覆盖默认 baseline；它不再被 verifier prompt 的 `TRAJECTORY_VERIFIER_ACCEPTANCE_PROFILE` 覆盖。
 
 - [report_builder.py](/Users/loki/Workspace/GraduationDesign/brain/report_builder.py)

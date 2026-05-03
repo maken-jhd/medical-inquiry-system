@@ -21,6 +21,7 @@ class NormalizationConfig:
             "头痛": ["头痛", "持续头痛"],
             "咽痛": ["咽痛", "嗓子痛"],
             "体重下降": ["体重下降", "消瘦", "变瘦"],
+            "高热": ["高热", "高烧", "发高烧", "高烧不退", "退了又烧"],
             "畏光": ["畏光", "怕光"],
             "视力下降": ["视力下降", "视力模糊", "看东西模糊"],
             "嗜睡": ["嗜睡", "老是想睡", "总想睡觉"],
@@ -33,7 +34,25 @@ class NormalizationConfig:
             "步态异常": ["步态异常", "走路不稳"],
             "言语异常": ["言语异常", "说话不清", "说话含糊"],
             "HIV感染": ["HIV感染", "HIV感染者", "HIV阳性", "艾滋病", "艾滋", "艾滋病患者"],
-            "免疫功能低下": ["免疫功能低下", "免疫力低", "免疫力比较低", "免疫抑制"],
+            "免疫功能低下": [
+                "免疫功能低下",
+                "免疫力低",
+                "免疫力比较低",
+                "免疫力低下",
+                "免疫力差",
+                "免疫力比较差",
+                "抵抗力差",
+                "免疫抑制",
+            ],
+            "乙型肝炎病毒感染": [
+                "乙型肝炎病毒感染",
+                "乙肝病毒感染",
+                "乙肝病毒感染阳性",
+                "乙肝病毒阳性",
+                "乙肝阳性",
+                "HBV感染",
+                "HBV阳性",
+            ],
             "高危性行为": ["高危性行为", "无保护性行为", "不安全性行为", "高危行为"],
             "输血史": ["输血史", "输过血"],
             "口腔念珠菌感染": ["口腔念珠菌感染", "口咽念珠菌病", "口腔白斑", "白色东西"],
@@ -63,6 +82,24 @@ class NormalizationConfig:
                 "CD4+ T淋巴细胞计数低于200",
             ],
             "β-D-葡聚糖检测": ["β-D葡聚糖", "β-D-葡聚糖", "BDG", "G试验", "葡聚糖"],
+            "血清 β-D 葡聚糖升高": [
+                "血清 β-D 葡聚糖升高",
+                "血清β-D葡聚糖升高",
+                "β-D葡聚糖升高",
+                "β-D-葡聚糖升高",
+                "BDG升高",
+                "G试验升高",
+                "1,3-β-D葡聚糖升高",
+                "血清1,3-β-D葡聚糖升高",
+                "血清1,3-β-D葡聚糖超过80 pg/mL",
+                "血清1,3-β-D葡聚糖 > 80 pg/mL",
+            ],
+            "血清1,3-β-D葡聚糖 > 80 pg/mL": [
+                "血清1,3-β-D葡聚糖超过80 pg/mL",
+                "血清1,3-β-D葡聚糖大于80 pg/mL",
+                "血清1,3-β-D葡聚糖>80pg/mL",
+            ],
+            "(1,3)-β-D-葡聚糖检测": ["(1,3)-β-D-葡聚糖检测", "1,3-β-D-葡聚糖检测"],
             "HIV RNA": ["HIV RNA", "病毒载量", "HIV病毒载量"],
             "HIV RNA阳性": [
                 "HIV RNA阳性",
@@ -78,6 +115,29 @@ class NormalizationConfig:
             "PCR": ["PCR", "核酸"],
             "T-SPOT.TB": ["T-SPOT", "TSPOT", "IGRA", "结核检测"],
             "Xpert MTB/RIF": ["Xpert", "MTB/RIF"],
+            "乙型肝炎病毒": ["乙型肝炎病毒", "乙肝病毒", "HBV"],
+            "乙型肝炎表面抗原阳性": ["乙型肝炎表面抗原阳性", "HBsAg阳性", "乙肝表面抗原阳性"],
+            "空腹血糖>=6.1mmol/L": [
+                "空腹血糖>=6.1mmol/L",
+                "空腹血糖 ≥ 6.1 mmol/L",
+                "空腹血糖超过6.1",
+                "空腹血糖大于6.1",
+                "空腹血糖偏高",
+            ],
+            "高血糖": ["高血糖", "血糖偏高", "血糖升高"],
+            "空腹甘油三酯>=1.7mmol/L": [
+                "空腹甘油三酯>=1.7mmol/L",
+                "空腹甘油三酯 ≥ 1.7 mmol/L",
+                "空腹甘油三酯超过1.7",
+                "空腹甘油三酯大于1.7",
+            ],
+            "甘油三酯 >= 1.7 mmol/L": [
+                "甘油三酯 >= 1.7 mmol/L",
+                "甘油三酯≥1.7mmol/L",
+                "甘油三酯大于1.7",
+                "甘油三酯超过1.7",
+            ],
+            "甘油三酯升高": ["甘油三酯升高", "甘油三酯偏高"],
         }
     )
 
@@ -120,20 +180,27 @@ class NameNormalizer:
 
     # 为实体链接提供多个候选 surface form，解决患者口语表达和图谱规范名之间的轻量错位。
     def expand_graph_mentions(self, raw_name: str) -> list[str]:
+        return [item["surface"] for item in self.expand_graph_mention_details(raw_name)]
+
+    # 为实体链接提供可解释的 surface form 扩展记录，便于复盘具体模板来源。
+    def expand_graph_mention_details(self, raw_name: str) -> list[dict[str, str]]:
         cleaned_name = self._clean_name(raw_name)
         normalized_name = self.normalize_graph_mention(cleaned_name)
-        candidates: list[str] = []
+        candidates: list[dict[str, str]] = []
 
-        def add(value: str) -> None:
+        def add(value: str, rule: str) -> None:
             text = self._clean_name(value)
-            if len(text) > 0 and text not in candidates:
-                candidates.append(text)
+            if len(text) == 0:
+                return
+            if any(item["surface"] == text for item in candidates):
+                return
+            candidates.append({"surface": text, "rule": rule})
 
-        add(normalized_name)
-        add(cleaned_name)
+        add(normalized_name, "alias_normalization")
+        add(cleaned_name, "raw")
 
-        for value in self._template_graph_mentions(cleaned_name):
-            add(value)
+        for value, rule in self._template_graph_mention_details(cleaned_name):
+            add(value, rule)
 
         return candidates
 
@@ -171,31 +238,70 @@ class NameNormalizer:
 
     # 这些规则是“患者表达到图谱节点”的接口层归一化，不参与疾病推理打分。
     def _template_graph_mentions(self, raw_name: str) -> list[str]:
+        return [item[0] for item in self._template_graph_mention_details(raw_name)]
+
+    def _template_graph_mention_details(self, raw_name: str) -> list[tuple[str, str]]:
         normalized = self.normalize_exam_text(raw_name)
-        values: list[str] = []
+        values: list[tuple[str, str]] = []
+
+        def add(value: str, rule: str) -> None:
+            values.append((value, rule))
 
         if "cd4" in normalized or "t淋巴" in normalized:
             if any(keyword in normalized for keyword in ("低", "偏低", "很低", "太低", "低于200", "<200")):
-                values.append("CD4+ T淋巴细胞计数 < 200/μL")
-            values.append("CD4+ T淋巴细胞计数")
+                add("CD4+ T淋巴细胞计数 < 200/μL", "cd4_low")
+            add("CD4+ T淋巴细胞计数", "cd4_test")
 
         if "hivrna" in normalized or "病毒载量" in normalized or "病毒量" in normalized:
             if any(keyword in normalized for keyword in ("阳性", "检出", "检测到", "还能检测")):
-                values.append("HIV RNA阳性")
-            values.append("HIV RNA")
+                add("HIV RNA阳性", "hiv_rna_positive")
+            add("HIV RNA", "hiv_rna")
+
+        if any(keyword in normalized for keyword in ("高烧", "发高烧", "高烧不退", "高热", "退了又烧")):
+            add("高热", "high_fever")
+            add("发热", "high_fever")
+
+        if any(keyword in normalized for keyword in ("免疫力低下", "免疫力差", "免疫力比较差", "抵抗力差")):
+            add("免疫功能低下", "immune_weakness")
+
+        if any(keyword in normalized for keyword in ("bdg", "βd葡聚糖", "葡聚糖", "g试验")):
+            if any(keyword in normalized for keyword in ("升高", "偏高", "超过80", "大于80", ">80", "阳性")):
+                add("血清 β-D 葡聚糖升高", "bdg_high")
+                add("血清1,3-β-D葡聚糖 > 80 pg/mL", "bdg_high")
+                add("(1,3)-β-D-葡聚糖明显高于正常值", "bdg_high")
+            add("(1,3)-β-D-葡聚糖检测", "bdg_test")
+            add("β-D-葡聚糖检测", "bdg_test")
+
+        if any(keyword in normalized for keyword in ("乙肝", "hbv", "乙型肝炎")):
+            if any(keyword in normalized for keyword in ("感染", "阳性", "检出")):
+                add("乙型肝炎病毒感染", "hbv_infection")
+                add("乙型肝炎病毒", "hbv_infection")
+            if "表面抗原" in normalized or "hbsag" in normalized:
+                add("乙型肝炎表面抗原阳性", "hbv_surface_antigen")
+
+        if "空腹血糖" in normalized or "血糖" in normalized:
+            if any(keyword in normalized for keyword in ("6.1", "偏高", "升高", "高血糖")):
+                add("空腹血糖>=6.1mmol/L", "fasting_glucose_high")
+                add("高血糖", "fasting_glucose_high")
+
+        if "甘油三酯" in normalized or "tg" in normalized:
+            if any(keyword in normalized for keyword in ("1.7", "偏高", "升高")):
+                add("空腹甘油三酯>=1.7mmol/L", "triglyceride_high")
+                add("甘油三酯 >= 1.7 mmol/L", "triglyceride_high")
+                add("甘油三酯升高", "triglyceride_high")
 
         if "下肢发麻" in normalized:
-            values.append("下肢麻木")
+            add("下肢麻木", "lower_limb_numbness")
 
         if "双足发麻" in normalized:
-            values.append("双足麻木")
+            add("双足麻木", "feet_numbness")
 
         if "腹部膨隆" in normalized or "肚子越来越大" in normalized:
-            values.append("腹型肥胖")
+            add("腹型肥胖", "abdominal_obesity")
 
         medication = self._extract_medication_usage(raw_name)
         if medication:
-            values.append(f"使用{medication}")
+            add(f"使用{medication}", "medication_usage")
 
         return values
 

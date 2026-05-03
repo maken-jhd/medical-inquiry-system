@@ -87,6 +87,7 @@
 - 病人 opening 的检查类关键锚点会被显式保留，避免首轮证据在自然语言压缩后丢失图谱锚点
 - 检查/病原/疾病定义性问题 no-match 时不再默认强阴性，降低缺槽位对 guarded acceptance 的误伤
 - 自动回放和基础评测已经能批量跑通
+- `benchmark.py` 已区分“候选列表命中”和“最终答案命中”，会输出严格 top 命中、宽松/家族级 top 命中、accepted 准确率、wrong accepted 与 top 正确但被拒绝等指标
 - 当前图谱驱动病例 role-QC 正式输出已固定落盘到 `test_outputs/simulator_cases/graph_cases_20260502_role_qc/`；生成器会写入 `case_qc_score / case_qc_status / case_qc_reasons`，避免只按 family 数量判断病例质量
 - 当前新增 20 例 smoke 输入到 `test_outputs/simulator_cases/graph_cases_20260502_role_qc/smoke20/`；该批全部来自 `case_qc_status=eligible` 病例，类型分布为 `ordinary=9 / low_cost=1 / exam_driven=5 / competitive=5`
 - 当前已根据本机 Neo4j 导出症状证据族目录到 `test_outputs/evidence_family/disease_symptom_catalog_20260502/`，其中包含 disease-symptom 查看版 Markdown、症状节点分类 JSON 和每个疾病的 symptom-only 最低证据组建议
@@ -121,8 +122,9 @@
   - 当前会直接向终端设备输出运行信息；即使通过 `conda run` 启动，也会看到病例启动、病例完成和运行中心跳。
   - 当前会在终端持续打印病例级进度条，并每 15 秒打印一次心跳，便于观察长时间运行任务的完成度和当前卡在哪个病例。
   - 当前启动日志会直接写出 `llm_available=true/false`；若为 `false`，批量回放会在启动前直接失败，不再静默退回规则链路。
-  - 当前会在每个病例完成后立即追加写入 `replay_results.jsonl`，并同步刷新 `benchmark_summary.json`、`status.json` 和 `run.log`。
-  - 当前 `replay_results.jsonl` / `status.json` / `benchmark_summary.json` / `run.log` 都已支持 `failed` 病例语义；失败病例会保留 `error.code / error.stage / error.prompt_name / error.message / error.attempts`。
+  - 当前会在每个病例完成后立即追加写入 `replay_results.jsonl`，并同步刷新 `benchmark_summary.json`、`non_completed_cases.json`、`status.json` 和 `run.log`。
+  - 当前 `non_completed_cases.json` 会只记录 `status != completed` 的异常诊断病例，并按 `failed::*`、`max_turn_reached::top_exact_correct_but_rejected`、`max_turn_reached::true_candidate_but_final_wrong`、`max_turn_reached::no_final_answer` 等类别分组，方便全量 benchmark 后优先复盘。
+  - 当前 `replay_results.jsonl` / `status.json` / `benchmark_summary.json` / `non_completed_cases.json` / `run.log` 都已支持 `failed` 病例语义；失败病例会保留 `error.code / error.stage / error.prompt_name / error.message / error.attempts`。
   - 当前 batch runner 也补了一层单病例异常保护；即使某个 worker 内部抛出普通 Python 异常，也会尽量把该病例转成 `failed` 结果继续整批运行，而不是直接让整个 smoke 异常终止。
   - 当前默认支持断点续跑；如果输出目录里已有完成病例，会自动跳过这些病例，只继续未完成部分。若需要强制重跑，可使用 `--no-resume`。
   - 当前会记录病例级耗时拆分：`opening_seconds`、`initial_brain_seconds`、逐轮 `patient_answer_seconds / brain_turn_seconds`、`finalize_seconds` 与 `total_seconds`，并把聚合摘要写入 `benchmark_summary.json` / `status.json`；运行日志对亚秒级耗时会保留更高精度。
@@ -158,6 +160,10 @@
   - 从完整图谱病例中抽取可回放 smoke 输入。
   - 默认只选择 `case_qc_status=eligible` 病例，优先按类型均衡；某一类型 eligible 数量不足时，用其他类型 eligible 病例补齐总数。
 
+- [build_non_completed_smoke_set.py](/Users/loki/Workspace/GraduationDesign/scripts/build_non_completed_smoke_set.py)
+  - 从全量 replay 的 `non_completed_cases.json` 中精确抽取未完成病例骨架，输出后续回归 smoke 用的 `cases.jsonl` / `cases.json` / `manifest.json` / `summary.md`。
+  - 当前已将 `graph_cases_20260502_role_qc_full` 中 80 个未完成病例抽取到 `test_outputs/simulator_cases/graph_cases_20260502_role_qc/non_completed_smoke80/`，类别分布为 `no_final_answer=11 / top_exact_correct_but_rejected=25 / top_family_correct_but_rejected=3 / true_candidate_but_final_wrong=7 / true_candidate_missing=34`。
+
 - [run_role_qc_smoke20_replay.sh](/Users/loki/Workspace/GraduationDesign/scripts/run_role_qc_smoke20_replay.sh)
   - 运行最新 `graph_cases_20260502_role_qc/smoke20` 的一键 replay 脚本。
 
@@ -174,7 +180,7 @@
 1. 完善 `patient_agent.py` 的行为规则
 2. 让 `replay_engine.py` 真正驱动 `brain/service.py`
 3. 扩展 `generate_cases.py`，先生成一批小规模高质量样例
-4. 在 `benchmark.py` 中固化核心离线评估指标
+4. 继续扩展 `benchmark.py` 的疾病层级、父子节点和同族疾病评分口径
 5. 最后推进 `path_cache_builder.py`
 
 ## 代码注释规范

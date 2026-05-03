@@ -10,6 +10,91 @@
 - `phase2_execution_checklist.md` 更偏“路线设计与待办清单”
 - 本文更偏“已经发生过哪些阶段性变化、分别解决了什么问题”
 
+## 近期更新：2026-05-03 benchmark 最终答案指标收口
+
+### 本次目标
+
+- 修正 `hypothesis_hit_rate` 容易被误读为最终诊断准确率的问题
+- 在批量 replay 的 `benchmark_summary.json` 中直接输出最终答案层面的严格与宽松指标
+- 为正式 benchmark 前的 pilot 分析提供 wrong accepted 与 top 正确但被拒绝的结构化计数
+- 在批量 replay 输出目录中新增异常诊断病例索引，方便全量 benchmark 后快速定位没有 `completed` 的样本
+- 将全量 replay 中未完成的虚拟病人骨架精确抽出，形成后续回归 smoke 集
+
+### 本次改动
+
+- [simulator/benchmark.py](/Users/loki/Workspace/GraduationDesign/simulator/benchmark.py)
+  - 保留旧 `hypothesis_hit_count / hypothesis_hit_rate` 作为候选列表命中率
+  - 新增最终 top answer 指标：
+    - `final_answer_exact_hit_count / final_answer_exact_hit_rate`
+    - `final_answer_family_hit_count / final_answer_family_hit_rate`
+  - 新增 accepted answer 指标：
+    - `accepted_final_answer_count`
+    - `accepted_exact_hit_count / accepted_exact_accuracy`
+    - `accepted_family_hit_count / accepted_family_accuracy`
+    - `wrong_accepted_count`
+    - `family_wrong_accepted_count`
+  - 新增拒停诊断指标：
+    - `top_exact_correct_but_rejected_count`
+    - `top_family_correct_but_rejected_count`
+  - 新增 `build_non_completed_case_report()`，按 `failed::*`、`max_turn_reached::top_exact_correct_but_rejected`、`max_turn_reached::true_candidate_but_final_wrong`、`max_turn_reached::no_final_answer` 等类别输出未完成病例复盘记录
+  - 宽松/家族级匹配暂用归一化包含关系 + 名称相似度阈值，后续可替换为 KG disease family / parent-child evaluator
+- [scripts/run_batch_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_batch_replay.py)
+  - 每次刷新 `benchmark_summary.json` 时同步刷新 `non_completed_cases.json`
+  - `non_completed_cases.json` 只收 `status != completed` 的病例，并保留真实诊断、最终答案、候选 top5、最后一轮问答、错误信息和病例级耗时
+- [scripts/build_non_completed_smoke_set.py](/Users/loki/Workspace/GraduationDesign/scripts/build_non_completed_smoke_set.py)
+  - 读取完整病例集与 `non_completed_cases.json`，按未完成 `case_id` 精确抽取病例骨架
+  - 输出 `cases.jsonl / cases.json / manifest.json / summary.md`，并在 manifest 中保留异常类别、病例类型、真实诊断、最终答案和 stop reason
+- [tests/test_benchmark.py](/Users/loki/Workspace/GraduationDesign/tests/test_benchmark.py)
+  - 覆盖严格命中、宽松命中、错答 accepted、top 正确但被拒绝四类场景
+- [tests/test_build_non_completed_smoke_set.py](/Users/loki/Workspace/GraduationDesign/tests/test_build_non_completed_smoke_set.py)
+  - 覆盖按 `non_completed_cases.json` 精确抽取病例、按异常类别过滤、Markdown 摘要渲染
+- [simulator/README.md](/Users/loki/Workspace/GraduationDesign/simulator/README.md)
+  - 同步说明 benchmark 指标已经区分候选命中与最终答案命中，并记录 `non_completed_cases.json` 与未完成 smoke 集的用途
+
+### 新增输出
+
+- `test_outputs/simulator_cases/graph_cases_20260502_role_qc/non_completed_smoke80/cases.jsonl`
+- `test_outputs/simulator_cases/graph_cases_20260502_role_qc/non_completed_smoke80/cases.json`
+- `test_outputs/simulator_cases/graph_cases_20260502_role_qc/non_completed_smoke80/manifest.json`
+- `test_outputs/simulator_cases/graph_cases_20260502_role_qc/non_completed_smoke80/summary.md`
+
+本次从全量 227 例 replay 中抽出 80 个未完成病例，分布为：
+
+- 异常类别：`no_final_answer=11 / top_exact_correct_but_rejected=25 / top_family_correct_but_rejected=3 / true_candidate_but_final_wrong=7 / true_candidate_missing=34`
+- 病例类型：`competitive=9 / exam_driven=14 / low_cost=43 / ordinary=14`
+
+### 对 role-QC smoke20 的重新解释
+
+使用新指标重新读取现有：
+
+`test_outputs/simulator_replay/graph_cases_20260502_role_qc_smoke20/replay_results.jsonl`
+
+得到：
+
+- `completion_rate = 0.9`
+- `hypothesis_hit_rate = 0.9`，仍表示真实诊断进入候选列表
+- `final_answer_exact_hit_rate = 0.75`
+- `final_answer_family_hit_rate = 0.85`
+- `accepted_exact_accuracy = 0.7222`
+- `accepted_family_accuracy = 0.8333`
+- `wrong_accepted_count = 5`
+- `family_wrong_accepted_count = 3`
+- `top_exact_correct_but_rejected_count = 2`
+- `top_family_correct_but_rejected_count = 2`
+
+### 验证结果
+
+- 已执行：
+
+```bash
+conda run -n GraduationDesign python -m pytest tests/test_benchmark.py tests/test_run_batch_replay.py tests/test_build_non_completed_smoke_set.py -q
+conda run -n GraduationDesign python -m pytest -q
+```
+
+- 结果：
+  - `tests/test_benchmark.py tests/test_run_batch_replay.py tests/test_build_non_completed_smoke_set.py`: `16 passed`
+  - 全量测试：`207 passed`
+
 ## 近期更新：2026-05-02 虚拟病人病例生成 role-QC 升级
 
 ### 本次目标
@@ -3548,3 +3633,54 @@ conda run -n GraduationDesign python -m pytest -q
   - `46 passed`
   - `53 passed`
   - `217 passed`
+
+## 三十八、2026-05-03：Evidence Linker 泛化增强与 Evidence-Profile Stop Gate
+
+### 本次目标
+
+- 继续从算法接口层修复“患者表达到图谱节点”的漏连问题，而不是为 smoke 病例写疾病级补丁
+- 让 `anchor_controlled` stop gate 区分两条路径：
+  - 有真实强锚点时继续走 observed-anchor 控制
+  - 没有强锚点的低成本问诊路径，允许用多族低成本真实阳性证据、top 稳定和无强冲突作为保守放行依据
+
+### 本次实现
+
+- 更新：
+  - [brain/normalization.py](/Users/loki/Workspace/GraduationDesign/brain/normalization.py)
+  - [brain/entity_linker.py](/Users/loki/Workspace/GraduationDesign/brain/entity_linker.py)
+  - [brain/evidence_anchor.py](/Users/loki/Workspace/GraduationDesign/brain/evidence_anchor.py)
+  - [brain/stop_rules.py](/Users/loki/Workspace/GraduationDesign/brain/stop_rules.py)
+  - [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml)
+  - [brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
+  - 相关实体链接、anchor 与 stop rule 单测
+- 具体改动：
+  - `NameNormalizer` 新增通用 surface form 扩展：高烧/高热、免疫力低下、BDG/β-D 葡聚糖升高、乙肝/HBV 感染、空腹血糖偏高、甘油三酯偏高等表达可扩展到图谱候选节点
+  - `EntityLinker` 记录 `expansion_rule / expansion_rules`，并把模板扩展命中的 surface form 作为可审计 metadata 写回
+  - `EvidenceAnchorAnalyzer` 计算低成本 evidence profile：只统计 `present + clear`、低成本、非背景、跨多个 family 的真实观测证据；HIV/CD4/发热等背景线索不会单独满足 low-cost profile
+  - family coverage 与 low-cost profile 共用 catalog 风格 family 名称，避免 `respiratory` 和 `respiratory_symptom` 这类旧/新标签把同一证据重复计数
+  - `StopRuleConfig` 新增 `enable_evidence_profile_acceptance / min_low_cost_profile_families / min_low_cost_profile_present_clear_count / min_low_cost_profile_stable_top_count / allow_soft_verifier_reject_with_evidence_profile`
+  - `anchor_controlled` 在没有强锚点时，如果满足多族低成本证据、top answer 稳定、无更强 anchored alternative、无 clear negative definition evidence，允许覆盖 soft verifier reject；`hard_negative_key_evidence / anchored_alternative_exists / contradiction` 等硬拒绝仍然阻断 stop
+
+### 结果影响
+
+- 对高烧、免疫力低下、BDG 升高、HBV 感染、血糖/甘油三酯偏高这类通用医学表达，opening 或后续回答更容易稳定落到图谱节点
+- 低成本问诊型疾病不再被“没有强检查锚点”一律卡死；但放行仍需要跨 family 的真实阳性证据和 top 稳定，且不能覆盖硬反证或更强 anchored alternative
+- stop gate 的策略从“只有强锚点才可能停”扩展为“强锚点路径 + 低成本证据画像路径”，更适合后续 benchmark 中检查型疾病与低成本问诊型疾病共存的设置
+
+### 验证
+
+- 执行：
+
+```bash
+conda run -n GraduationDesign python -m pytest tests/test_entity_linker.py tests/test_evidence_anchor.py tests/test_stop_rules.py -q
+conda run -n GraduationDesign python -m pytest tests/test_service_stop_flow.py tests/test_service_repair_flow.py -q
+conda run -n GraduationDesign python -m pytest tests/test_entity_linker.py tests/test_evidence_anchor.py tests/test_stop_rules.py tests/test_service_stop_flow.py tests/test_service_repair_flow.py tests/test_service_config.py tests/test_trajectory_evaluator.py tests/test_hypothesis_manager.py -q
+conda run -n GraduationDesign python -m pytest -q
+```
+
+- 结果：
+  - `23 passed`
+  - `26 passed`
+  - `60 passed`
+  - `212 passed`

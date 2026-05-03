@@ -64,9 +64,12 @@ class EntityLinker:
     # 对单个 mention 做候选查询并选择最佳匹配。
     def _link_single_mention(self, mention: str) -> LinkedEntity:
         normalized_mention = self.normalizer.normalize_graph_mention(mention)
-        expanded_mentions = self.normalizer.expand_graph_mentions(mention)
+        expansion_details = self.normalizer.expand_graph_mention_details(mention)
+        expanded_mentions = [item["surface"] for item in expansion_details]
+        expansion_rule_by_surface = {item["surface"]: item["rule"] for item in expansion_details}
         if len(expanded_mentions) == 0:
             expanded_mentions = [normalized_mention]
+            expansion_rule_by_surface[normalized_mention] = "alias_normalization"
 
         # 查询阶段同时覆盖：
         # - 精确 name / canonical_name
@@ -88,6 +91,7 @@ class EntityLinker:
                 )
                 exact_surface_match = self._is_exact_surface_match(surface, row)
                 template_match = surface != normalized_mention
+                expansion_rule = expansion_rule_by_surface.get(surface, "")
                 rank_score = similarity + (0.04 if template_match and exact_surface_match else 0.0)
                 current = candidates.get(node_id)
 
@@ -99,6 +103,7 @@ class EntityLinker:
                         "rank_score": rank_score,
                         "template_match": template_match,
                         "exact_surface_match": exact_surface_match,
+                        "expansion_rule": expansion_rule,
                     }
 
         if len(candidates) == 0:
@@ -109,6 +114,8 @@ class EntityLinker:
                     "expanded_mentions": expanded_mentions,
                     "link_source": "none",
                     "template_match": False,
+                    "expansion_rule": "",
+                    "expansion_rules": sorted({item["rule"] for item in expansion_details if item.get("rule")}),
                 },
             )
 
@@ -131,6 +138,7 @@ class EntityLinker:
                 "similarity": float(item["similarity"]),
                 "label": item["row"].get("label"),
                 "matched_mention": item["surface"],
+                "expansion_rule": item.get("expansion_rule", ""),
                 "link_source": "template" if bool(item["template_match"]) else "direct",
             }
             for item in scored[: self.config.top_k_entity_matches]
@@ -149,6 +157,8 @@ class EntityLinker:
                 "matched_mention": best_entry["surface"],
                 "link_source": link_source,
                 "template_match": template_match,
+                "expansion_rule": best_entry.get("expansion_rule", ""),
+                "expansion_rules": sorted({item["rule"] for item in expansion_details if item.get("rule")}),
                 "aliases": list(best.get("aliases", [])),
                 "top_matches": top_matches,
             },

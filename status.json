@@ -1,0 +1,81 @@
+{
+  "status": "completed",
+  "updated_at": "2026-05-03T16:33:21",
+  "started_at": "2026-05-03T15:26:18",
+  "output_root": ".",
+  "case_file": "test_outputs/simulator_cases/graph_cases_20260502_role_qc/non_completed_smoke80/cases.jsonl",
+  "case_limit": 0,
+  "case_concurrency": 4,
+  "total_cases": 80,
+  "completed_cases": 80,
+  "skipped_completed_cases": 0,
+  "pending_cases": 0,
+  "last_completed_case_id": "",
+  "active_cases": [],
+  "timing_summary": {
+    "timed_case_count": 80,
+    "average_case_seconds": 193.4257,
+    "average_opening_seconds": 4.3391,
+    "average_initial_brain_seconds": 16.6248,
+    "average_patient_answer_seconds_total": 33.1296,
+    "average_brain_turn_seconds_total": 139.3313,
+    "average_finalize_seconds": 0.0008,
+    "slowest_cases": [
+      {
+        "case_id": "kg_exam_driven_b18b3f9e_001",
+        "case_title": "治疗矛盾型结核相关免疫重建炎症综合征 - 检查驱动病例",
+        "status": "max_turn_reached",
+        "total_seconds": 329.7613,
+        "turn_count": 8,
+        "slowest_turn_index": 1,
+        "slowest_turn_total_seconds": 63.2562,
+        "max_patient_answer_seconds": 9.6486,
+        "max_brain_turn_seconds": 63.2562
+      },
+      {
+        "case_id": "kg_ordinary_b18b3f9e_001",
+        "case_title": "治疗矛盾型结核相关免疫重建炎症综合征 - 普通病例",
+        "status": "max_turn_reached",
+        "total_seconds": 328.3923,
+        "turn_count": 8,
+        "slowest_turn_index": 7,
+        "slowest_turn_total_seconds": 53.765,
+        "max_patient_answer_seconds": 9.1008,
+        "max_brain_turn_seconds": 49.937
+      },
+      {
+        "case_id": "kg_competitive_b18b3f9e_vs_32e052bf_001",
+        "case_title": "治疗矛盾型结核相关免疫重建炎症综合征 - 竞争病例（vs 隐球菌性脑膜脑炎）",
+        "status": "max_turn_reached",
+        "total_seconds": 308.0755,
+        "turn_count": 8,
+        "slowest_turn_index": 1,
+        "slowest_turn_total_seconds": 51.5618,
+        "max_patient_answer_seconds": 9.178,
+        "max_brain_turn_seconds": 51.5617
+      },
+      {
+        "case_id": "kg_competitive_99291df5_vs_6ec2005e_001",
+        "case_title": "肝癌 - 竞争病例（vs 进行性播散性组织胞浆菌病）",
+        "status": "max_turn_reached",
+        "total_seconds": 301.8241,
+        "turn_count": 8,
+        "slowest_turn_index": 6,
+        "slowest_turn_total_seconds": 45.3673,
+        "max_patient_answer_seconds": 9.1818,
+        "max_brain_turn_seconds": 38.7288
+      },
+      {
+        "case_id": "kg_ordinary_fca01ccd_001",
+        "case_title": "宫颈癌 - 普通病例",
+        "status": "max_turn_reached",
+        "total_seconds": 301.4136,
+        "turn_count": 8,
+        "slowest_turn_index": 5,
+        "slowest_turn_total_seconds": 53.629,
+        "max_patient_answer_seconds": 10.3565,
+        "max_brain_turn_seconds": 43.7126
+      }
+    ]
+  }
+}

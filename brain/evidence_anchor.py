@@ -27,6 +27,11 @@ BACKGROUND_FAMILY_TAGS = {
     "general_risk",
     "constitutional_symptom",
 }
+LOW_COST_PROFILE_EXCLUDED_FAMILY_TAGS = {
+    *BACKGROUND_FAMILY_TAGS,
+    "viral_load",
+    "population_risk",
+}
 SPECIFIC_ANCHOR_FAMILY_TAGS = {
     "pathogen",
     "imaging",
@@ -246,6 +251,8 @@ class EvidenceAnchorAnalyzer:
         phenotype: list[dict] = []
         background: list[dict] = []
         negative: list[dict] = []
+        low_cost_support: list[dict] = []
+        low_cost_families: set[str] = set()
         observed_families: set[str] = set()
 
         for item in observed_items:
@@ -295,6 +302,8 @@ class EvidenceAnchorAnalyzer:
                 "source": item.source,
                 "source_turns": list(item.source_turns),
                 "evidence_tags": sorted(evidence_tags),
+                "acquisition_mode": str(payload.get("acquisition_mode") or item.metadata.get("acquisition_mode") or ""),
+                "evidence_cost": str(payload.get("evidence_cost") or item.metadata.get("evidence_cost") or ""),
             }
 
             if self._is_negative_anchor(item, relation_type, label, role):
@@ -305,7 +314,18 @@ class EvidenceAnchorAnalyzer:
                 continue
 
             if item.resolution == "clear":
-                observed_families.update(tag for tag in evidence_tags if not tag.startswith("type:"))
+                observed_families.update(self._canonical_family_tags(evidence_tags))
+                if self._is_low_cost_profile_support(
+                    item=item,
+                    payload=payload,
+                    label=label,
+                    relation_type=relation_type,
+                    role=role,
+                    evidence_tags=evidence_tags,
+                ):
+                    families = self._low_cost_profile_families(evidence_tags, role)
+                    low_cost_support.append({**compact, "low_cost_families": sorted(families)})
+                    low_cost_families.update(families)
 
             if role == "background_context":
                 background.append(compact)
@@ -338,6 +358,8 @@ class EvidenceAnchorAnalyzer:
         negative_score = sum(float(item.get("anchor_score", 0.0)) for item in negative)
         tier = self._select_anchor_tier(strong, definition, provisional, phenotype, background, negative)
         missing_families, minimum_groups_available = self._minimum_family_gaps(hypothesis, observed_families)
+        low_cost_present_clear_count = len(low_cost_support)
+        low_cost_core_family_count = len(low_cost_families)
 
         return {
             "observed_anchor_score": round(strong_score + definition_score + provisional_score * 0.65, 4),
@@ -360,6 +382,16 @@ class EvidenceAnchorAnalyzer:
             "minimum_evidence_groups_available": minimum_groups_available,
             "minimum_evidence_family_coverage_satisfied": len(missing_families) == 0,
             "missing_evidence_roles": self._missing_evidence_roles(tier),
+            "low_cost_supporting_evidence": low_cost_support,
+            "low_cost_support_families": sorted(low_cost_families),
+            "low_cost_core_family_count": low_cost_core_family_count,
+            "low_cost_present_clear_count": low_cost_present_clear_count,
+            "low_cost_profile_satisfied": low_cost_present_clear_count >= 2 and low_cost_core_family_count >= 2,
+            "evidence_profile_acceptance_candidate": (
+                tier not in {"strong_anchor", "definition_anchor", "provisional_anchor", "negative_anchor"}
+                and low_cost_present_clear_count >= 2
+                and low_cost_core_family_count >= 2
+            ),
         }
 
     def _apply_summary_to_hypothesis(self, hypothesis: HypothesisScore, summary: dict) -> HypothesisScore:
@@ -411,6 +443,10 @@ class EvidenceAnchorAnalyzer:
                     "definition_anchor_evidence": summary.get("definition_anchor_evidence", []),
                     "phenotype_supporting_evidence": summary.get("phenotype_supporting_evidence", []),
                     "anchor_negative_evidence": summary.get("anchor_negative_evidence", []),
+                    "low_cost_support_families": summary.get("low_cost_support_families", []),
+                    "low_cost_core_family_count": int(summary.get("low_cost_core_family_count", 0) or 0),
+                    "low_cost_present_clear_count": int(summary.get("low_cost_present_clear_count", 0) or 0),
+                    "low_cost_profile_satisfied": bool(summary.get("low_cost_profile_satisfied", False)),
                     "missing_evidence_roles": summary.get("missing_evidence_roles", []),
                 }
             )
@@ -598,6 +634,78 @@ class EvidenceAnchorAnalyzer:
 
         return role in {"disease_specific_anchor", "definition_anchor"} or relation_type in ANCHOR_RELATION_TYPES
 
+    def _is_low_cost_profile_support(
+        self,
+        *,
+        item: ObservedEvidenceItem,
+        payload: dict,
+        label: str,
+        relation_type: str,
+        role: str,
+        evidence_tags: set[str],
+    ) -> bool:
+        if item.polarity != "present" or item.resolution != "clear":
+            return False
+
+        if role == "background_context":
+            return False
+
+        if len(self._low_cost_profile_families(evidence_tags, role)) == 0:
+            return False
+
+        acquisition_mode = str(payload.get("acquisition_mode") or item.metadata.get("acquisition_mode") or "")
+        evidence_cost = str(payload.get("evidence_cost") or item.metadata.get("evidence_cost") or "")
+
+        if acquisition_mode in {"needs_lab_test", "needs_imaging", "needs_pathogen_test"} or evidence_cost == "high":
+            return False
+
+        if acquisition_mode in {"direct_ask", "history_known"} or evidence_cost == "low":
+            return True
+
+        if label == "ClinicalFinding" or relation_type == "MANIFESTS_AS":
+            return True
+
+        return label in {"RiskFactor", "PopulationGroup", "ClinicalAttribute"} and evidence_cost in {"", "low"}
+
+    def _low_cost_profile_families(self, evidence_tags: set[str], role: str) -> set[str]:
+        families = {
+            tag
+            for tag in self._canonical_family_tags(evidence_tags)
+            if tag not in LOW_COST_PROFILE_EXCLUDED_FAMILY_TAGS
+        }
+
+        if len(families) > 0:
+            return families
+
+        if role == "phenotype_support":
+            return {"phenotype"}
+
+        if role == "risk_or_comorbidity":
+            return {"risk_or_comorbidity"}
+
+        if role == "definition_anchor":
+            return {"definition_detail"}
+
+        return set()
+
+    # 将旧审计标签和 catalog 标签压到同一命名空间，避免同一证据被重复计入 family coverage。
+    def _canonical_family_tags(self, evidence_tags: set[str]) -> set[str]:
+        aliases = {
+            "respiratory": "respiratory_symptom",
+            "systemic": "constitutional_symptom",
+            "risk": "exposure_risk",
+            "viral": "viral_pathogen",
+            "detail": "general_detail",
+        }
+        values: set[str] = set()
+
+        for tag in evidence_tags:
+            if tag.startswith("type:"):
+                continue
+            values.add(aliases.get(tag, tag))
+
+        return values
+
     def _is_background_evidence(
         self,
         evidence_name: str,
@@ -642,6 +750,11 @@ class EvidenceAnchorAnalyzer:
             for tag in item.metadata.get("evidence_tags", [])
             if len(str(tag).strip()) > 0
         }
+        tags.update(
+            str(tag)
+            for tag in payload.get("evidence_tags", [])
+            if len(str(tag).strip()) > 0
+        )
         question_type = str(payload.get("question_type_hint") or item.metadata.get("question_type_hint") or "")
 
         if question_type:
@@ -669,7 +782,7 @@ class EvidenceAnchorAnalyzer:
             "disease_specific_lab": ("抗体阳性", "pcr", "核酸", "培养", "抗酸", "xpert", "葡聚糖"),
             "imaging": ("ct", "胸片", "影像", "磨玻璃", "mri"),
             "oxygenation": ("低氧", "血氧", "氧分压", "pao2", "spo2"),
-            "respiratory": ("咳", "气促", "呼吸困难", "胸闷"),
+            "respiratory_symptom": ("咳", "气促", "呼吸困难", "胸闷"),
             "tuberculosis": ("结核", "抗酸", "分枝杆菌", "mtb", "xpert"),
             "serology": ("igg", "igm", "抗体", "血清"),
             "metabolic_definition": ("ldl", "hdl", "甘油三酯", "总胆固醇", "血脂", "bmi"),

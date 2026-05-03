@@ -23,7 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from brain.llm_client import LlmClient
 from brain.service import build_default_brain_from_env
 from frontend.config_loader import apply_config_to_environment, load_frontend_config
-from simulator.benchmark import summarize_benchmark
+from simulator.benchmark import build_non_completed_case_report, summarize_benchmark
 from simulator.generate_cases import build_seed_cases, load_cases_jsonl, write_cases_jsonl
 from simulator.patient_agent import VirtualPatientAgent
 from simulator.replay_engine import ReplayConfig, ReplayEngine, ReplayResult, ReplayTurn
@@ -591,6 +591,7 @@ def main() -> int:
     output_root.mkdir(parents=True, exist_ok=True)
     results_file = output_root / "replay_results.jsonl"
     summary_file = output_root / "benchmark_summary.json"
+    non_completed_cases_file = output_root / "non_completed_cases.json"
     status_file = output_root / "status.json"
     run_log_file = output_root / "run.log"
     start_time = _timestamp()
@@ -635,6 +636,7 @@ def main() -> int:
                 timing_summary=current_timing_summary,
             ),
         )
+        _write_json(non_completed_cases_file, build_non_completed_case_report(results))
         _append_run_log(run_log_file, "启动失败：当前配置要求走 LLM-first 主链路，但 llm_available=false。")
         _emit_terminal_line("[batch_replay] 启动失败：llm_available=false，当前批量回放不会退回规则链路。")
         return 1
@@ -646,6 +648,7 @@ def main() -> int:
         case_limit=args.limit,
     )
     _write_json(summary_file, initial_summary)
+    _write_json(non_completed_cases_file, build_non_completed_case_report(results))
     _write_json(
         status_file,
         _build_status_payload(
@@ -703,6 +706,7 @@ def main() -> int:
         )
         current_timing_summary = summary_payload["timing_summary"]
         _write_json(summary_file, summary_payload)
+        _write_json(non_completed_cases_file, build_non_completed_case_report(results))
         _write_json(
             status_file,
             _build_status_payload(
@@ -854,6 +858,7 @@ def main() -> int:
         case_limit=args.limit,
     )
     _write_json(summary_file, final_summary)
+    _write_json(non_completed_cases_file, build_non_completed_case_report(results))
     _write_json(
         status_file,
         _build_status_payload(

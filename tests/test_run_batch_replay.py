@@ -271,6 +271,8 @@ def test_main_resume_skips_completed_cases_and_appends_outputs(monkeypatch, tmp_
 
     benchmark_payload = __import__("json").loads((output_root / "benchmark_summary.json").read_text(encoding="utf-8"))
     assert "timing_summary" in benchmark_payload
+    non_completed_payload = __import__("json").loads((output_root / "non_completed_cases.json").read_text(encoding="utf-8"))
+    assert non_completed_payload["non_completed_count"] == 0
     run_log = (output_root / "run.log").read_text(encoding="utf-8")
     assert "已完成 1" in run_log
     assert "病例完成：case_id=case2" in run_log
@@ -353,5 +355,7 @@ def test_main_fails_fast_when_llm_unavailable(monkeypatch, tmp_path: Path) -> No
     status_payload = __import__("json").loads((output_root / "status.json").read_text(encoding="utf-8"))
     assert status_payload["status"] == "failed"
     assert status_payload["completed_cases"] == 0
+    non_completed_payload = __import__("json").loads((output_root / "non_completed_cases.json").read_text(encoding="utf-8"))
+    assert non_completed_payload["case_count"] == 0
     run_log = (output_root / "run.log").read_text(encoding="utf-8")
     assert "llm_available=false" in run_log

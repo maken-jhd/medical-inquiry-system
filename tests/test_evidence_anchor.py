@@ -307,3 +307,133 @@ def test_scoped_evidence_without_payload_match_does_not_create_anchor() -> None:
     assert ranked[0].metadata["anchor_tier"] == "speculative"
     assert ranked[0].metadata["observed_anchor_score"] == 0.0
     assert ranked[0].metadata["anchor_supporting_evidence"] == []
+
+
+# 多族低成本阳性证据应形成 evidence-profile acceptance 候选，但不伪装成 strong anchor。
+def test_low_cost_multifamily_profile_is_recorded_without_strong_anchor() -> None:
+    state = SessionState(session_id="anchor_low_cost")
+    state.evidence_states["cough"] = EvidenceState(
+        node_id="cough",
+        polarity="present",
+        existence="exist",
+        resolution="clear",
+        metadata={"target_node_name": "咳嗽", "target_node_label": "ClinicalFinding"},
+    )
+    state.evidence_states["rash"] = EvidenceState(
+        node_id="rash",
+        polarity="present",
+        existence="exist",
+        resolution="clear",
+        metadata={"target_node_name": "皮疹", "target_node_label": "ClinicalFinding"},
+    )
+    state.evidence_states["fever"] = EvidenceState(
+        node_id="fever",
+        polarity="present",
+        existence="exist",
+        resolution="clear",
+        metadata={"target_node_name": "发热", "target_node_label": "ClinicalFinding"},
+    )
+    hypotheses = [
+        HypothesisScore(
+            node_id="d1",
+            label="Disease",
+            name="候选疾病",
+            score=1.0,
+            metadata={
+                "evidence_payloads": [
+                    {
+                        "node_id": "cough",
+                        "name": "咳嗽",
+                        "label": "ClinicalFinding",
+                        "relation_type": "MANIFESTS_AS",
+                        "acquisition_mode": "direct_ask",
+                        "evidence_cost": "low",
+                        "evidence_tags": ["respiratory_symptom"],
+                    },
+                    {
+                        "node_id": "rash",
+                        "name": "皮疹",
+                        "label": "ClinicalFinding",
+                        "relation_type": "MANIFESTS_AS",
+                        "acquisition_mode": "direct_ask",
+                        "evidence_cost": "low",
+                        "evidence_tags": ["dermatologic_symptom"],
+                    },
+                    {
+                        "node_id": "fever",
+                        "name": "发热",
+                        "label": "ClinicalFinding",
+                        "relation_type": "MANIFESTS_AS",
+                        "acquisition_mode": "direct_ask",
+                        "evidence_cost": "low",
+                        "evidence_tags": ["constitutional_symptom"],
+                    },
+                ]
+            },
+        )
+    ]
+
+    ranked, index = EvidenceAnchorAnalyzer().rerank_hypotheses(state, hypotheses)
+
+    assert ranked[0].metadata["anchor_tier"] == "phenotype_supported"
+    assert ranked[0].metadata["low_cost_present_clear_count"] == 2
+    assert ranked[0].metadata["low_cost_core_family_count"] == 2
+    assert ranked[0].metadata["low_cost_profile_satisfied"] is True
+    assert ranked[0].metadata["evidence_profile_acceptance_candidate"] is True
+    assert ranked[0].metadata["low_cost_support_families"] == ["dermatologic_symptom", "respiratory_symptom"]
+    assert index["candidate_anchor_summary"][0]["low_cost_profile_satisfied"] is True
+
+
+# 只有 HIV/CD4/发热等背景证据时，不能构成低成本 profile 放行候选。
+def test_background_only_evidence_does_not_satisfy_low_cost_profile() -> None:
+    state = SessionState(session_id="anchor_low_cost_background")
+    state.evidence_states["fever"] = EvidenceState(
+        node_id="fever",
+        polarity="present",
+        existence="exist",
+        resolution="clear",
+        metadata={"target_node_name": "发热", "target_node_label": "ClinicalFinding"},
+    )
+    state.evidence_states["immune"] = EvidenceState(
+        node_id="immune",
+        polarity="present",
+        existence="exist",
+        resolution="clear",
+        metadata={"target_node_name": "免疫功能低下", "target_node_label": "RiskFactor"},
+    )
+    hypotheses = [
+        HypothesisScore(
+            node_id="d1",
+            label="Disease",
+            name="候选疾病",
+            score=1.0,
+            metadata={
+                "evidence_payloads": [
+                    {
+                        "node_id": "fever",
+                        "name": "发热",
+                        "label": "ClinicalFinding",
+                        "relation_type": "MANIFESTS_AS",
+                        "acquisition_mode": "direct_ask",
+                        "evidence_cost": "low",
+                        "evidence_tags": ["constitutional_symptom"],
+                    },
+                    {
+                        "node_id": "immune",
+                        "name": "免疫功能低下",
+                        "label": "RiskFactor",
+                        "relation_type": "RISK_FACTOR_FOR",
+                        "acquisition_mode": "history_known",
+                        "evidence_cost": "low",
+                        "evidence_tags": ["immune_status"],
+                    },
+                ]
+            },
+        )
+    ]
+
+    ranked, _ = EvidenceAnchorAnalyzer().rerank_hypotheses(state, hypotheses)
+
+    assert ranked[0].metadata["anchor_tier"] == "background_supported"
+    assert ranked[0].metadata["low_cost_present_clear_count"] == 0
+    assert ranked[0].metadata["low_cost_profile_satisfied"] is False
