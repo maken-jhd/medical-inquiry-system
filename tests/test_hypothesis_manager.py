@@ -113,6 +113,35 @@ def test_hypothesis_manager_handles_guarded_repair_reasons() -> None:
     assert strong_alternative[0].metadata["verifier_alternative_reason"] == "guarded strong alternative"
 
 
+# 验证连续缺少关键支持时，repair feedback 会被转成更强的当前答案降权。
+def test_hypothesis_manager_uses_repeated_repair_feedback_count() -> None:
+    manager = HypothesisManager()
+    hypotheses = [
+        HypothesisScore(node_id="current", label="Disease", name="当前答案", score=1.0, metadata={}),
+        HypothesisScore(
+            node_id="alt",
+            label="Disease",
+            name="备选答案",
+            score=0.88,
+            metadata={"exact_scope_anchor_score": 0.8},
+        ),
+    ]
+
+    reranked = manager.apply_verifier_repair(
+        hypotheses,
+        current_answer_id="current",
+        reject_reason="missing_required_anchor",
+        alternative_candidates=[{"answer_id": "alt", "answer_name": "备选答案", "reason": "已有真实锚点支持"}],
+        repair_feedback_counts={"current": {"missing_required_anchor": 3}},
+    )
+    current = next(item for item in reranked if item.node_id == "current")
+    alt = next(item for item in reranked if item.node_id == "alt")
+
+    assert current.metadata["repair_feedback_count"] == 3
+    assert current.score < 0.7
+    assert alt.metadata["verifier_observed_anchor_alt_bonus"] > 0.0
+
+
 # 验证 evidence_state 即使还保留旧 existence 字段，也会优先按 polarity 做分数调整。
 def test_hypothesis_manager_scores_unclear_and_absent_by_polarity() -> None:
     manager = HypothesisManager()

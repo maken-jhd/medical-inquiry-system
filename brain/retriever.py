@@ -24,7 +24,9 @@ class RetrievalConfig:
     """保存各类检索操作的默认返回上限。"""
 
     cold_start_limit: int = 8
-    r1_limit: int = 6
+    r1_limit: int = 10
+    r1_rescue_limit: int = 8
+    r1_scope_sibling_limit: int = 12
     r2_limit: int = 10
     evidence_profile_limit: int = 12
     cold_start_labels: tuple[str, ...] = (
@@ -303,6 +305,349 @@ class GraphRetriever:
             )
 
         return sorted(candidates, key=lambda item: (-item.score, item.name))
+
+    # 从真实会话里已经写入的高价值阳性证据反查疾病，作为 R1 的候选召回保底池。
+    def retrieve_observed_anchor_candidates(
+        self,
+        session_state: SessionState,
+        top_k: int | None = None,
+    ) -> List[HypothesisCandidate]:
+        observed_node_ids = self._collect_observed_anchor_node_ids(session_state)
+        limit = top_k or self.config.r1_rescue_limit
+
+        if len(observed_node_ids) == 0:
+            return []
+
+        rows = self.client.run_query(
+            """
+            MATCH (feature)
+            WHERE feature.id IN $node_ids
+              AND any(label IN labels(feature) WHERE label IN $feature_labels)
+            CALL {
+              WITH feature
+              MATCH (feature)-[r]->(candidate)
+              WHERE type(r) IN $relation_types
+                AND any(label IN labels(candidate) WHERE label IN $candidate_labels)
+              RETURN candidate, feature, r, 1.0 AS direction_confidence
+              UNION
+              WITH feature
+              MATCH (candidate)-[r]->(feature)
+              WHERE type(r) IN $relation_types
+                AND any(label IN labels(candidate) WHERE label IN $candidate_labels)
+              RETURN candidate, feature, r, 0.65 AS direction_confidence
+            }
+            WITH candidate,
+                 collect(direction_confidence) AS direction_confidences,
+                 count(r) AS relation_count,
+                 count(DISTINCT feature) AS matched_feature_count,
+                 collect(DISTINCT type(r)) AS relation_types,
+                 collect(DISTINCT coalesce(feature.canonical_name, feature.name)) AS evidence_names,
+                 collect(DISTINCT labels(feature)[0]) AS evidence_labels,
+                 collect(DISTINCT feature.id) AS evidence_node_ids,
+                 collect(DISTINCT {
+                   name: coalesce(feature.canonical_name, feature.name),
+                   label: labels(feature)[0],
+                   relation_type: type(r),
+                   node_id: feature.id,
+                   acquisition_mode: coalesce(feature.acquisition_mode, ''),
+                   evidence_cost: coalesce(feature.evidence_cost, '')
+                 }) AS evidence_payloads
+            RETURN candidate.id AS node_id,
+                   labels(candidate)[0] AS label,
+                   coalesce(candidate.canonical_name, candidate.name) AS name,
+                   relation_count AS relation_count,
+                   matched_feature_count AS matched_feature_count,
+                   coalesce(candidate.weight, 0.0) AS candidate_weight,
+                   reduce(total = 0.0, item IN direction_confidences | total + item) / size(direction_confidences) AS direction_confidence,
+                   relation_types AS relation_types,
+                   evidence_names AS evidence_names,
+                   evidence_labels AS evidence_labels,
+                   evidence_payloads AS evidence_payloads,
+                   evidence_node_ids AS evidence_node_ids
+            ORDER BY matched_feature_count DESC, relation_count DESC, candidate_weight DESC, name
+            LIMIT $limit
+            """,
+            {
+                "node_ids": observed_node_ids,
+                "limit": limit,
+                "relation_types": list(self.config.r1_relation_types),
+                "feature_labels": list(self.config.r1_feature_labels),
+                "candidate_labels": list(self.config.r1_candidate_labels),
+            },
+        )
+
+        candidates: list[HypothesisCandidate] = []
+        total_feature_count = max(len(observed_node_ids), 1)
+
+        for row in rows:
+            evidence_names = row.get("evidence_names", [])
+            relation_types = [str(item) for item in row.get("relation_types", [])]
+            evidence_labels = [str(item) for item in row.get("evidence_labels", [])]
+            evidence_payloads = [
+                item for item in row.get("evidence_payloads", [])
+                if isinstance(item, dict)
+            ]
+            matched_feature_count = int(row.get("matched_feature_count", len(evidence_names)))
+            direction_confidence = float(row.get("direction_confidence", 1.0))
+            semantic_score, semantic_metadata = self._score_r1_candidate(
+                row,
+                total_feature_count=total_feature_count,
+                matched_feature_count=matched_feature_count,
+                direction_confidence=direction_confidence,
+                link_similarity=1.0,
+                relation_types=relation_types,
+                evidence_names=[str(item) for item in evidence_names],
+                evidence_labels=evidence_labels,
+                evidence_payloads=evidence_payloads,
+            )
+
+            if semantic_score < 0.32:
+                continue
+
+            candidates.append(
+                HypothesisCandidate(
+                    node_id=row["node_id"],
+                    name=row["name"],
+                    label=row["label"],
+                    score=min(semantic_score + 0.16, 1.4),
+                    reasoning=f"R1 rescue 根据已观察证据 {', '.join(evidence_names[:4])} 召回该候选。",
+                    metadata={
+                        "evidence_names": evidence_names,
+                        "evidence_node_ids": row.get("evidence_node_ids", []),
+                        "matched_feature_count": matched_feature_count,
+                        "feature_coverage": semantic_metadata["feature_coverage"],
+                        "relation_types": relation_types,
+                        "evidence_labels": evidence_labels,
+                        "evidence_payloads": evidence_payloads,
+                        "label_prior": semantic_metadata["label_prior"],
+                        "relation_specificity": semantic_metadata["relation_specificity"],
+                        "disease_specific_anchor_score": semantic_metadata["disease_specific_anchor_score"],
+                        "generic_single_feature_penalty": semantic_metadata["generic_single_feature_penalty"],
+                        "direction_confidence": direction_confidence,
+                        "entity_link_similarity": 1.0,
+                        "semantic_score": semantic_score,
+                        "semantic_score_breakdown": semantic_metadata,
+                        "candidate_rescue_source": "observed_anchor",
+                        "rescue_matched_node_ids": row.get("evidence_node_ids", []),
+                    },
+                )
+            )
+
+        return sorted(candidates, key=lambda item: (-item.score, item.name))
+
+    # 当真实会话已经观察到病原/部位等强线索时，额外召回同病原或同作用域 sibling 疾病。
+    # 这解决“CMV 只召回 CMV感染，没召回 CMV-IRIS/视网膜炎”等候选缺失问题。
+    def retrieve_scope_sibling_candidates(
+        self,
+        session_state: SessionState,
+        top_k: int | None = None,
+    ) -> List[HypothesisCandidate]:
+        keywords = self._collect_scope_sibling_keywords(session_state)
+        limit = top_k or self.config.r1_scope_sibling_limit
+
+        if len(keywords) == 0:
+            return []
+
+        rows = self.client.run_query(
+            """
+            MATCH (candidate)
+            WHERE any(label IN labels(candidate) WHERE label IN $candidate_labels)
+              AND any(keyword IN $keywords WHERE toLower(coalesce(candidate.canonical_name, candidate.name, '')) CONTAINS keyword)
+            OPTIONAL MATCH (candidate)-[r]->(feature)
+            WHERE type(r) IN $relation_types
+              AND any(label IN labels(feature) WHERE label IN $feature_labels)
+            WITH candidate,
+                 collect(DISTINCT r) AS rels,
+                 collect(DISTINCT feature) AS features,
+                 collect(DISTINCT CASE
+                   WHEN feature IS NULL THEN null
+                   ELSE {
+                     name: coalesce(feature.canonical_name, feature.name),
+                     label: labels(feature)[0],
+                     relation_type: type(r),
+                     node_id: feature.id,
+                     acquisition_mode: coalesce(feature.acquisition_mode, ''),
+                     evidence_cost: coalesce(feature.evidence_cost, '')
+                   }
+                 END) AS payloads,
+                 [keyword IN $keywords WHERE toLower(coalesce(candidate.canonical_name, candidate.name, '')) CONTAINS keyword] AS matched_keywords
+            RETURN candidate.id AS node_id,
+                   labels(candidate)[0] AS label,
+                   coalesce(candidate.canonical_name, candidate.name) AS name,
+                   size(rels) AS relation_count,
+                   size(features) AS matched_feature_count,
+                   coalesce(candidate.weight, 0.0) AS candidate_weight,
+                   matched_keywords AS matched_keywords,
+                   [rel IN rels WHERE rel IS NOT NULL | type(rel)] AS relation_types,
+                   [feature IN features WHERE feature IS NOT NULL | coalesce(feature.canonical_name, feature.name)] AS evidence_names,
+                   [feature IN features WHERE feature IS NOT NULL | labels(feature)[0]] AS evidence_labels,
+                   [feature IN features WHERE feature IS NOT NULL | feature.id] AS evidence_node_ids,
+                   [payload IN payloads WHERE payload IS NOT NULL | payload] AS evidence_payloads
+            ORDER BY size(matched_keywords) DESC, candidate_weight DESC, relation_count DESC, name
+            LIMIT $limit
+            """,
+            {
+                "keywords": keywords,
+                "limit": limit,
+                "relation_types": list(self.config.r1_relation_types),
+                "feature_labels": list(self.config.r1_feature_labels),
+                "candidate_labels": list(self.config.r1_candidate_labels),
+            },
+        )
+
+        candidates: list[HypothesisCandidate] = []
+        for row in rows:
+            matched_keywords = [str(item) for item in row.get("matched_keywords", []) if len(str(item).strip()) > 0]
+            if len(matched_keywords) == 0:
+                continue
+
+            relation_count = int(row.get("relation_count", 0) or 0)
+            candidate_weight = float(row.get("candidate_weight", 0.0) or 0.0)
+            evidence_payloads = [
+                item
+                for item in row.get("evidence_payloads", [])
+                if isinstance(item, dict)
+            ]
+            score = min(0.42 + len(matched_keywords) * 0.08 + min(relation_count, 6) * 0.025 + candidate_weight * 0.1, 1.05)
+            candidates.append(
+                HypothesisCandidate(
+                    node_id=row["node_id"],
+                    name=row["name"],
+                    label=row["label"],
+                    score=score,
+                    reasoning=f"R1 sibling 根据真实强证据作用域关键词 {', '.join(matched_keywords[:4])} 召回该候选。",
+                    metadata={
+                        "evidence_names": row.get("evidence_names", []),
+                        "evidence_node_ids": row.get("evidence_node_ids", []),
+                        "matched_feature_count": int(row.get("matched_feature_count", 0) or 0),
+                        "feature_coverage": 0.0,
+                        "relation_types": [str(item) for item in row.get("relation_types", [])],
+                        "evidence_labels": [str(item) for item in row.get("evidence_labels", [])],
+                        "evidence_payloads": evidence_payloads,
+                        "semantic_score": score,
+                        "candidate_rescue_source": "scope_sibling",
+                        "scope_sibling_keywords": matched_keywords,
+                    },
+                )
+            )
+
+        return sorted(candidates, key=lambda item: (-item.score, item.name))
+
+    def _collect_observed_anchor_node_ids(self, session_state: SessionState) -> list[str]:
+        values: list[str] = []
+
+        for evidence in session_state.evidence_states.values():
+            if evidence.effective_polarity() != "present":
+                continue
+            if evidence.resolution not in {"clear", "hedged"}:
+                continue
+            if self._is_background_observed_node(evidence.node_id, evidence.metadata):
+                continue
+            values.append(evidence.node_id)
+
+        for slot in session_state.slots.values():
+            if slot.effective_polarity() != "present":
+                continue
+            if slot.resolution not in {"clear", "hedged"}:
+                continue
+            if self._is_background_observed_node(slot.node_id, slot.metadata):
+                continue
+            values.append(slot.node_id)
+
+        deduped: list[str] = []
+        for node_id in values:
+            if node_id and node_id not in deduped:
+                deduped.append(node_id)
+        return deduped[:16]
+
+    def _collect_scope_sibling_keywords(self, session_state: SessionState) -> list[str]:
+        names: list[str] = []
+
+        for evidence in session_state.evidence_states.values():
+            if evidence.effective_polarity() != "present" or evidence.resolution not in {"clear", "hedged"}:
+                continue
+            if self._is_background_observed_node(evidence.node_id, evidence.metadata):
+                continue
+            names.append(
+                str(
+                    evidence.metadata.get("target_node_name")
+                    or evidence.metadata.get("normalized_name")
+                    or evidence.node_id
+                )
+            )
+
+        for slot in session_state.slots.values():
+            if slot.effective_polarity() != "present" or slot.resolution not in {"clear", "hedged"}:
+                continue
+            if self._is_background_observed_node(slot.node_id, slot.metadata):
+                continue
+            names.append(
+                str(
+                    slot.metadata.get("target_node_name")
+                    or slot.metadata.get("normalized_name")
+                    or slot.value
+                    or slot.node_id
+                )
+            )
+
+        keywords: list[str] = []
+        for name in names:
+            for keyword in self._scope_sibling_keywords_for_name(name):
+                if keyword not in keywords:
+                    keywords.append(keyword)
+
+        return keywords[:12]
+
+    def _scope_sibling_keywords_for_name(self, name: str) -> list[str]:
+        text = self._normalize_match_text(name)
+        rules = (
+            ("巨细胞病毒", ("巨细胞病毒", "cmv")),
+            ("隐球菌", ("隐球菌", "cryptococcus")),
+            ("结核", ("结核", "mtb", "xpert", "结核分枝杆菌")),
+            ("分枝杆菌", ("分枝杆菌", "抗酸", "ntm")),
+            ("肺孢子", ("肺孢子", "pcp", "pjp", "pneumocystis")),
+            ("水痘", ("水痘带状疱疹", "带状疱疹", "vzv")),
+            ("弓形虫", ("弓形虫", "toxoplasma")),
+            ("组织胞浆", ("组织胞浆", "histoplasma")),
+            ("马尔尼菲", ("马尔尼菲", "talaromyces")),
+            ("念珠菌", ("念珠菌", "candida")),
+            ("新冠", ("新冠", "covid", "sarscov2")),
+            ("乙肝", ("乙肝", "hbv", "乙型肝炎")),
+            ("丙肝", ("丙肝", "hcv", "丙型肝炎")),
+            ("卡波西", ("卡波西", "hhv8")),
+        )
+        keywords: list[str] = []
+
+        for canonical, aliases in rules:
+            if any(alias in text for alias in aliases):
+                keywords.append(self._normalize_match_text(canonical))
+
+        return keywords
+
+    def _is_background_observed_node(self, node_id: str, metadata: dict) -> bool:
+        label = str(
+            metadata.get("target_node_label")
+            or metadata.get("linked_label")
+            or metadata.get("graph_grounded_label")
+            or metadata.get("label")
+            or ""
+        )
+        name = self._normalize_match_text(
+            str(
+                metadata.get("target_node_name")
+                or metadata.get("normalized_name")
+                or metadata.get("graph_grounded_canonical_name")
+                or node_id
+            )
+        )
+
+        if label in {"Pathogen", "LabFinding", "LabTest", "ImagingFinding"}:
+            return False
+
+        return self._is_generic_hiv_or_immune_anchor(name) or any(
+            keyword in name
+            for keyword in ("发热", "发烧", "年龄", "性别", "既往病史")
+        )
 
     # 执行论文中的 R2：从当前主假设反向检索最值得验证的证据节点。
     def retrieve_r2_expected_evidence(

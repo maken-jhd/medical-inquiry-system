@@ -74,6 +74,19 @@ def test_parse_args_supports_no_resume(monkeypatch) -> None:
     assert args.no_resume is True
 
 
+# 验证命令行默认开启一次 API 连接错误重试，也支持显式覆盖。
+def test_parse_args_supports_api_error_retries(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_batch_replay.py", "--cases-file", "cases.jsonl", "--api-error-retries", "2"],
+    )
+
+    args = run_batch_replay.parse_args()
+
+    assert args.api_error_retries == 2
+
+
 # 验证 batch replay 会持续报告病例级进度。
 def test_run_cases_reports_progress(monkeypatch) -> None:
     cases = [
@@ -126,6 +139,38 @@ def test_run_cases_parallel_marks_unexpected_case_exception_as_failed(monkeypatc
     assert results[0].error["code"] == "unexpected_runtime_error"
     assert results[0].error["stage"] == "batch_runner"
     assert results[1].status == "completed"
+
+
+# 验证 APIConnectionError 类失败会在 batch 外层自动重试一次。
+def test_run_cases_retries_api_connection_error_once(monkeypatch) -> None:
+    cases = [SimpleNamespace(case_id="case1", title="病例1")]
+    calls: list[str] = []
+
+    def fake_run_single_case(case, max_turns: int):
+        _ = max_turns
+        calls.append(case.case_id)
+        if len(calls) == 1:
+            return ReplayResult(
+                case_id=case.case_id,
+                case_title=case.title,
+                status="failed",
+                error={
+                    "code": "llm_stage_failed",
+                    "stage": "turn_interpreter",
+                    "message": "结构化大模型调用失败：APIConnectionError: Connection error.",
+                    "attempts": 3,
+                },
+            )
+        return ReplayResult(case_id=case.case_id, case_title=case.title, status="completed")
+
+    monkeypatch.setattr(run_batch_replay, "_run_single_case", fake_run_single_case)
+
+    results = run_batch_replay._run_cases(cases, max_turns=8, case_concurrency=1, api_error_retries=1)
+
+    assert len(calls) == 2
+    assert results[0].status == "completed"
+    assert results[0].timing["batch_retry_attempts"] == 1
+    assert results[0].timing["retried_after_api_connection_error"] is True
 
 
 def test_format_heartbeat_line_reports_oldest_active_case(monkeypatch) -> None:

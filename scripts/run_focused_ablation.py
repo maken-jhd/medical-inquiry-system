@@ -94,36 +94,36 @@ def parse_args() -> argparse.Namespace:
         "--min-answer-consistency",
         type=float,
         default=None,
-        help="可选 stop 阈值覆盖：min_answer_consistency。",
+        help="历史兼容参数：结构化 stop rule 已移除，当前不再生效。",
     )
     parser.add_argument(
         "--min-agent-eval-score",
         type=float,
         default=None,
-        help="可选 stop 阈值覆盖：min_agent_eval_score。",
+        help="历史兼容参数：结构化 stop rule 已移除，当前不再生效。",
     )
     parser.add_argument(
         "--min-final-score",
         type=float,
         default=None,
-        help="可选 stop 阈值覆盖：min_final_score。",
+        help="历史兼容参数：结构化 stop rule 已移除，当前不再生效。",
     )
     parser.add_argument(
         "--min-turn-index-before-final-answer",
         type=int,
         default=None,
-        help="可选 stop 阈值覆盖：min_turn_index_before_final_answer。",
+        help="历史兼容参数：结构化 stop rule 已移除，当前不再生效。",
     )
     parser.add_argument(
         "--min-trajectory-count-before-accept",
         type=int,
         default=None,
-        help="可选 stop 阈值覆盖：min_trajectory_count_before_accept。",
+        help="历史兼容参数：结构化 stop rule 已移除，当前不再生效。",
     )
     parser.add_argument(
         "--allow-verifier-rejected-stop",
         action="store_true",
-        help="校准实验用：允许在 verifier_should_accept=false 时继续用数值阈值判断是否接受。",
+        help="历史兼容参数：当前 verifier 拒绝只会进入 repair，不再由数值 stop rule 覆盖。",
     )
     return parser.parse_args()
 
@@ -174,32 +174,8 @@ def _parse_variants(raw_variants: str) -> list[str]:
 
 
 def _build_config_overrides(args: argparse.Namespace, variant: str) -> dict:
-    stop_overrides: dict[str, object] = {}
-
-    if args.min_answer_consistency is not None:
-        stop_overrides["min_answer_consistency"] = args.min_answer_consistency
-
-    if args.min_agent_eval_score is not None:
-        stop_overrides["min_agent_eval_score"] = args.min_agent_eval_score
-
-    if args.min_final_score is not None:
-        stop_overrides["min_final_score"] = args.min_final_score
-
-    if args.min_turn_index_before_final_answer is not None:
-        stop_overrides["min_turn_index_before_final_answer"] = args.min_turn_index_before_final_answer
-
-    if args.min_trajectory_count_before_accept is not None:
-        stop_overrides["min_trajectory_count_before_accept"] = args.min_trajectory_count_before_accept
-
-    if bool(args.allow_verifier_rejected_stop):
-        stop_overrides["require_verifier_accept_flag"] = False
-
-    overrides = {"repair": deepcopy(VARIANT_REPAIR_OVERRIDES[variant])}
-
-    if len(stop_overrides) > 0:
-        overrides["stop"] = stop_overrides
-
-    return overrides
+    _ = args
+    return {"repair": deepcopy(VARIANT_REPAIR_OVERRIDES[variant])}
 
 
 def _build_ablation_flags(variant: str) -> dict:

@@ -67,6 +67,7 @@
 - [benchmark.py](/Users/loki/Workspace/GraduationDesign/simulator/benchmark.py)
   - 负责汇总自动对战结果。
   - 当前已支持统计平均轮次、完成率、假设命中率和红旗覆盖率等核心指标。
+  - 当前会同时输出 `top1_final_answer_hit_count/rate` 和 `top3_hypothesis_hit_count/rate`：前者表示最终诊断答案严格命中，后者表示真实诊断进入最终候选前三。
 
 - [path_cache_builder.py](/Users/loki/Workspace/GraduationDesign/simulator/path_cache_builder.py)
   - 用于从大量回放结果中提取高价值路径，并生成在线问诊可直接检索的“离线最优路径缓存”。
@@ -87,7 +88,7 @@
 - 病人 opening 的检查类关键锚点会被显式保留，避免首轮证据在自然语言压缩后丢失图谱锚点
 - 检查/病原/疾病定义性问题 no-match 时不再默认强阴性，降低缺槽位对 guarded acceptance 的误伤
 - 自动回放和基础评测已经能批量跑通
-- `benchmark.py` 已区分“候选列表命中”和“最终答案命中”，会输出严格 top 命中、宽松/家族级 top 命中、accepted 准确率、wrong accepted 与 top 正确但被拒绝等指标
+- `benchmark.py` 已区分“候选列表命中”和“最终答案命中”，会输出 `top1_final_answer_hit`、`top3_hypothesis_hit`、宽松/家族级 top 命中、accepted 准确率、wrong accepted 与 top 正确但被拒绝等指标
 - 当前图谱驱动病例 role-QC 正式输出已固定落盘到 `test_outputs/simulator_cases/graph_cases_20260502_role_qc/`；生成器会写入 `case_qc_score / case_qc_status / case_qc_reasons`，避免只按 family 数量判断病例质量
 - 当前新增 20 例 smoke 输入到 `test_outputs/simulator_cases/graph_cases_20260502_role_qc/smoke20/`；该批全部来自 `case_qc_status=eligible` 病例，类型分布为 `ordinary=9 / low_cost=1 / exam_driven=5 / competitive=5`
 - 当前已根据本机 Neo4j 导出症状证据族目录到 `test_outputs/evidence_family/disease_symptom_catalog_20260502/`，其中包含 disease-symptom 查看版 Markdown、症状节点分类 JSON 和每个疾病的 symptom-only 最低证据组建议
@@ -123,9 +124,11 @@
   - 当前会在终端持续打印病例级进度条，并每 15 秒打印一次心跳，便于观察长时间运行任务的完成度和当前卡在哪个病例。
   - 当前启动日志会直接写出 `llm_available=true/false`；若为 `false`，批量回放会在启动前直接失败，不再静默退回规则链路。
   - 当前会在每个病例完成后立即追加写入 `replay_results.jsonl`，并同步刷新 `benchmark_summary.json`、`non_completed_cases.json`、`status.json` 和 `run.log`。
+  - 当前 `benchmark_summary.json` 会额外写入 `top1_final_answer_hit_count/rate` 与 `top3_hypothesis_hit_count/rate`，`non_completed_cases.json` 的病例记录也会带同名布尔字段，方便查看“没 completed 但 top1/top3 是否已经命中”。
   - 当前 `non_completed_cases.json` 会只记录 `status != completed` 的异常诊断病例，并按 `failed::*`、`max_turn_reached::top_exact_correct_but_rejected`、`max_turn_reached::true_candidate_but_final_wrong`、`max_turn_reached::no_final_answer` 等类别分组，方便全量 benchmark 后优先复盘。
   - 当前 `replay_results.jsonl` / `status.json` / `benchmark_summary.json` / `non_completed_cases.json` / `run.log` 都已支持 `failed` 病例语义；失败病例会保留 `error.code / error.stage / error.prompt_name / error.message / error.attempts`。
   - 当前 batch runner 也补了一层单病例异常保护；即使某个 worker 内部抛出普通 Python 异常，也会尽量把该病例转成 `failed` 结果继续整批运行，而不是直接让整个 smoke 异常终止。
+  - 当前对 `APIConnectionError / Connection error` 类单病例失败默认额外重试 1 次，可用 `--api-error-retries N` 调整；重试结果会在 `timing.batch_retry_attempts` 与失败病例 `error.batch_retry_attempts` 中记录。
   - 当前默认支持断点续跑；如果输出目录里已有完成病例，会自动跳过这些病例，只继续未完成部分。若需要强制重跑，可使用 `--no-resume`。
   - 当前会记录病例级耗时拆分：`opening_seconds`、`initial_brain_seconds`、逐轮 `patient_answer_seconds / brain_turn_seconds`、`finalize_seconds` 与 `total_seconds`，并把聚合摘要写入 `benchmark_summary.json` / `status.json`；运行日志对亚秒级耗时会保留更高精度。
   - 当前续跑读取历史 `replay_results.jsonl` 时也会保留逐轮 `patient_answer_seconds / brain_turn_seconds / total_seconds`，便于后续继续做 turn 级复盘。

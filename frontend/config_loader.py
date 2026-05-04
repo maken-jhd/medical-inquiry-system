@@ -24,13 +24,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "llm": {
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "model": "qwen3-max",
+        "model": "qwen3.5-flash",
         "api_key": "",
         "timeout_seconds": 60,
         "enable_thinking": False,
     },
     "brain": {
-        "acceptance_profile": "anchor_controlled",
         "verifier_acceptance_profile": "guarded_lenient",
         "agent_eval_mode": "llm_verifier",
     },
@@ -59,16 +58,15 @@ def apply_config_to_environment(config: dict[str, Any]) -> None:
     _set_env_if_present("NEO4J_DATABASE", neo4j.get("database"))
 
     _set_env_if_present("OPENAI_BASE_URL", llm.get("base_url"))
-    _set_env_if_present("OPENAI_MODEL", llm.get("model"))
+    # 允许脚本通过预设环境变量临时切换模型，便于做批量对比实验。
+    _set_env_if_present("OPENAI_MODEL", llm.get("model"), overwrite=False)
     _set_env_if_present("DASHSCOPE_API_KEY", llm.get("api_key"))
     _set_env_if_present("OPENAI_TIMEOUT_SECONDS", llm.get("timeout_seconds"))
     _set_env_if_present("OPENAI_ENABLE_THINKING", llm.get("enable_thinking"))
 
-    acceptance_profile = str(brain.get("acceptance_profile") or "anchor_controlled")
-    verifier_profile = str(brain.get("verifier_acceptance_profile") or acceptance_profile)
+    verifier_profile = str(brain.get("verifier_acceptance_profile") or "guarded_lenient")
     agent_eval_mode = str(brain.get("agent_eval_mode") or "llm_verifier")
 
-    _set_env_if_present("BRAIN_ACCEPTANCE_PROFILE", acceptance_profile)
     _set_env_if_present("TRAJECTORY_VERIFIER_ACCEPTANCE_PROFILE", verifier_profile)
     _set_env_if_present("BRAIN_AGENT_EVAL_MODE", agent_eval_mode)
 
@@ -77,12 +75,8 @@ def build_brain_config_overrides(config: dict[str, Any]) -> dict[str, Any]:
     """把前端配置转换成 ConsultationBrain 的 config_overrides。"""
 
     brain = _as_dict(config.get("brain"))
-    acceptance_profile = str(brain.get("acceptance_profile") or "anchor_controlled")
     agent_eval_mode = str(brain.get("agent_eval_mode") or "llm_verifier")
     return {
-        "stop": {
-            "acceptance_profile": acceptance_profile,
-        },
         "path_evaluation": {
             "agent_eval_mode": agent_eval_mode,
         },
@@ -107,8 +101,8 @@ def get_config_display_rows(config: dict[str, Any]) -> list[dict[str, str]]:
         {"配置项": "LLM 请求超时", "当前值": f"{llm.get('timeout_seconds') or 60} 秒"},
         {"配置项": "LLM 深度思考", "当前值": "开启" if bool(llm.get("enable_thinking")) else "关闭"},
         {"配置项": "LLM API Key", "当前值": "已配置" if api_key else "未配置"},
-        {"配置项": "安全接受策略", "当前值": str(brain.get("acceptance_profile") or "")},
         {"配置项": "复核器接受策略", "当前值": str(brain.get("verifier_acceptance_profile") or "")},
+        {"配置项": "最终接受控制", "当前值": "verifier_only"},
         {"配置项": "路径代理评估模式", "当前值": str(brain.get("agent_eval_mode") or "")},
     ]
 
@@ -135,9 +129,11 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     return merged
 
 
-def _set_env_if_present(name: str, value: Any) -> None:
+def _set_env_if_present(name: str, value: Any, *, overwrite: bool = True) -> None:
     text = "" if value is None else str(value).strip()
     if len(text) > 0:
+        if not overwrite and len(str(os.environ.get(name, "")).strip()) > 0:
+            return
         os.environ[name] = text
 
 

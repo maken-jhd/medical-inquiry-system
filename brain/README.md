@@ -91,11 +91,13 @@
 
 - [evidence_anchor.py](/Users/loki/Workspace/GraduationDesign/brain/evidence_anchor.py)
   - 新增 observed anchor 计算层，只消费真实会话中的 `slots / evidence_states`。
-  - 当前按 evidence role 计算锚点：`disease_specific_anchor / definition_anchor / phenotype_support / risk_or_comorbidity / background_context`，不按具体疾病名称写专门规则。
-  - 会把病原体、疾病特异化验/影像、定义性 detail 的真实阳性证据分为 `strong_anchor / definition_anchor / provisional_anchor`，把 HIV、CD4、发热、免疫抑制、年龄、既往史等高连接证据降为 `background_supported`。
-  - 会过滤 rollout / simulation 来源的模拟阳性证据，并把明确否定的定义性检查结果标为 `negative_anchor`，供 A2 排序、repair 和 stop gate 共用。
+  - 当前按 evidence role 与 anchor scope 两层计算锚点：role 区分 `disease_specific_anchor / definition_anchor / phenotype_support / risk_or_comorbidity / background_context`，scope 区分 `exact_scope / family_scope / phenotype_scope / background_scope / competing_scope`。
+  - 会把病原体、疾病特异化验/影像、定义性 detail 的真实阳性证据分为 `strong_anchor / definition_anchor / family_anchor / provisional_anchor`；只有精确 scope 才能形成强锚点，同病原但缺少部位/亚型信息时降为 `family_anchor`。
+  - HIV、CD4、发热、免疫抑制、年龄、既往史、HBV/HCV 共病背景等高连接证据会降为 `background_supported`；`blood_count` 不再因为 family tag 被全局升格为 definition anchor。
+  - 会过滤 rollout / simulation 来源的模拟阳性证据，并把明确否定的定义性检查结果标为 `negative_anchor`，供 A2 排序、repair 和最终评估共用。
   - anchor 必须命中候选疾病自己的 KG evidence payload；仅带有历史 `hypothesis_id` 但没有 payload 匹配的证据不会给该候选加锚点。
   - 当真实会话直接命中候选疾病节点本身时，会按疾病自身强锚点参与 A2 排序，避免被 CD4/HIV 等背景证据压住。
+  - 当前会把候选疾病名和真实证据名压成 `candidate_scope_facets / observed_scope_facets`，用于区分泛疾病、部位特异疾病、IRIS 与播散型疾病；真实证据作用域不足时会写入 `scope_mismatch_score / generic_scope_penalty / missing_scope_facets`。
   - minimum evidence family coverage 只统计 `present + clear` 的已观察证据，`absent / unclear / hedged` 不会补足 coverage。
   - 当前额外计算 `low_cost_supporting_evidence / low_cost_support_families / low_cost_profile_satisfied`：只有 `present + clear`、低成本、非背景、跨多个证据族的线索才会进入 low-cost evidence profile，供没有强检查锚点的诊断路径作为保守放行依据。
 
@@ -118,19 +120,18 @@
   - 当前已经实现论文风格的 `R1 / R2` 双向检索基础版。
   - `R1` 已增加方向语义权重与实体链接相似度融合。
   - `R1` 当前会额外估计 `disease_specific_anchor_score`，让病原体、HIV RNA、关键检查结果等更能区分目标疾病的强证据，压过 CD4/HIV 背景这类共享泛证据。
+  - 强 observed anchor 进入后，`R1` 还会按病原/作用域关键词召回同族 sibling 疾病，避免 CMV、结核、隐球菌等同病原精细诊断因 top-k 太窄缺席 A2。
   - `R2` 已支持方向优先、已问节点过滤与问题类型提示。
 
 - [question_selector.py](/Users/loki/Workspace/GraduationDesign/brain/question_selector.py)
   - 负责对候选提问节点进行排序。
   - 当前已经降级为 `cold-start / no-search` 的 fallback 选择器。
 
-- [stop_rules.py](/Users/loki/Workspace/GraduationDesign/brain/stop_rules.py)
-  - 定义何时可以终止问诊、何时需要停止 rollout、何时接受最终答案。
-  - 当前 `acceptance_profile=anchor_controlled` 已打薄为通用 stop policy：只检查真实 observed anchor、是否存在更强 anchored alternative、clear negative definition evidence、verifier 明确拒绝、轨迹数量与基础分数阈值。
-  - stop rule 不再内置 PCP、呼吸道感染或 minimum evidence family 的医学合同；疾病相关判断前移到 evidence role 排序和 repair/action 选择。
-  - 已有 `strong_anchor / definition_anchor` 时可使用更低的 trajectory 门槛；只有 `background_supported / speculative` 的答案不会被接受为最终结论。
-  - 当前开启 evidence-profile aware 放行：没有强锚点但满足多族低成本真实阳性证据、top answer 连续稳定、无更强 anchored alternative、无 clear negative definition evidence、且 verifier 不是硬拒绝时，可以覆盖 soft verifier reject 并继续通过基础分数阈值。
-  - 结构化 stop gate 优先读取显式 `StopRuleConfig` / [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml)，`BRAIN_ACCEPTANCE_PROFILE` 只覆盖默认 baseline；它不再被 verifier prompt 的 `TRAJECTORY_VERIFIER_ACCEPTANCE_PROFILE` 覆盖。
+- [acceptance_controller.py](/Users/loki/Workspace/GraduationDesign/brain/acceptance_controller.py)
+  - 当前替代历史 `stop_rules.py` 主链路，诊断 completed 只由 verifier-like 信号控制。
+  - 若 `verifier_mode` 是 `llm_verifier` 或 `observed_evidence_final_evaluator`，且 `verifier_should_accept=true`，返回 `final_answer_accepted`。
+  - 若 verifier 明确拒绝，返回 `verifier_rejected_stop`，并保留 `repair_reject_reason / path_control_reason`，让 repair 继续补关键证据。
+  - 不再读取 `BRAIN_ACCEPTANCE_PROFILE`，也不再叠加 turn、trajectory、anchor、consistency、agent_eval、final_score 等结构化 stop 阈值。
 
 - [report_builder.py](/Users/loki/Workspace/GraduationDesign/brain/report_builder.py)
   - 用于生成结构化阶段报告、搜索报告和最终报告。
@@ -145,12 +146,15 @@
   - 当前会先把可信实体链接回填到 `mention.node_id / normalized_name`，再派生 `PatientContext` 和 `A1`，保证 opening 证据、slot 更新、R1 和 mention_context 使用同一图谱锚点。
   - 当前会把 `exam_context` 回答中的检查名与结果原文再次送入实体链接；可信命中 `LabFinding / ImagingFinding / Pathogen` 时直接写入 slot/evidence_state，且不再围绕 `__exam_context__::general` 重复追问。
   - 当前病原体阳性、影像/化验阳性、CD4 低值等强证据进入后，会设置 `force_a2_refresh` 和 `force_tree_refresh`，促使下一步重新执行 A2 并围绕新强证据收束。
-  - 当前会在 A2、repair、stop 前刷新 `observed_anchor_index`，让真实病原体/检查强锚点稳定进入候选排序和拒停原因；rollout 模拟阳性只保留为路径推演，不再污染真实 confirmed evidence。
-  - 当前 repair/action 从“追当前 top hypothesis”转为“补缺失证据角色”：背景证据支撑不足时优先寻找 `disease_specific_anchor / definition_anchor`，已有 provisional anchor 时优先补 clear confirmation，存在更强 anchored alternative 时直接切向该候选。
+  - 当前会在 A2、repair、stop 前刷新 `observed_anchor_index`，让真实病原体/检查强锚点、同族锚点和背景证据分别进入候选排序；rollout 模拟阳性只保留为路径推演，不再污染真实 confirmed evidence。
+  - 当前在证据揭示不足或 top 候选只靠背景支持时，会启用 low-cost explorer，从 top3 候选的 R2 中主动选择患者可直接回答、非背景且有区分度的问题。
+  - 当前 repair/action 从“追当前 top hypothesis”转为“补缺失证据角色”：背景证据支撑不足时优先寻找 `disease_specific_anchor / definition_anchor`，已有 `family_anchor / provisional_anchor` 时优先补 clear confirmation，存在更强 anchored alternative 时直接切向该候选。
+  - 当前会持久化 `repair_feedback_counts`：同一答案连续因为缺少关键支持、缺少真实 anchor 或轨迹不足被拒停时，后续 hypothesis 排序会逐轮增加降权；已有 observed anchor 的备选会获得更明确的 repair 抬分。
   - 当前 verifier / repair 的主控制原因已收敛到 `missing_required_anchor / anchored_alternative_exists / hard_negative_key_evidence`；`strong_unresolved_alternative_candidates` 等细粒度原因继续保存在 metadata 中供复盘和消融使用。
   - 当前 verifier 上下文会携带累计真实会话证据 `observed_session_evidence`，避免把 rollout 模拟路径里的阳性检查当作患者已经确认的事实。
   - 当前会把检查、病原、影像、数值型 detail 的“没做过 / 没听说 / 没注意 / 不记得”统一后处理为 `unclear`；只有“阴性 / 未检出 / 未见异常 / 医生排除”等结果性否定才写成 `absent`。
   - 当 rollout 没有形成具体最终答案、或只形成 `UNKNOWN` 答案组时，当前会从 A2 候选态生成保守 `FinalAnswerScore`，避免 top hypothesis 已存在但 `best_answer=None`。
+  - 当 search/repair 仍没有下一问时，cold-start fallback 会先尝试扩展当前候选下仍可直接回答的低成本 R2 证据；只有没有低成本证据时，才退回全局冷启动问题，并降权 HIV/CD4/年龄等抽象背景探针。
 
 ### 3. 核心解释与决策模块
 
@@ -211,9 +215,11 @@
   - 当前负责按最终答案聚类轨迹，并计算 `consistency / diversity / agent_evaluation`。
   - `diversity` 已从“唯一动作数”升级为基于轨迹相似度的组内平均差异。
   - `agent_evaluation` 当前支持 `fallback` 与可选 `llm_verifier` 两种模式。
-  - 当前 `llm_verifier` 会和 stop rule 的最早接受窗口对齐：如果 `turn_index` 或 `trajectory_count` 还未达到可接受最终答案的最低条件，就先延后 verifier，临时使用 fallback 评分，避免早期 A3 追问每轮都重复触发高成本 verifier。
+  - 当前 `llm_verifier` 的最早调用窗口仍由 `TrajectoryEvaluatorConfig` 控制：如果 `turn_index` 或 `trajectory_count` 还未达到配置窗口，就先延后 verifier，临时使用 fallback 评分，避免早期 A3 追问每轮都重复触发高成本 verifier。
   - 当前 `trajectory_agent_verifier` 会显式区分 `observed_session_evidence` 与 `simulated_trajectory_evidence`；若接受理由只依赖 rollout 模拟阳性强证据、真实会话没有当前答案的特异支持，会被二次 guard 改为 `missing_key_support` 拒停。
-  - 当前支持 `score_candidate_hypotheses_without_trajectories()`，用于在轨迹聚合断层时把现有候选疾病转成低分、不可直接停机的 answer score，供 repair / 下一问继续使用。
+  - 当前 LLM verifier 接受后还会经过 deterministic scope guard；若答案粒度与真实证据作用域不一致，会改为 `strong_alternative_not_ruled_out` 并把缺失作用域写入推荐补证据。
+  - 当前 trajectory 聚合会读取 `observed_anchor_index`，把 exact/family observed anchor 转成 `observed_anchor_agent_bonus`，并对“只有 rollout 模拟关键阳性、没有真实 anchor”的答案施加 `simulated_key_evidence_penalty`。
+  - 当前支持 `score_candidate_hypotheses_without_trajectories()`，用于在轨迹聚合断层时把现有候选疾病转成 answer score；该 fallback 会运行 observed-evidence final evaluator，接受结果会直接交给 `VerifierAcceptanceController`。
 
 ### 5. 辅助文件
 
@@ -231,7 +237,7 @@
 - A1/A2/A3 与 `pending action interpretation` 的第一批模块已建立
 - UCT、局部 simulation 和轨迹评分都已接成默认主路径
 - `service.py` 已经能够跑通多次 rollout 的最小搜索闭环
-- 已清理仓库内无引用的历史兼容接口与残留辅助函数，当前 `service / retriever / evidence_parser / stop_rules / normalization` 默认只保留主链路仍在消费的入口
+- 已清理仓库内无引用的历史兼容接口与残留辅助函数，当前 `service / retriever / evidence_parser / acceptance_controller / normalization` 默认只保留主链路仍在消费的入口
 - 但还没有完全复现论文中的更深 rollout、完整 verifier 和最终轨迹判别器
 
 也就是说，当前目录已经从“空脚手架”进入“可持续填充核心逻辑”的阶段。
@@ -239,7 +245,7 @@
 补充说明：
 
 - 当前 `brain/` 中较长或较复杂的函数，已经统一补充了函数内部关键步骤前的中文块级注释。
-- 这些注释重点解释“当前阶段在做什么、为什么这样分支、状态写回到哪里”，方便按调用链阅读 `service / retriever / evidence_parser / simulation_engine / stop_rules` 等核心模块。
+- 这些注释重点解释“当前阶段在做什么、为什么这样分支、状态写回到哪里”，方便按调用链阅读 `service / retriever / evidence_parser / simulation_engine / acceptance_controller` 等核心模块。
 
 ## 与 Med-MCTS 论文的对齐状态
 

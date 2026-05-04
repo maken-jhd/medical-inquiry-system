@@ -24,9 +24,13 @@ class BenchmarkSummary:
     average_revealed_slots: float
     hypothesis_hit_count: int
     hypothesis_hit_rate: float
+    top3_hypothesis_hit_count: int
+    top3_hypothesis_hit_rate: float
     final_answer_count: int
     final_answer_exact_hit_count: int
     final_answer_exact_hit_rate: float
+    top1_final_answer_hit_count: int
+    top1_final_answer_hit_rate: float
     final_answer_family_hit_count: int
     final_answer_family_hit_rate: float
     accepted_final_answer_count: int
@@ -58,9 +62,13 @@ def summarize_benchmark(results: Iterable[ReplayResult]) -> BenchmarkSummary:
             average_revealed_slots=0.0,
             hypothesis_hit_count=0,
             hypothesis_hit_rate=0.0,
+            top3_hypothesis_hit_count=0,
+            top3_hypothesis_hit_rate=0.0,
             final_answer_count=0,
             final_answer_exact_hit_count=0,
             final_answer_exact_hit_rate=0.0,
+            top1_final_answer_hit_count=0,
+            top1_final_answer_hit_rate=0.0,
             final_answer_family_hit_count=0,
             final_answer_family_hit_rate=0.0,
             accepted_final_answer_count=0,
@@ -83,8 +91,10 @@ def summarize_benchmark(results: Iterable[ReplayResult]) -> BenchmarkSummary:
     total_turns = sum(len(item.turns) for item in results_list)
     total_revealed_slots = sum(_count_revealed_slots(item) for item in results_list)
     hypothesis_hit_count = sum(1 for item in results_list if _is_hypothesis_hit(item))
+    top3_hypothesis_hit_count = sum(1 for item in results_list if _is_top3_hypothesis_hit(item))
     final_answer_count = sum(1 for item in results_list if len(_extract_final_answer_name(item)) > 0)
     final_answer_exact_hit_count = sum(1 for item in results_list if _is_final_answer_exact_hit(item))
+    top1_final_answer_hit_count = final_answer_exact_hit_count
     final_answer_family_hit_count = sum(1 for item in results_list if _is_final_answer_family_hit(item))
     accepted_results = [item for item in results_list if _is_final_answer_accepted(item)]
     accepted_final_answer_count = len(accepted_results)
@@ -116,9 +126,13 @@ def summarize_benchmark(results: Iterable[ReplayResult]) -> BenchmarkSummary:
         average_revealed_slots=total_revealed_slots / case_count,
         hypothesis_hit_count=hypothesis_hit_count,
         hypothesis_hit_rate=hypothesis_hit_count / case_count,
+        top3_hypothesis_hit_count=top3_hypothesis_hit_count,
+        top3_hypothesis_hit_rate=top3_hypothesis_hit_count / case_count,
         final_answer_count=final_answer_count,
         final_answer_exact_hit_count=final_answer_exact_hit_count,
         final_answer_exact_hit_rate=final_answer_exact_hit_count / case_count,
+        top1_final_answer_hit_count=top1_final_answer_hit_count,
+        top1_final_answer_hit_rate=top1_final_answer_hit_count / case_count,
         final_answer_family_hit_count=final_answer_family_hit_count,
         final_answer_family_hit_rate=final_answer_family_hit_count / case_count,
         accepted_final_answer_count=accepted_final_answer_count,
@@ -185,6 +199,19 @@ def _is_hypothesis_hit(result: ReplayResult) -> bool:
     report = result.final_report or {}
     candidate_hypotheses = report.get("candidate_hypotheses", [])
     predicted_names = [str(item.get("name", "")) for item in candidate_hypotheses]
+    return _matches_expected_name_list(predicted_names, result, match_mode="family")
+
+
+# 判断真实答案是否进入最终候选前三名。
+def _is_top3_hypothesis_hit(result: ReplayResult) -> bool:
+    report = result.final_report or {}
+    candidate_hypotheses = report.get("candidate_hypotheses", [])
+    predicted_names = [str(item.get("name", "")) for item in candidate_hypotheses[:3]]
+    return _matches_expected_name_list(predicted_names, result, match_mode="family")
+
+
+# 判断候选名称列表里是否包含病例真实条件或阶段。
+def _matches_expected_name_list(predicted_names: list[str], result: ReplayResult, *, match_mode: str) -> bool:
     expected_targets = list(result.true_conditions)
 
     if result.true_disease_phase is not None:
@@ -195,7 +222,7 @@ def _is_hypothesis_hit(result: ReplayResult) -> bool:
 
     for expected in normalized_expected:
         for predicted in normalized_predictions:
-            if _is_name_match(predicted, expected, match_mode="family"):
+            if _is_name_match(predicted, expected, match_mode=match_mode):
                 return True
 
     return False
@@ -340,6 +367,8 @@ def _build_non_completed_case_record(result: ReplayResult) -> dict:
         "final_answer_name": answer_name,
         "final_answer_exact_hit": _is_final_answer_exact_hit(result),
         "final_answer_family_hit": _is_final_answer_family_hit(result),
+        "top1_final_answer_hit": _is_final_answer_exact_hit(result),
+        "top3_hypothesis_hit": _is_top3_hypothesis_hit(result),
         "hypothesis_hit": _is_hypothesis_hit(result),
         "stop_reason": str(report.get("stop_reason") or ""),
         "turn_count": len(result.turns),

@@ -11,9 +11,10 @@ import yaml
 
 from .action_builder import ActionBuilder, ActionBuilderConfig
 from .entity_linker import EntityLinker, EntityLinkerConfig
+from .acceptance_controller import VerifierAcceptanceController
 from .evidence_anchor import EvidenceAnchorAnalyzer
 from .evidence_parser import EvidenceParser, EvidenceParserConfig
-from .errors import LlmUnavailableError
+from .errors import LlmEmptyExtractionError, LlmUnavailableError
 from .hypothesis_manager import HypothesisManager, HypothesisManagerConfig
 from .llm_client import LlmClient
 from .mcts_engine import MctsConfig, MctsEngine
@@ -26,7 +27,6 @@ from .router import ReasoningRouter, RouterConfig
 from .search_tree import SearchTree
 from .simulation_engine import SimulationConfig, SimulationEngine
 from .state_tracker import StateTracker
-from .stop_rules import StopRuleConfig, StopRuleEngine
 from .trajectory_evaluator import TrajectoryEvaluator, TrajectoryEvaluatorConfig
 from .types import (
     A1ExtractionResult,
@@ -44,6 +44,7 @@ from .types import (
     PatientContext,
     PendingActionDecision,
     PendingActionResult,
+    QuestionCandidate,
     ReasoningTrajectory,
     SearchResult,
     SessionState,
@@ -83,7 +84,7 @@ class BrainDependencies:
     med_extractor: MedExtractor | None = None
     entity_linker: EntityLinker | None = None
     question_selector: QuestionSelector | None = None
-    stop_rule_engine: StopRuleEngine | None = None
+    acceptance_controller: VerifierAcceptanceController | None = None
     report_builder: ReportBuilder | None = None
     evidence_parser: EvidenceParser | None = None
     hypothesis_manager: HypothesisManager | None = None
@@ -119,8 +120,8 @@ class ConsultationBrain:
             deps.entity_linker = EntityLinker(deps.retriever.client)
         if deps.question_selector is None:
             deps.question_selector = QuestionSelector()
-        if deps.stop_rule_engine is None:
-            deps.stop_rule_engine = StopRuleEngine()
+        if deps.acceptance_controller is None:
+            deps.acceptance_controller = VerifierAcceptanceController()
         if deps.report_builder is None:
             deps.report_builder = ReportBuilder()
         if deps.evidence_parser is None:
@@ -152,10 +153,10 @@ class ConsultationBrain:
 
         if isinstance(search_result, SearchResult):
             best_answer_score = self.deps.trajectory_evaluator.select_best_answer(search_result.final_answer_scores)
-            accept_decision = self.deps.stop_rule_engine.should_accept_final_answer(best_answer_score, state)
+            accept_decision = self.deps.acceptance_controller.should_accept_final_answer(best_answer_score, state)
             return self.deps.report_builder.build_final_reasoning_report(state, accept_decision, search_result)
 
-        stop_decision = self.deps.stop_rule_engine.check_sufficiency(state, state.candidate_hypotheses)
+        stop_decision = StopDecision(False, "verifier_not_ready")
         return self.deps.report_builder.build_final_report(state, stop_decision)
 
     def _prepare_turn_mentions(
@@ -1561,6 +1562,22 @@ class ConsultationBrain:
             patient_context,
             state,
         )
+        observed_anchor_candidates = []
+        if hasattr(self.deps.retriever, "retrieve_observed_anchor_candidates"):
+            try:
+                observed_anchor_candidates = self.deps.retriever.retrieve_observed_anchor_candidates(state)
+            except Exception:
+                observed_anchor_candidates = []
+        scope_sibling_candidates = []
+        if hasattr(self.deps.retriever, "retrieve_scope_sibling_candidates"):
+            try:
+                scope_sibling_candidates = self.deps.retriever.retrieve_scope_sibling_candidates(state)
+            except Exception:
+                scope_sibling_candidates = []
+        candidates = self._merge_hypothesis_candidate_pools(
+            candidates,
+            [*observed_anchor_candidates, *scope_sibling_candidates],
+        )
         a2_result = self.deps.hypothesis_manager.run_a2_hypothesis_generation(patient_context, candidates)
         if len(force_reason) > 0:
             a2_result.metadata.update(
@@ -1576,6 +1593,14 @@ class ConsultationBrain:
             score_candidates.append(a2_result.primary_hypothesis)
 
         score_candidates.extend(a2_result.alternatives)
+        ranked_candidates = sorted(
+            candidates,
+            key=lambda item: (-float(item.score), item.name),
+        )
+        for candidate in ranked_candidates[: max(self.deps.hypothesis_manager.config.expand_top_k_hypotheses, 5)]:
+            if any(item.node_id == candidate.node_id for item in score_candidates):
+                continue
+            score_candidates.append(candidate)
         scores = self.deps.hypothesis_manager.build_hypothesis_scores(score_candidates)
         scores = self._apply_observed_anchor_rerank_to_scores(session_id, scores)
         tracker.set_candidate_hypotheses(session_id, scores)
@@ -1588,6 +1613,22 @@ class ConsultationBrain:
             a2_result.metadata["observed_anchor_rerank_applied"] = True
         return a2_result
 
+    # 合并 R1 原始候选与 observed anchor rescue 候选，避免真值疾病因 top-k 太窄而掉出候选池。
+    def _merge_hypothesis_candidate_pools(
+        self,
+        primary_candidates: Sequence[HypothesisCandidate],
+        rescue_candidates: Sequence[HypothesisCandidate],
+    ) -> list[HypothesisCandidate]:
+        merged: dict[str, HypothesisCandidate] = {}
+
+        for candidate in list(primary_candidates) + list(rescue_candidates):
+            existing = merged.get(candidate.node_id)
+            if existing is None or float(candidate.score) > float(existing.score):
+                merged[candidate.node_id] = candidate
+
+        ranked = sorted(merged.values(), key=lambda item: (-float(item.score), item.name))
+        return ranked
+
     # 用真实会话证据刷新候选诊断的 anchor metadata 与排序。
     def _apply_observed_anchor_rerank(self, session_id: str) -> list[HypothesisScore]:
         state = self.deps.state_tracker.get_session(session_id)
@@ -1597,6 +1638,7 @@ class ConsultationBrain:
                 "observed_evidence": [],
                 "candidate_anchor_summary": [],
                 "strong_anchor_candidates": [],
+                "family_anchor_candidates": [],
                 "anchored_candidate_ids": [],
             }
             return []
@@ -2107,6 +2149,7 @@ class ConsultationBrain:
                 **dict(latest_context.metadata),
                 "context_scope": "cumulative_session_for_verifier",
                 "observed_session_evidence": observed_session_evidence,
+                "observed_anchor_index": dict(state.metadata.get("observed_anchor_index", {})),
             },
         )
 
@@ -2116,15 +2159,8 @@ class ConsultationBrain:
             return search_result.selected_action
 
         state = self.deps.state_tracker.get_session(session_id)
-        cold_candidate = self.deps.question_selector.select_next_question(
-            self.deps.retriever.get_cold_start_questions(),
-            state,
-        )
-
-        if cold_candidate is None:
-            return None
-
-        return self.deps.action_builder.build_probe_action_from_question_candidate(cold_candidate)
+        _ = state
+        return self._choose_cold_start_probe_action(session_id)
 
     # 根据搜索结果和终止规则生成最终可展示的推理报告。
     def finalize_from_search(
@@ -2134,7 +2170,7 @@ class ConsultationBrain:
     ) -> dict:
         state = self.deps.state_tracker.get_session(session_id)
         best_answer_score = self.deps.trajectory_evaluator.select_best_answer(search_result.final_answer_scores)
-        accept_decision = self.deps.stop_rule_engine.should_accept_final_answer(best_answer_score, state)
+        accept_decision = self.deps.acceptance_controller.should_accept_final_answer(best_answer_score, state)
         return self.deps.report_builder.build_final_reasoning_report(state, accept_decision, search_result)
 
     # 处理单轮患者输入，并输出当前下一问或最终报告。
@@ -2145,7 +2181,20 @@ class ConsultationBrain:
         turn_index = tracker.increment_turn(session_id)
         pending_action = tracker.get_pending_action(session_id)
         known_feature_names = self._collect_known_feature_names(session_id)
-        turn_result = self.deps.evidence_parser.interpret_turn(patient_text, pending_action=pending_action)
+        try:
+            turn_result = self.deps.evidence_parser.interpret_turn(patient_text, pending_action=pending_action)
+        except LlmEmptyExtractionError as exc:
+            # qwen3.5-flash 偶尔会对“症状轻微，来问问”这类稀疏开场返回空 mentions；
+            # 这里不把病例判 failed，而是退回冷启动/unclear 路径，让系统继续问主诉。
+            turn_result = TurnInterpretationResult(
+                mentions=[],
+                reasoning="统一提及抽取器未抽取到稳定医学提及项，进入冷启动兜底。",
+                metadata={
+                    "source": "empty_extraction_fallback",
+                    "empty_extraction_fallback": True,
+                    "empty_extraction_error": exc.to_dict(),
+                },
+            )
         # 高成本检查、病原和测量型 detail 的“没做过/没听说”不是结果阴性；
         # 在统一 mentions 写入状态前先改回 unclear，避免形成 hard negative。
         self._normalize_no_result_mentions_for_pending_action(turn_result, pending_action, patient_text)
@@ -2260,15 +2309,7 @@ class ConsultationBrain:
         elif effective_stage == "FALLBACK":
             # fail_count 或 route 已要求降级时，不再依赖 hypothesis/search，
             # 直接用全局冷启动问题做一轮兜底探测。
-            fallback_candidate = self.deps.question_selector.select_next_question(
-                self.deps.retriever.get_cold_start_questions(),
-                tracker.get_session(session_id),
-            )
-            selected_action = (
-                self.deps.action_builder.build_probe_action_from_question_candidate(fallback_candidate)
-                if fallback_candidate is not None
-                else None
-            )
+            selected_action = self._choose_cold_start_probe_action(session_id)
         else:
             # 常规主路径：需要时刷新 A2；若已有候选诊断，则进入 A3 的局部树搜索。
             should_run_a2 = self._should_refresh_a2(
@@ -2291,14 +2332,11 @@ class ConsultationBrain:
                 search_result = self.run_reasoning_search(session_id, patient_context)
                 default_search_action = self.choose_next_question_from_search(session_id, search_result)
 
-        # search 结束后不直接发问，先经过 stop rule、trajectory 聚合、verifier 与 repair。
-        # `check_sufficiency()` 更像传统启发式 stop：只看 hypothesis 分数和 margin，成本低但不够严格。
-        stop_decision = self.deps.stop_rule_engine.check_sufficiency(
-            tracker.get_session(session_id),
-            tracker.get_session(session_id).candidate_hypotheses,
-        )
+        # search 结束后不再经过结构化 stop rule；
+        # 诊断接受只看 trajectory evaluator 里的 verifier / observed final evaluator 信号。
+        stop_decision = StopDecision(False, "verifier_not_ready")
         if forced_stop_decision is not None:
-            # 特殊 stop（如 repeated chief complaint）优先级更高，显式覆盖常规 sufficiency stop。
+            # 特殊阶段性停止（如 repeated chief complaint）仍可覆盖默认继续状态。
             stop_decision = forced_stop_decision
 
         # `best_answer_score` 来自 trajectory 分组聚合，是 search 路径层面的“当前最优答案”。
@@ -2306,9 +2344,12 @@ class ConsultationBrain:
         if len(tracker.get_session(session_id).candidate_hypotheses) > 0:
             self._apply_observed_anchor_rerank(session_id)
 
-        # `should_accept_final_answer()` 才是真正的“全局能不能停”闸门；
-        # 它会综合 turn_index、trajectory_count、verifier、guarded gate 等条件。
-        accept_decision = self.deps.stop_rule_engine.should_accept_final_answer(best_answer_score, tracker.get_session(session_id))
+        # `should_accept_final_answer()` 现在只消费 verifier / observed-evidence final evaluator；
+        # verifier 拒绝时继续进入 repair，verifier 接受时输出 completed。
+        accept_decision = self.deps.acceptance_controller.should_accept_final_answer(
+            best_answer_score,
+            tracker.get_session(session_id),
+        )
 
         # 如果 verifier/guarded gate 认为“现在还不能停”，这里会提炼出 repair 原因与下一步补证据信号。
         repair_context = self._build_verifier_repair_context(
@@ -2331,6 +2372,9 @@ class ConsultationBrain:
         elif default_search_action is not None:
             # verifier 没有拦截时，沿用 search 默认动作即可。
             selected_action = default_search_action
+
+        if not accept_decision.should_stop:
+            selected_action = self._choose_low_cost_explorer_action(session_id, search_result, selected_action)
 
         # 若 search 没选出动作，再尝试阶段性停止；仍不能停时，最后退回冷启动探针问题。
         if selected_action is None and not accept_decision.should_stop:
@@ -2881,13 +2925,13 @@ class ConsultationBrain:
             return None
 
         metadata = dict(best_answer_score.metadata)
-        anchor_blocked = accept_decision.reason == "anchor_controlled_rejected"
 
-        # 只有 llm_verifier 明确拒停，或结构化 gate 挡下 verifier 的“可停”建议时，才进入 repair。
-        if metadata.get("verifier_mode") != "llm_verifier" and not anchor_blocked:
+        # 只有 verifier / observed final evaluator 明确拒停时才进入 repair；
+        # stop rule 已从主链路移除，不再用额外 gate 生成 repair 原因。
+        if metadata.get("verifier_mode") not in {"llm_verifier", "observed_evidence_final_evaluator"}:
             return None
 
-        if bool(metadata.get("verifier_should_accept", True)) and not anchor_blocked:
+        if bool(metadata.get("verifier_should_accept", True)):
             return None
 
         state = self.deps.state_tracker.get_session(session_id)
@@ -2899,13 +2943,10 @@ class ConsultationBrain:
             or str(metadata.get("verifier_reject_reason", "")).strip()
             or "missing_key_support"
         )
-        path_control_reason = (
-            str(accept_decision.metadata.get("path_control_reason", "")).strip()
-            or str(accept_decision.metadata.get("anchor_controlled_block_reason", "")).strip()
-        )
+        path_control_reason = str(accept_decision.metadata.get("path_control_reason", "")).strip()
         current_hypothesis = self._find_hypothesis_by_id(state.candidate_hypotheses, search_result.best_answer_id)
         recommended_next_evidence = self._normalize_string_list(metadata.get("verifier_recommended_next_evidence", []))
-        anchor_answer_features = accept_decision.metadata.get("anchor_answer_features", {})
+        anchor_answer_features = metadata.get("anchor_answer_features", {})
         missing_evidence_roles = self._missing_repair_roles_from_anchor_features(anchor_answer_features)
 
         # 当前 hypothesis 自己可能已经带有 recommended_next_evidence；
@@ -2918,7 +2959,7 @@ class ConsultationBrain:
 
         alternative_candidates = self._normalize_alternative_candidates(metadata.get("verifier_alternative_candidates", []))
         anchor_alternatives = self._normalize_alternative_candidates(
-            accept_decision.metadata.get("anchor_stronger_alternative_candidates", [])
+            metadata.get("anchor_stronger_alternative_candidates", [])
         )
 
         # anchor gate 若发现真实强锚点属于其他候选，repair 主目标直接切到该候选。
@@ -2948,10 +2989,6 @@ class ConsultationBrain:
             "verifier_reasoning": str(metadata.get("verifier_reasoning", "")),
             "verifier_reject_reason_source": str(metadata.get("verifier_reject_reason_source", "")),
             "verifier_schema_valid": bool(metadata.get("verifier_schema_valid", False)),
-            "anchor_controlled_blocked": anchor_blocked,
-            "anchor_controlled_block_reason": str(
-                accept_decision.metadata.get("anchor_controlled_block_reason") or ""
-            ),
             "anchor_answer_features": anchor_answer_features,
             "anchor_stronger_alternative_candidates": anchor_alternatives,
             "missing_evidence_roles": missing_evidence_roles,
@@ -2967,6 +3004,7 @@ class ConsultationBrain:
         state = self.deps.state_tracker.get_session(session_id)
         current_top_hypothesis_id = self._get_top_hypothesis_id(state)
         reject_reason = str(repair_context.get("reject_reason", "missing_key_support"))
+        repair_feedback_counts = self._update_repair_feedback_counts(state, repair_context)
 
         if bool(self.deps.repair_policy.enable_verifier_hypothesis_reshuffle) and len(state.candidate_hypotheses) > 0:
             updated = self.deps.hypothesis_manager.apply_verifier_repair(
@@ -2975,6 +3013,7 @@ class ConsultationBrain:
                 reject_reason=reject_reason,
                 recommended_next_evidence=self._normalize_string_list(repair_context.get("recommended_next_evidence", [])),
                 alternative_candidates=self._normalize_alternative_candidates(repair_context.get("alternative_candidates", [])),
+                repair_feedback_counts=repair_feedback_counts,
             )
             self.deps.state_tracker.set_candidate_hypotheses(session_id, updated)
 
@@ -2989,6 +3028,35 @@ class ConsultationBrain:
             refreshed_state.metadata["tree_refresh_reason"] = "top_hypothesis_changed_after_verifier"
         else:
             refreshed_state.metadata["tree_refresh_reason"] = f"verifier_reject::{reject_reason}"
+
+    # 把 repair 拒停原因按答案持久化，连续缺同一类关键支持时后续排序会逐轮降权。
+    def _update_repair_feedback_counts(self, state: SessionState, repair_context: dict) -> dict:
+        counts: dict[str, dict[str, int]] = {}
+        existing = state.metadata.get("repair_feedback_counts", {})
+
+        if isinstance(existing, dict):
+            for key, value in existing.items():
+                if isinstance(value, dict):
+                    counts[str(key)] = {str(reason): int(count or 0) for reason, count in value.items()}
+
+        reject_reason = str(repair_context.get("reject_reason") or "missing_key_support")
+        current_answer_id = str(repair_context.get("current_answer_id") or self._get_top_hypothesis_id(state) or "")
+        tracked_reasons = {
+            "missing_key_support",
+            "missing_required_anchor",
+            "insufficient_evidence_family_coverage",
+            "trajectory_insufficient",
+        }
+
+        if len(current_answer_id) > 0 and reject_reason in tracked_reasons:
+            by_reason = dict(counts.get(current_answer_id, {}))
+            by_reason[reject_reason] = int(by_reason.get(reject_reason, 0) or 0) + 1
+            counts[current_answer_id] = by_reason
+            repair_context["current_answer_repair_feedback_count"] = by_reason[reject_reason]
+
+        repair_context["repair_feedback_counts"] = counts
+        state.metadata["repair_feedback_counts"] = counts
+        return counts
 
     # 在 verifier 拒停之后，显式选择修补证据缺口能力更强的下一问。
     def _choose_repair_action(
@@ -3220,6 +3288,7 @@ class ConsultationBrain:
         verifier_recommended_match_score = float(action.metadata.get("verifier_recommended_match_score", 0.0))
         hypothesis_recommended_match_score = float(action.metadata.get("hypothesis_recommended_match_score", 0.0))
         joint_recommended_match_score = float(action.metadata.get("joint_recommended_match_score", 0.0))
+        answerability_score = float(action.metadata.get("answerability_score", 0.0))
         alternative_overlap = float(action.metadata.get("alternative_overlap", 0.0))
         patient_burden = float(action.metadata.get("patient_burden", 0.0))
         repair_cost_bias = self._repair_cost_bias(action)
@@ -3289,6 +3358,7 @@ class ConsultationBrain:
                 + verifier_recommended_match_score * 2.1
                 + hypothesis_recommended_match_score * 1.0
                 + recommended_bonus * 2.4
+                + answerability_score * 1.1
                 + role_priority * 2.35
                 + role_gap_bonus
                 + repair_cost_bias
@@ -3319,6 +3389,7 @@ class ConsultationBrain:
                 + alternative_hypothesis_bonus
                 + competition_role_bonus
                 + role_priority * 1.4
+                + answerability_score * 0.85
                 + repair_cost_bias
                 + family_diversity_bonus * 0.75
                 - same_type_penalty * 0.35
@@ -3333,6 +3404,7 @@ class ConsultationBrain:
             + novelty_score * 2.15
             + type_diversity_bonus * 2.1
             + family_diversity_bonus * 1.75
+            + answerability_score * 0.65
             + role_priority * 1.25
             + role_gap_bonus
             + repair_cost_bias
@@ -3369,6 +3441,8 @@ class ConsultationBrain:
         anchor_tier = str(anchor_features.get("anchor_tier") or "")
         if anchor_tier == "provisional_anchor":
             return ["clear_confirmation"]
+        if anchor_tier == "family_anchor":
+            return ["disease_specific_anchor", "definition_anchor", "clear_confirmation"]
         if anchor_tier in {"background_supported", "speculative", ""}:
             return ["disease_specific_anchor", "definition_anchor"]
         if anchor_tier == "negative_anchor":
@@ -3415,6 +3489,7 @@ class ConsultationBrain:
         return {
             "disease_specific_anchor": 1.0,
             "definition_anchor": 0.92,
+            "family_anchor": 0.72,
             "phenotype_support": 0.48,
             "risk_or_comorbidity": 0.28,
             "background_context": 0.0,
@@ -3711,15 +3786,135 @@ class ConsultationBrain:
     # 当输入线索过少导致 A2/A3 暂无候选动作时，退回全局冷启动问题，避免会话空转。
     def _choose_cold_start_probe_action(self, session_id: str) -> MctsAction | None:
         state = self.deps.state_tracker.get_session(session_id)
-        fallback_candidate = self.deps.question_selector.select_next_question(
+        low_cost_rows = self._collect_remaining_low_cost_r2_candidates(state)
+
+        # 如果已经有候选诊断，优先扩展这些候选下仍可直接询问的低成本证据；
+        # 只有没有这类证据时，才退回全局 cold-start 问题。
+        if len(low_cost_rows) > 0:
+            r2_candidates = [self._question_candidate_from_r2_row(row) for row in low_cost_rows]
+            fallback_candidate = self._select_cold_start_question_candidate(
+                [item for item in r2_candidates if item is not None],
+                state,
+                source="r2_low_cost_expansion",
+            )
+
+            if fallback_candidate is not None:
+                action = self.deps.action_builder.build_probe_action_from_question_candidate(fallback_candidate)
+                action.metadata["cold_start_source"] = "r2_low_cost_expansion"
+                return action
+
+        fallback_candidate = self._select_cold_start_question_candidate(
             self.deps.retriever.get_cold_start_questions(),
             state,
+            source="global_cold_start",
         )
 
         if fallback_candidate is None:
             return None
 
-        return self.deps.action_builder.build_probe_action_from_question_candidate(fallback_candidate)
+        action = self.deps.action_builder.build_probe_action_from_question_candidate(fallback_candidate)
+        action.metadata["cold_start_source"] = "global_cold_start"
+        return action
+
+    # 将 R2 row 临时包装成 probe candidate，让 cold-start fallback 可以优先继续追问低成本可观测证据。
+    def _question_candidate_from_r2_row(self, row: dict) -> QuestionCandidate | None:
+        node_id = str(row.get("node_id") or "").strip()
+
+        if len(node_id) == 0:
+            return None
+
+        return QuestionCandidate(
+            node_id=node_id,
+            label=str(row.get("label") or "ClinicalFinding"),
+            name=str(row.get("name") or node_id),
+            topic_id=str(row.get("topic_id") or row.get("label") or ""),
+            priority=float(row.get("priority", 0.0) or 0.0),
+            graph_weight=float(row.get("node_weight", 0.0) or 0.0),
+            information_gain=float(row.get("contradiction_priority", 0.0) or 0.0),
+            red_flag_score=1.0 if bool(row.get("is_red_flag", False)) else 0.0,
+            metadata={
+                "relation_type": row.get("relation_type"),
+                "question_type_hint": row.get("question_type_hint"),
+                "acquisition_mode": row.get("acquisition_mode", "direct_ask"),
+                "evidence_cost": row.get("evidence_cost", "low"),
+                "cold_start_source": "r2_low_cost_expansion",
+            },
+        )
+
+    # cold-start 选择时显式降权 HIV/CD4/年龄等背景探针，除非它们是唯一还能问的问题。
+    def _select_cold_start_question_candidate(
+        self,
+        candidates: Iterable[QuestionCandidate],
+        state: SessionState,
+        *,
+        source: str,
+    ) -> QuestionCandidate | None:
+        values = [item for item in candidates if item.node_id not in state.asked_node_ids]
+
+        if len(values) == 0:
+            return None
+
+        has_non_background = any(not self._is_background_probe_candidate(item) for item in values)
+        ranked = sorted(
+            values,
+            key=lambda item: (
+                -self._cold_start_probe_score(item, state, source=source, has_non_background=has_non_background),
+                item.name,
+            ),
+        )
+        return ranked[0]
+
+    # cold-start 的分数只负责兜底问法，不替代 A2/A3 的正式排序。
+    def _cold_start_probe_score(
+        self,
+        candidate: QuestionCandidate,
+        state: SessionState,
+        *,
+        source: str,
+        has_non_background: bool,
+    ) -> float:
+        score_candidate = getattr(self.deps.question_selector, "score_candidate", None)
+
+        if callable(score_candidate):
+            score = float(score_candidate(candidate, state))
+        else:
+            score = (
+                float(candidate.priority)
+                + float(candidate.graph_weight)
+                + float(candidate.information_gain) * 1.5
+                + float(candidate.red_flag_score) * 2.0
+            )
+
+        if source == "r2_low_cost_expansion":
+            score += 2.2
+
+        if candidate.label == "ClinicalFinding":
+            score += 0.35
+
+        if candidate.label in {"RiskFactor", "PopulationGroup"} and len(state.candidate_hypotheses) > 0:
+            score -= 0.35
+
+        if self._is_background_probe_candidate(candidate):
+            score -= 2.4 if has_non_background else 0.35
+
+        return score
+
+    def _is_background_probe_candidate(self, candidate: QuestionCandidate) -> bool:
+        text = self._normalize_match_text(" ".join([candidate.name, candidate.label, str(candidate.metadata.get("question_type_hint", ""))]))
+        return any(
+            keyword in text
+            for keyword in (
+                "hiv",
+                "艾滋",
+                "cd4",
+                "t淋巴",
+                "免疫",
+                "年龄",
+                "性别",
+                "发热",
+                "既往病史",
+            )
+        )
 
     # 当相关高成本检查明确未做、且当前已无可观测低成本问题时，输出阶段性判断而不是空转。
     def _build_exam_limited_stage_stop_decision(self, session_id: str) -> StopDecision | None:
@@ -3748,6 +3943,156 @@ class ConsultationBrain:
                 "candidate_hypothesis_ids": [item.node_id for item in state.candidate_hypotheses[:3]],
                 "message": "相关检查尚未完成，且当前没有高价值、低成本的可继续追问证据，输出阶段性判断。",
             },
+        )
+
+    # 在证据揭示不足时，主动从 top3 候选里找低成本且有区分度的问题。
+    def _choose_low_cost_explorer_action(
+        self,
+        session_id: str,
+        search_result: SearchResult,
+        selected_action: MctsAction | None,
+    ) -> MctsAction | None:
+        state = self.deps.state_tracker.get_session(session_id)
+
+        if not self._should_use_low_cost_explorer(state, selected_action):
+            return selected_action
+
+        candidates: list[MctsAction] = []
+        ranked_hypotheses = sorted(state.candidate_hypotheses, key=lambda item: (-item.score, item.name))[:3]
+
+        for hypothesis in ranked_hypotheses:
+            try:
+                rows = self.deps.retriever.retrieve_r2_expected_evidence(hypothesis, state, top_k=12)
+            except TypeError:
+                rows = self.deps.retriever.retrieve_r2_expected_evidence(hypothesis, state)
+            except Exception:
+                continue
+
+            alternatives = [item for item in ranked_hypotheses if item.node_id != hypothesis.node_id]
+            for action in self.deps.action_builder.build_verification_actions(
+                rows,
+                hypothesis_id=hypothesis.node_id,
+                topic_id=hypothesis.label,
+                competing_hypotheses=alternatives,
+                current_hypothesis=hypothesis,
+                session_state=state,
+            ):
+                if not self._is_low_cost_observable_action(action):
+                    continue
+                if not self._selected_action_is_askable(session_id, action):
+                    continue
+                candidates.append(action)
+
+        if len(candidates) == 0:
+            return selected_action
+
+        recent_evidence_tags = self._get_recent_evidence_tags(state)
+        ranked_actions = sorted(
+            candidates,
+            key=lambda item: (
+                -self._score_low_cost_explorer_action(item, recent_evidence_tags=recent_evidence_tags),
+                -item.prior_score,
+                item.target_node_name,
+            ),
+        )
+        best_action = ranked_actions[0]
+        best_score = self._score_low_cost_explorer_action(best_action, recent_evidence_tags=recent_evidence_tags)
+        current_score = (
+            self._score_low_cost_explorer_action(selected_action, recent_evidence_tags=recent_evidence_tags)
+            if self._is_low_cost_observable_action(selected_action)
+            else -1.0
+        )
+
+        if selected_action is not None and current_score >= best_score - 0.2:
+            return selected_action
+
+        best_action.metadata = {
+            **dict(best_action.metadata),
+            "selected_by_low_cost_explorer": True,
+            "low_cost_explorer_score": round(best_score, 4),
+        }
+        search_result.metadata["low_cost_explorer_selected_action"] = asdict(best_action)
+        return best_action
+
+    def _should_use_low_cost_explorer(self, state: SessionState, selected_action: MctsAction | None) -> bool:
+        if len(state.candidate_hypotheses) == 0:
+            return False
+
+        if selected_action is not None and bool(selected_action.metadata.get("exam_context_followup", False)):
+            return False
+
+        revealed_count = self._observed_present_clear_count(state)
+        if revealed_count < 3:
+            return True
+
+        top = sorted(state.candidate_hypotheses, key=lambda item: (-item.score, item.name))[0]
+        anchor_tier = str(top.metadata.get("anchor_tier") or "")
+        exact_anchor_score = float(top.metadata.get("exact_scope_anchor_score", 0.0) or 0.0)
+        background_score = float(top.metadata.get("background_support_score", 0.0) or 0.0)
+        observed_anchor_score = float(top.metadata.get("observed_anchor_score", 0.0) or 0.0)
+
+        if anchor_tier in {"background_supported", "phenotype_supported", "speculative", ""}:
+            return True
+
+        return observed_anchor_score <= background_score + 0.15 and exact_anchor_score < 0.35
+
+    def _observed_present_clear_count(self, state: SessionState) -> int:
+        count = 0
+
+        for slot in state.slots.values():
+            if slot.effective_polarity() == "present" and slot.resolution in {"clear", "hedged"}:
+                count += 1
+
+        for evidence in state.evidence_states.values():
+            if evidence.effective_polarity() == "present" and evidence.resolution in {"clear", "hedged"}:
+                count += 1
+
+        return count
+
+    def _is_low_cost_observable_action(self, action: MctsAction | None) -> bool:
+        if action is None:
+            return False
+
+        if action.action_type != "verify_evidence":
+            return False
+
+        acquisition_mode = str(action.metadata.get("acquisition_mode") or "")
+        evidence_cost = str(action.metadata.get("evidence_cost") or "")
+        if acquisition_mode in {"needs_lab_test", "needs_imaging", "needs_pathogen_test"} or evidence_cost == "high":
+            return False
+
+        return acquisition_mode in {"direct_ask", "history_known"} or evidence_cost == "low" or action.target_node_label in {
+            "ClinicalFinding",
+            "RiskFactor",
+            "ClinicalAttribute",
+            "PopulationGroup",
+        }
+
+    def _score_low_cost_explorer_action(self, action: MctsAction | None, *, recent_evidence_tags: list[str]) -> float:
+        if action is None:
+            return -1.0
+
+        evidence_tags = {
+            item
+            for item in self._normalize_string_list(action.metadata.get("evidence_tags", []))
+            if len(item) > 0 and not item.startswith("type:")
+        }
+        recent_tags = {item for item in recent_evidence_tags if len(item) > 0 and not item.startswith("type:")}
+        role = self._evidence_role_for_action(action)
+        role_priority = self._repair_action_role_priority(role)
+        background_penalty = 1.15 if role == "background_context" else 0.0
+        family_diversity_bonus = 0.45 if len(recent_tags) > 0 and len(recent_tags & evidence_tags) == 0 else 0.0
+
+        return (
+            float(action.prior_score)
+            + float(action.metadata.get("answerability_score", 0.0)) * 1.2
+            + float(action.metadata.get("discriminative_gain", 0.0)) * 1.1
+            + float(action.metadata.get("novelty_score", 0.0)) * 0.65
+            + float(action.metadata.get("low_cost_discriminative_bonus", 0.0)) * 1.6
+            + role_priority * 1.55
+            + family_diversity_bonus
+            - background_penalty
+            - float(action.metadata.get("patient_burden", 0.0)) * 0.15
         )
 
     # 查询当前候选诊断下是否仍有未问过的低成本 R2 证据。
@@ -3978,7 +4323,6 @@ def build_default_brain(client: Neo4jClient, config_overrides: dict | None = Non
     a1_config = dict(config.get("a1", {}))
     a2_config = dict(config.get("a2", {}))
     fallback_config = dict(config.get("fallback", {}))
-    stop_config = dict(config.get("stop", {}))
     repair_config = dict(config.get("repair", {}))
     llm_client = LlmClient(
         structured_retry_count=int(llm_config.get("structured_retry_count", 1)),
@@ -3997,6 +4341,7 @@ def build_default_brain(client: Neo4jClient, config_overrides: dict | None = Non
                 kg_similarity_threshold=float(kg_config.get("entity_link_threshold", 0.72)),
                 disable_kg_below_threshold=bool(kg_config.get("disable_kg_below_threshold", True)),
                 r2_limit=int(config.get("a3", {}).get("validation_limit", 10)),
+                r1_scope_sibling_limit=int(a2_config.get("scope_sibling_limit", 12)),
             ),
         ),
         med_extractor=MedExtractor(llm_client),
@@ -4009,31 +4354,7 @@ def build_default_brain(client: Neo4jClient, config_overrides: dict | None = Non
             ),
         ),
         question_selector=QuestionSelector(),
-        stop_rule_engine=StopRuleEngine(
-            StopRuleConfig(
-                max_fail_count=int(fallback_config.get("max_fail_count", 2)),
-                max_rollouts=int(search_config.get("num_rollouts", 8)),
-                max_tree_depth=int(search_config.get("max_depth", 6)),
-                min_turn_index_before_final_answer=int(stop_config.get("min_turn_index_before_final_answer", 2)),
-                min_trajectory_count_before_accept=int(stop_config.get("min_trajectory_count_before_accept", 2)),
-                min_answer_consistency=float(stop_config.get("min_answer_consistency", 0.45)),
-                min_agent_eval_score=float(stop_config.get("min_agent_eval_score", 0.65)),
-                min_final_score=float(stop_config.get("min_final_score", 0.55)),
-                require_verifier_accept_flag=bool(stop_config.get("require_verifier_accept_flag", True)),
-                acceptance_profile=str(stop_config.get("acceptance_profile", "baseline")),
-                enable_evidence_profile_acceptance=bool(
-                    stop_config.get("enable_evidence_profile_acceptance", False)
-                ),
-                min_low_cost_profile_families=int(stop_config.get("min_low_cost_profile_families", 2)),
-                min_low_cost_profile_present_clear_count=int(
-                    stop_config.get("min_low_cost_profile_present_clear_count", 2)
-                ),
-                min_low_cost_profile_stable_top_count=int(stop_config.get("min_low_cost_profile_stable_top_count", 2)),
-                allow_soft_verifier_reject_with_evidence_profile=bool(
-                    stop_config.get("allow_soft_verifier_reject_with_evidence_profile", True)
-                ),
-            )
-        ),
+        acceptance_controller=VerifierAcceptanceController(),
         report_builder=ReportBuilder(),
         evidence_parser=EvidenceParser(
             llm_client,
@@ -4078,14 +4399,20 @@ def build_default_brain(client: Neo4jClient, config_overrides: dict | None = Non
                 llm_verifier_min_turn_index=int(
                     path_eval_config.get(
                         "llm_verifier_min_turn_index",
-                        stop_config.get("min_turn_index_before_final_answer", 2),
+                        2,
                     )
                 ),
                 llm_verifier_min_trajectory_count=int(
                     path_eval_config.get(
                         "llm_verifier_min_trajectory_count",
-                        stop_config.get("min_trajectory_count_before_accept", 2),
+                        2,
                     )
+                ),
+                observed_final_accept_threshold=float(
+                    path_eval_config.get("observed_final_accept_threshold", 0.72)
+                ),
+                observed_final_scope_mismatch_block_threshold=float(
+                    path_eval_config.get("observed_final_scope_mismatch_block_threshold", 0.28)
                 ),
             ),
             llm_client=llm_client,

@@ -277,9 +277,9 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 - [brain/entity_linker.py](/Users/loki/Workspace/GraduationDesign/brain/entity_linker.py)：mention 到 KG 节点的阈值化链接器
 - [brain/search_tree.py](/Users/loki/Workspace/GraduationDesign/brain/search_tree.py)：显式搜索树结构
 - [brain/trajectory_evaluator.py](/Users/loki/Workspace/GraduationDesign/brain/trajectory_evaluator.py)：轨迹聚合与最终答案评分器
-- [brain/stop_rules.py](/Users/loki/Workspace/GraduationDesign/brain/stop_rules.py)：打薄后的通用终止与降级规则，当前只处理真实 observed anchor、强备选、硬反证、verifier 拒绝与基础阈值，不再内置疾病专门证据合同
+- [brain/acceptance_controller.py](/Users/loki/Workspace/GraduationDesign/brain/acceptance_controller.py)：verifier-only 最终接受控制；只根据 LLM verifier / observed-evidence final evaluator 的 `verifier_should_accept` 决定是否 completed，拒绝时继续进入 repair
 - [brain/report_builder.py](/Users/loki/Workspace/GraduationDesign/brain/report_builder.py)：结构化结果汇总
-- [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)：`A1 / A2 / A3 + pending action + anchor acceptance` 问诊编排层
+- [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)：`A1 / A2 / A3 + pending action + verifier/repair` 问诊编排层
 
 ## 当前与 Med-MCTS 的对齐状态
 
@@ -293,7 +293,7 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 - `Observed Anchor`：当前按 evidence role 与特异度重排候选，病原体/定义性检查/疾病特异检查优先，CD4/HIV/发热等高连接背景证据降权
 - `SearchTree + UCT + rollout`：已支持多次 rollout 的 `select -> expand -> simulate -> backpropagate`
 - `TrajectoryEvaluator`：已支持路径聚类、相似度驱动 diversity 和可选 LLM verifier 模式
-- `llm_verifier`：当前会对齐 stop rule 的最早接受窗口；在 `turn_index` 或 `trajectory_count` 尚未达到可停止条件前，会先延后 verifier 调用并退回轻量 fallback 评分，避免 competitive replay 在早期追问轮次反复支付高成本评审
+- `llm_verifier`：当前仍由 `TrajectoryEvaluator` 控制最早调用窗口；在 `turn_index` 或 `trajectory_count` 尚未达到配置窗口前，会先延后 verifier 调用并退回轻量 fallback 评分，避免 competitive replay 在早期追问轮次反复支付高成本评审
 - `rollout / reroot`：当前使用轻量 `SessionState` 快照，不再把 `search_tree`、`last_search_result` 等运行时大对象递归复制进树节点；这能显著降低 competitive replay 后期的内存膨胀与 GC 卡顿
 
 当前仍未完成的重点：
@@ -343,8 +343,9 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 - `run_batch_replay.py` 当前会直接向终端设备输出运行信息；即使通过 `conda run` 启动，也会在病例启动、病例完成和长时间运行期间持续输出可见日志
 - `run_batch_replay.py` 当前会在终端持续输出病例级进度条，并每 15 秒输出一次心跳，例如“已完成病例：2 / 10，活动病例：2，当前最久：case_xxx（已运行 12:30）”
 - `run_batch_replay.py` 当前会像前端实时模式一样自动读取 `configs/frontend.yaml` 与 `configs/frontend.local.yaml`，把 Neo4j / LLM / brain 配置桥接到当前 CLI 进程环境
+- `run_batch_replay.py` 做模型对比时，如果命令行里显式设置了 `OPENAI_MODEL`，会优先使用该环境变量；这便于在不改动本地私密配置的前提下切换 `qwen3-max / qwen3.5-flash / qwen3.5-plus`
 - `run_batch_replay.py` 当前启动时会直接记录 `llm_available=true/false`；如果为 `false`，批量回放会尽早失败，不再退回旧规则链路
-- `run_batch_replay.py` 当前会在每个病例完成后立即追加写入 `replay_results.jsonl`、`run.log`，并刷新 `benchmark_summary.json` 与 `status.json`
+- `run_batch_replay.py` 当前会在每个病例完成后立即追加写入 `replay_results.jsonl`、`run.log`，并刷新 `benchmark_summary.json` 与 `status.json`；评测摘要会同时给出 `top1_final_answer_hit` 口径和 `top3_hypothesis_hit` 口径，便于区分“最终答案已对”和“候选前三已召回”
 - `run_batch_replay.py` 当前已支持单病例 `failed` 语义：若 `brain` 抛出 LLM 领域错误，该病例会带 `error.code / error.stage / error.message / error.attempts` 落盘，其他病例继续运行
 - `run_batch_replay.py` 默认支持断点续跑：若输出目录里已经有 `replay_results.jsonl`，会自动跳过已完成病例；如需强制重跑，可加 `--no-resume`
 - `run_batch_replay.py` 当前会记录病例级耗时信息：每个病例的 opening、初始 brain、逐轮 patient/brain、finalize 和总耗时会写入 `replay_results.jsonl`，并在 `benchmark_summary.json` / `status.json` 中聚合 `timing_summary`；运行日志对亚秒级耗时会保留更高精度，避免全部显示成 `0.00`
@@ -467,7 +468,7 @@ streamlit run frontend/app.py --server.port 8514
 实时模式依赖说明：
 
 - Neo4j 需要已导入知识图谱，并能通过 `configs/frontend.yaml` 或 `configs/frontend.local.yaml` 连接
-- LLM 默认使用 DashScope compatible OpenAI 接口与 `qwen3-max`
+- LLM 默认使用 DashScope compatible OpenAI 接口与 `qwen3.5-flash`
 - 如果实时模式连接失败，页面仍可切换到回放模式完成完整展示；对于 LLM 领域错误，页面会直接显示结构化中文提示，而不是再伪装成“规则降级成功”
 - 如果患者第一句只是“你好，医生”等无症状问候，系统会主动询问主诉
 - 如果患者只提供“我正在发热”等单一线索，系统会通过冷启动追问补充关键症状或风险因素
@@ -475,7 +476,6 @@ streamlit run frontend/app.py --server.port 8514
 ## 配置、测试与文档
 
 - [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml)
-- [configs/stop_rules.yaml](/Users/loki/Workspace/GraduationDesign/configs/stop_rules.yaml)
 - [configs/simulator.yaml](/Users/loki/Workspace/GraduationDesign/configs/simulator.yaml)
 - [configs/frontend.yaml](/Users/loki/Workspace/GraduationDesign/configs/frontend.yaml)：前端实时模式默认配置
 - [configs/frontend.local.example.yaml](/Users/loki/Workspace/GraduationDesign/configs/frontend.local.example.yaml)：前端本地密钥配置模板
@@ -506,7 +506,7 @@ streamlit run frontend/app.py --server.port 8514
 - `GraphRetriever`
 - `EvidenceParser`
 - `HypothesisManager`
-- `StopRuleEngine`
+- `VerifierAcceptanceController`
 
 补充说明：
 
@@ -578,10 +578,16 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 ```bash
 export DASHSCOPE_API_KEY="你的 key"
 export OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}"
-export OPENAI_MODEL="${OPENAI_MODEL:-qwen3-max}"
+export OPENAI_MODEL="${OPENAI_MODEL:-qwen3.5-flash}"
 export NEO4J_PASSWORD="你的密码"
 
 conda run --no-capture-output -n GraduationDesign python scripts/run_batch_replay.py --max-turns 5 --case-concurrency 4
+```
+
+如果只想临时比较不同模型，而不改 `configs/frontend.local.yaml`，可直接在命令前覆盖：
+
+```bash
+OPENAI_MODEL=qwen3.5-flash conda run --no-capture-output -n GraduationDesign python scripts/run_batch_replay.py --max-turns 5 --case-concurrency 4
 ```
 
 这条端到端 smoke 会走：
@@ -632,8 +638,8 @@ conda run --no-capture-output -n GraduationDesign python scripts/run_batch_repla
 说明：
 
 - 默认在 baseline repair 策略下扫 `MAX_TURNS_SWEEP=3,5,7`
-- 默认扫 `STOP_PROFILES=baseline,relaxed_thresholds`
-- 因此默认会跑 `3 个 turn budget * 2 个 stop profile * 3 个病例 = 18 个真实病例回放`，每轮会调用真实 Neo4j 与 qwen3-max verifier，通常会明显慢于单次 baseline
+- 历史 `STOP_PROFILES` 参数已不再影响运行结果；结构化 stop rule 已移除，当前主要观察不同 turn budget 与 verifier prompt 口径
+- 默认会调用真实 Neo4j 与当前配置的 verifier 模型，通常会明显慢于单次 baseline
 - 可选设置 `ACCEPTANCE_PROFILES=baseline,slightly_lenient,guarded_lenient` 对比 verifier 接受倾向
 - 输出目录默认为 `test_outputs/simulator_replay/acceptance_sweep_<timestamp>`
 - 运行中可看 `run.log`、`status.json`、`current_combo.txt` 和 `sweep_results.jsonl`
@@ -642,7 +648,7 @@ conda run --no-capture-output -n GraduationDesign python scripts/run_batch_repla
 如果只想先快速确认链路，可以缩小 sweep：
 
 ```bash
-MAX_TURNS_SWEEP=3 STOP_PROFILES=baseline ./scripts/run_acceptance_sweep.sh
+MAX_TURNS_SWEEP=3 ./scripts/run_acceptance_sweep.sh
 ```
 
 真实 verifier acceptance sweep：
@@ -653,7 +659,7 @@ MAX_TURNS_SWEEP=3 STOP_PROFILES=baseline ./scripts/run_acceptance_sweep.sh
 
 说明：
 
-- 默认固定 `MAX_TURNS=5`、`stop_profile=baseline`
+- 默认固定 `MAX_TURNS=5`
 - 默认只比较 verifier 接受倾向：`ACCEPTANCE_PROFILES=baseline,slightly_lenient,guarded_lenient`
 - 默认 `CASE_CONCURRENCY=5`，同一 profile 内最多 5 个病例并行回放；如需保守串行可设置 `CASE_CONCURRENCY=1`
 - 输出目录默认为 `test_outputs/simulator_replay/verifier_acceptance_sweep_<timestamp>`
@@ -661,8 +667,8 @@ MAX_TURNS_SWEEP=3 STOP_PROFILES=baseline ./scripts/run_acceptance_sweep.sh
 - 最近一次 sweep 输出目录会写入 `test_outputs/simulator_replay/latest_verifier_acceptance_sweep_output.txt`
 - 该脚本重点观察 `verifier_called_count`、`accepted_with_verifier_metadata_count`、`accepted_without_verifier_metadata_count`、`accepted_on_turn1_count`、`wrong_accept_on_turn1_count`
 - 同时继续观察 `first_correct_best_answer_turn`、`first_verifier_accept_turn`、`first_verifier_accept_turn_for_final_answer`、`correct_but_rejected_span`、`accepted_correct_count`、`accepted_wrong_count`
-- 当前 stop gate 已打薄，旧 `guarded_lenient` / PCP combo 组合闸门不再作为结构化 stop 规则；`guarded_lenient` 仍可作为 verifier prompt profile 做消融观察
-- 重点观察 `anchor_controlled_block_reason`、`observed_anchor_score`、`anchor_tier`、`missing_evidence_roles`、`anchored alternative` 与 `hard_negative_key_evidence` 等通用证据角色指标
+- 当前诊断链路已移除结构化 stop rule：不再使用 `BRAIN_ACCEPTANCE_PROFILE / anchor_controlled / no_stop_gate`，最终 completed 只由 verifier / observed-evidence final evaluator 接受信号触发
+- 重点观察 `observed_anchor_score`、`anchor_tier`、`missing_evidence_roles`、`anchored alternative` 与 `hard_negative_key_evidence` 等通用证据角色指标
 - repair 指标应优先看下一问是否补到了 `disease_specific_anchor / definition_anchor / clear_confirmation`，而不是继续追共享背景证据
 
 真实 focused acceptance validation：
@@ -674,7 +680,7 @@ MAX_TURNS_SWEEP=3 STOP_PROFILES=baseline ./scripts/run_acceptance_sweep.sh
 说明：
 
 - 默认使用 [focused_acceptance_cases.jsonl](/Users/loki/Workspace/GraduationDesign/simulator/focused_acceptance_cases.jsonl) 的 10 个核心病例
-- 默认固定 `MAX_TURNS=5`、`stop_profile=baseline`、repair 策略不变
+- 默认固定 `MAX_TURNS=5`，repair 策略不变
 - 默认只比较 `ACCEPTANCE_PROFILES=baseline,slightly_lenient,guarded_lenient`
 - 输出目录默认为 `test_outputs/simulator_replay/focused_acceptance_validation_<timestamp>`
 - 最近一次输出目录会写入 `test_outputs/simulator_replay/latest_focused_acceptance_validation_output.txt`

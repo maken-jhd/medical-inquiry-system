@@ -35,6 +35,8 @@ class HypothesisManagerConfig:
     verifier_hard_negative_penalty: float = 0.32
     verifier_missing_support_penalty: float = 0.12
     verifier_trajectory_penalty: float = 0.08
+    verifier_repeated_missing_support_penalty: float = 0.08
+    verifier_observed_anchor_alt_bonus: float = 0.18
 
 
 class HypothesisManager:
@@ -156,6 +158,7 @@ class HypothesisManager:
         reject_reason: str,
         recommended_next_evidence: list[str] | None = None,
         alternative_candidates: list[dict] | None = None,
+        repair_feedback_counts: dict | None = None,
     ) -> List[HypothesisScore]:
         # repair 不直接原地改 session_state，而是先 clone 一份 hypothesis 列表再做分数调整。
         ranked = [self._clone_hypothesis(item) for item in hypotheses]
@@ -170,6 +173,7 @@ class HypothesisManager:
             score_delta = 0.0
             metadata = dict(hypothesis.metadata)
             matched_alternative = self._match_verifier_alternative(hypothesis, alternative_items)
+            feedback_count = self._repair_feedback_count(repair_feedback_counts, hypothesis.node_id, reject_reason)
 
             # 当前被 verifier 拒停的答案会按 reject_reason 受到不同幅度的下调。
             if current_answer_id and hypothesis.node_id == current_answer_id:
@@ -187,13 +191,20 @@ class HypothesisManager:
                     "insufficient_evidence_family_coverage",
                 }:
                     score_delta -= self.config.verifier_missing_support_penalty
+                    score_delta -= min(
+                        feedback_count * self.config.verifier_repeated_missing_support_penalty,
+                        self.config.verifier_missing_support_penalty * 2.5,
+                    )
                 elif reject_reason == "trajectory_insufficient":
                     score_delta -= self.config.verifier_trajectory_penalty
 
             # 如果 verifier 明确点名某个备选诊断，就给它额外抬分，帮助 repair 阶段真正关注竞争者。
             if matched_alternative is not None:
                 score_delta += max(self.config.verifier_alt_bonus - index * 0.05, self.config.verifier_alt_bonus * 0.5)
+                observed_anchor_bonus = self._observed_anchor_repair_bonus(metadata)
+                score_delta += observed_anchor_bonus
                 metadata["verifier_alternative_reason"] = matched_alternative.get("reason", "")
+                metadata["verifier_observed_anchor_alt_bonus"] = round(observed_anchor_bonus, 4)
 
             # repair 推荐证据会和 hypothesis 自己已有的推荐证据合并，
             # 供后续 action_builder 在排序时同时感知“当前假设缺什么”和“verifier 想补什么”。
@@ -211,6 +222,7 @@ class HypothesisManager:
                     "hypothesis_recommended_next_evidence": hypothesis_preferred_evidence,
                     "verifier_recommended_next_evidence": preferred_evidence,
                     "verifier_reject_reason": reject_reason,
+                    "repair_feedback_count": feedback_count,
                     "verifier_adjustment": score_delta,
                     "verifier_role": "alternative" if matched_alternative is not None else metadata.get("verifier_role", "current"),
                 }
@@ -226,6 +238,25 @@ class HypothesisManager:
             )
 
         return sorted(ranked, key=lambda item: (-item.score, item.name))
+
+    # 读取 service 持久化的 repair 反馈次数，用于把重复缺口变成显式排序惩罚。
+    def _repair_feedback_count(self, payload: dict | None, hypothesis_id: str, reject_reason: str) -> int:
+        if not isinstance(payload, dict):
+            return 0
+
+        by_hypothesis = payload.get(hypothesis_id, {})
+        if not isinstance(by_hypothesis, dict):
+            return 0
+
+        return int(by_hypothesis.get(reject_reason, 0) or 0)
+
+    # 备选诊断已有真实 observed anchor 时，repair 重排应该更敢把它拉起来。
+    def _observed_anchor_repair_bonus(self, metadata: dict) -> float:
+        exact_score = float(metadata.get("exact_scope_anchor_score", 0.0) or 0.0)
+        family_score = float(metadata.get("family_scope_anchor_score", 0.0) or 0.0)
+        phenotype_score = float(metadata.get("phenotype_support_score", 0.0) or 0.0)
+        bonus = exact_score * 0.22 + family_score * 0.14 + phenotype_score * 0.04
+        return min(bonus, self.config.verifier_observed_anchor_alt_bonus)
 
     # 根据证据存在性和回答清晰度计算对假设分数的调整值。
     def _score_delta_from_evidence(self, evidence_state: EvidenceState) -> float:

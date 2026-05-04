@@ -95,8 +95,10 @@ def test_summarize_benchmark_returns_expected_metrics() -> None:
     assert summary.completed_count == 3
     assert summary.max_turn_reached_count == 1
     assert summary.hypothesis_hit_count == 3
+    assert summary.top3_hypothesis_hit_count == 3
     assert summary.final_answer_count == 4
     assert summary.final_answer_exact_hit_count == 2
+    assert summary.top1_final_answer_hit_count == 2
     assert summary.final_answer_family_hit_count == 3
     assert summary.accepted_final_answer_count == 3
     assert summary.accepted_exact_hit_count == 1
@@ -161,5 +163,7 @@ def test_build_non_completed_case_report_groups_abnormal_cases() -> None:
     }
     assert [item["case_id"] for item in report["cases"]] == ["case1", "case2", "case3"]
     assert report["cases"][0]["final_answer_exact_hit"] is True
+    assert report["cases"][0]["top1_final_answer_hit"] is True
     assert report["cases"][1]["hypothesis_hit"] is True
+    assert report["cases"][1]["top3_hypothesis_hit"] is True
     assert report["cases"][2]["error"]["stage"] == "batch_runner"

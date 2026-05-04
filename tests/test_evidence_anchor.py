@@ -183,7 +183,7 @@ def test_rollout_simulated_positive_is_ignored_by_anchor_index() -> None:
     assert index["observed_evidence"] == []
 
 
-# 明确否定当前候选定义性检查时，应生成 negative anchor 供 stop gate 拦截。
+# 明确否定当前候选定义性检查时，应生成 negative anchor 供排序、verifier 和 repair 使用。
 def test_clear_absent_definition_evidence_becomes_negative_anchor() -> None:
     state = SessionState(session_id="anchor_negative")
     state.evidence_states["ct"] = EvidenceState(
@@ -437,3 +437,214 @@ def test_background_only_evidence_does_not_satisfy_low_cost_profile() -> None:
     assert ranked[0].metadata["anchor_tier"] == "background_supported"
     assert ranked[0].metadata["low_cost_present_clear_count"] == 0
     assert ranked[0].metadata["low_cost_profile_satisfied"] is False
+
+
+# 只有病原家族而没有部位信息时，部位特异疾病只能得到 family anchor，不能伪装成 strong anchor。
+def test_pathogen_only_for_site_specific_disease_is_family_scope() -> None:
+    state = SessionState(session_id="anchor_scope_pathogen")
+    state.evidence_states["crypto"] = EvidenceState(
+        node_id="crypto",
+        polarity="present",
+        existence="exist",
+        resolution="clear",
+        metadata={"target_node_name": "隐球菌", "target_node_label": "Pathogen"},
+    )
+    payload = {
+        "node_id": "crypto",
+        "name": "隐球菌",
+        "label": "Pathogen",
+        "relation_type": "HAS_PATHOGEN",
+    }
+    hypotheses = [
+        HypothesisScore(
+            node_id="crypto_meningitis",
+            label="Disease",
+            name="隐球菌脑膜炎",
+            score=0.9,
+            metadata={"evidence_payloads": [payload]},
+        ),
+        HypothesisScore(
+            node_id="crypto_infection",
+            label="Disease",
+            name="隐球菌感染",
+            score=0.75,
+            metadata={"evidence_payloads": [payload]},
+        ),
+    ]
+
+    ranked, _ = EvidenceAnchorAnalyzer().rerank_hypotheses(state, hypotheses)
+    by_id = {item.node_id: item for item in ranked}
+
+    assert by_id["crypto_infection"].metadata["anchor_tier"] == "strong_anchor"
+    assert by_id["crypto_meningitis"].metadata["anchor_tier"] == "family_anchor"
+    assert by_id["crypto_meningitis"].metadata["family_anchor_evidence"][0]["anchor_scope"] == "family_scope"
+
+
+# 局部样本阳性不能直接升级成播散性诊断，必须作为 scope mismatch 继续补证据。
+def test_local_crypto_evidence_does_not_confirm_disseminated_candidate() -> None:
+    state = SessionState(session_id="anchor_scope_local_crypto")
+    state.evidence_states["skin_crypto"] = EvidenceState(
+        node_id="skin_crypto",
+        polarity="present",
+        existence="exist",
+        resolution="clear",
+        metadata={"target_node_name": "皮肤分泌物隐球菌阳性", "target_node_label": "LabFinding"},
+    )
+    payload = {
+        "node_id": "skin_crypto",
+        "name": "皮肤分泌物隐球菌阳性",
+        "label": "LabFinding",
+        "relation_type": "DIAGNOSED_BY",
+    }
+    hypotheses = [
+        HypothesisScore(
+            node_id="disseminated_crypto",
+            label="Disease",
+            name="播散型隐球菌病",
+            score=1.1,
+            metadata={"evidence_payloads": [payload]},
+        ),
+        HypothesisScore(
+            node_id="skin_crypto_disease",
+            label="Disease",
+            name="皮肤隐球菌病",
+            score=0.9,
+            metadata={"evidence_payloads": [payload]},
+        ),
+    ]
+
+    ranked, _ = EvidenceAnchorAnalyzer().rerank_hypotheses(state, hypotheses)
+    by_id = {item.node_id: item for item in ranked}
+
+    assert ranked[0].node_id == "skin_crypto_disease"
+    assert by_id["disseminated_crypto"].metadata["anchor_tier"] == "family_anchor"
+    assert by_id["disseminated_crypto"].metadata["scope_mismatch_score"] > 0.0
+
+
+# 泛分枝杆菌培养不能直接确认为活动性结核，除非证据里有 MTB/结核分枝杆菌等精确信号。
+def test_generic_mycobacteria_evidence_does_not_confirm_active_tb() -> None:
+    state = SessionState(session_id="anchor_scope_mycobacteria")
+    state.evidence_states["mycobacteria_culture"] = EvidenceState(
+        node_id="mycobacteria_culture",
+        polarity="present",
+        existence="exist",
+        resolution="clear",
+        metadata={"target_node_name": "痰分枝杆菌培养阳性", "target_node_label": "LabFinding"},
+    )
+    hypotheses = [
+        HypothesisScore(
+            node_id="active_tb",
+            label="Disease",
+            name="活动性结核病",
+            score=1.0,
+            metadata={
+                "evidence_payloads": [
+                    {
+                        "node_id": "mycobacteria_culture",
+                        "name": "痰分枝杆菌培养阳性",
+                        "label": "LabFinding",
+                        "relation_type": "DIAGNOSED_BY",
+                    }
+                ]
+            },
+        )
+    ]
+
+    ranked, _ = EvidenceAnchorAnalyzer().rerank_hypotheses(state, hypotheses)
+
+    assert ranked[0].metadata["anchor_tier"] == "family_anchor"
+    assert ranked[0].metadata["scope_mismatch_score"] > 0.0
+
+
+# HBV 这类共病/背景感染不能把非肝炎候选抬成强锚点。
+def test_hbv_comorbidity_is_background_for_non_hepatitis_candidate() -> None:
+    state = SessionState(session_id="anchor_scope_hbv")
+    state.evidence_states["hbv"] = EvidenceState(
+        node_id="hbv",
+        polarity="present",
+        existence="exist",
+        resolution="clear",
+        metadata={"target_node_name": "乙肝病毒感染", "target_node_label": "Pathogen"},
+    )
+    hypotheses = [
+        HypothesisScore(
+            node_id="ckd",
+            label="Disease",
+            name="慢性肾脏病",
+            score=1.2,
+            metadata={
+                "evidence_payloads": [
+                    {
+                        "node_id": "hbv",
+                        "name": "乙肝病毒感染",
+                        "label": "Pathogen",
+                        "relation_type": "COMPLICATED_BY",
+                    }
+                ]
+            },
+        ),
+        HypothesisScore(
+            node_id="hbv_infection",
+            label="Disease",
+            name="乙肝病毒感染",
+            score=0.7,
+            metadata={
+                "evidence_payloads": [
+                    {
+                        "node_id": "hbv",
+                        "name": "乙肝病毒感染",
+                        "label": "Pathogen",
+                        "relation_type": "HAS_PATHOGEN",
+                    }
+                ]
+            },
+        ),
+    ]
+
+    ranked, _ = EvidenceAnchorAnalyzer().rerank_hypotheses(state, hypotheses)
+    by_id = {item.node_id: item for item in ranked}
+
+    assert ranked[0].node_id == "hbv_infection"
+    assert by_id["hbv_infection"].metadata["anchor_tier"] == "strong_anchor"
+    assert by_id["ckd"].metadata["anchor_tier"] == "background_supported"
+    assert by_id["ckd"].metadata["background_attractor_score"] > 0.0
+
+
+# blood_count 只能作为血液指标族参与证据画像，不再因为 family tag 被全局升格为 definition anchor。
+def test_blood_count_family_tag_does_not_force_definition_anchor() -> None:
+    state = SessionState(session_id="anchor_blood_count")
+    state.evidence_states["wbc"] = EvidenceState(
+        node_id="wbc",
+        polarity="present",
+        existence="exist",
+        resolution="clear",
+        metadata={
+            "target_node_name": "白细胞计数升高",
+            "target_node_label": "LabFinding",
+            "evidence_tags": ["blood_count"],
+        },
+    )
+    hypotheses = [
+        HypothesisScore(
+            node_id="infection",
+            label="Disease",
+            name="感染性疾病",
+            score=1.0,
+            metadata={
+                "evidence_payloads": [
+                    {
+                        "node_id": "wbc",
+                        "name": "白细胞计数升高",
+                        "label": "LabFinding",
+                        "relation_type": "HAS_LAB_FINDING",
+                        "evidence_tags": ["blood_count"],
+                    }
+                ]
+            },
+        )
+    ]
+
+    ranked, _ = EvidenceAnchorAnalyzer().rerank_hypotheses(state, hypotheses)
+
+    assert ranked[0].metadata["anchor_tier"] != "definition_anchor"
+    assert ranked[0].metadata["definition_anchor_evidence"] == []

@@ -123,10 +123,10 @@ conda run -n GraduationDesign python scripts/run_batch_replay.py --max-turns 5
 - 小范围代码改动优先跑对应测试文件，例如：
 
 ```bash
-conda run -n GraduationDesign python -m pytest tests/test_stop_rules.py -q
+conda run -n GraduationDesign python -m pytest tests/test_acceptance_controller.py -q
 ```
 
-- 触碰 `brain/service.py`、路由、终止规则、replay 或报告字段时，优先考虑补跑相关服务流、router、stop_rules、report_builder、replay_engine 测试。
+- 触碰 `brain/service.py`、路由、最终接受控制、replay 或报告字段时，优先考虑补跑相关服务流、router、acceptance_controller、report_builder、replay_engine 测试。
 - 触碰 `frontend/` 时，至少确认 import/语法层面无误；启动 Streamlit 可能需要本地依赖和端口可用。
 - 不要重写无关模块或清理用户未请求的历史输出。
 

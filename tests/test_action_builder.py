@@ -290,3 +290,37 @@ def test_action_builder_uses_specific_exam_context_after_general_was_asked() -> 
     assert len(actions) == 1
     assert actions[0].action_type == "collect_exam_context"
     assert actions[0].target_node_id == "__exam_context__::lab"
+
+
+# 验证低成本动作中，特异症状会压过发热这类背景问题。
+def test_action_builder_penalizes_low_cost_background_probe() -> None:
+    builder = ActionBuilder()
+    actions = builder.build_verification_actions(
+        [
+            {
+                "node_id": "fever",
+                "label": "ClinicalFinding",
+                "name": "发热",
+                "relation_type": "MANIFESTS_AS",
+                "question_type_hint": "symptom",
+                "acquisition_mode": "direct_ask",
+                "evidence_cost": "low",
+                "priority": 1.0,
+            },
+            {
+                "node_id": "diarrhea",
+                "label": "ClinicalFinding",
+                "name": "腹泻",
+                "relation_type": "MANIFESTS_AS",
+                "question_type_hint": "symptom",
+                "acquisition_mode": "direct_ask",
+                "evidence_cost": "low",
+                "priority": 1.0,
+            },
+        ],
+        hypothesis_id="d1",
+    )
+
+    by_id = {action.target_node_id: action for action in actions}
+    assert by_id["diarrhea"].prior_score > by_id["fever"].prior_score
+    assert by_id["fever"].metadata["low_cost_discriminative_bonus"] < 0.0

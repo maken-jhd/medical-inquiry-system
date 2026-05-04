@@ -1,5 +1,5 @@
 llm:
-  structured_retry_count: 1
+  structured_retry_count: 2
 
 search:
   num_rollouts: 8
@@ -21,12 +21,15 @@ path_evaluation:
   agent_eval_mode: llm_verifier
   llm_verifier_min_turn_index: 2
   llm_verifier_min_trajectory_count: 2
+  observed_final_accept_threshold: 0.72
+  observed_final_scope_mismatch_block_threshold: 0.28
 
 a1:
   use_llm_extractor: true
 
 a2:
   expand_top_k_hypotheses: 3
+  scope_sibling_limit: 12
 
 a3:
   use_discriminative_gain: true
@@ -40,17 +43,3 @@ repair:
 fallback:
   enable_question_selector_mode: true
   max_fail_count: 2
-
-stop:
-  min_turn_index_before_final_answer: 2
-  min_trajectory_count_before_accept: 2
-  min_answer_consistency: 0.45
-  min_agent_eval_score: 0.72
-  min_final_score: 0.6
-  require_verifier_accept_flag: true
-  acceptance_profile: anchor_controlled
-  enable_evidence_profile_acceptance: true
-  min_low_cost_profile_families: 2
-  min_low_cost_profile_present_clear_count: 2
-  min_low_cost_profile_stable_top_count: 2
-  allow_soft_verifier_reject_with_evidence_profile: true

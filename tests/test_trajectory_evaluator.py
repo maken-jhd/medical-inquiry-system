@@ -39,6 +39,60 @@ def test_trajectory_evaluator_prefers_more_consistent_answer_group() -> None:
     assert best.answer_id == "d1"
 
 
+# 真实 observed anchor 应该能修正 rollout 路径分数，避免只靠模拟阳性把错误答案顶到最前。
+def test_trajectory_evaluator_uses_observed_anchor_before_simulated_key_evidence() -> None:
+    evaluator = TrajectoryEvaluator()
+    trajectories = [
+        ReasoningTrajectory(
+            trajectory_id="wrong_rollout",
+            final_answer_id="tb",
+            final_answer_name="活动性结核病",
+            steps=[
+                {"stage": "A3", "action_id": "a1", "action_name": "MTB培养阳性", "question_type_hint": "lab"},
+                {"stage": "PENDING_ACTION", "polarity": "present", "resolution": "clear", "answer_branch": "positive"},
+            ],
+            score=0.6,
+        ),
+        ReasoningTrajectory(
+            trajectory_id="observed_anchor",
+            final_answer_id="vzv",
+            final_answer_name="水痘-带状疱疹病毒感染",
+            steps=[{"action_name": "水痘-带状疱疹病毒"}],
+            score=0.42,
+        ),
+    ]
+    patient_context = PatientContext(
+        raw_text="检查提示水痘-带状疱疹病毒阳性",
+        metadata={
+            "observed_anchor_index": {
+                "candidate_anchor_summary": [
+                    {
+                        "candidate_id": "vzv",
+                        "anchor_tier": "strong_anchor",
+                        "anchor_scope": "exact_scope",
+                        "observed_anchor_score": 1.2,
+                        "exact_scope_anchor_score": 1.2,
+                        "anchor_supporting_evidence": [{"name": "水痘-带状疱疹病毒"}],
+                    },
+                    {
+                        "candidate_id": "tb",
+                        "anchor_tier": "speculative",
+                        "observed_anchor_score": 0.0,
+                    },
+                ]
+            }
+        },
+    )
+
+    scores = evaluator.score_groups(evaluator.group_by_answer(trajectories), patient_context=patient_context)
+    best = evaluator.select_best_answer(scores)
+    wrong = next(item for item in scores if item.answer_id == "tb")
+
+    assert best is not None
+    assert best.answer_id == "vzv"
+    assert wrong.metadata["simulated_key_evidence_penalty"] > 0.0
+
+
 class FakeVerifierClient:
     """模拟 trajectory agent verifier 的结构化输出。"""
 
@@ -221,6 +275,68 @@ def test_trajectory_evaluator_scores_candidate_hypotheses_without_trajectories()
     assert scores[0].answer_id == "d1"
     assert scores[0].metadata["answer_score_source"] == "candidate_state_fallback"
     assert scores[0].metadata["trajectory_count"] == 0
+
+
+# 验证无 trajectory 时，真实强锚点也能被 deterministic final evaluator 接受。
+def test_candidate_state_fallback_accepts_observed_strong_anchor() -> None:
+    evaluator = TrajectoryEvaluator()
+    hypotheses = [
+        HypothesisScore(
+            node_id="cmv_retinitis",
+            label="Disease",
+            name="巨细胞病毒(CMV)视网膜炎",
+            score=0.8,
+            metadata={
+                "anchor_tier": "strong_anchor",
+                "exact_scope_anchor_score": 0.72,
+                "definition_anchor_score": 0.0,
+                "family_scope_anchor_score": 0.0,
+                "scope_mismatch_score": 0.0,
+                "low_cost_present_clear_count": 0,
+                "low_cost_core_family_count": 0,
+            },
+        )
+    ]
+
+    scores = evaluator.score_candidate_hypotheses_without_trajectories(
+        hypotheses,
+        patient_context=PatientContext(raw_text="眼底检查提示 CMV 视网膜炎。"),
+    )
+
+    assert scores[0].metadata["verifier_mode"] == "observed_evidence_final_evaluator"
+    assert scores[0].metadata["verifier_should_accept"] is True
+    assert scores[0].metadata["observed_final_accept_basis"] == "observed_strong_anchor_sufficient"
+
+
+# 验证 fallback final evaluator 会拦截同病原但疾病作用域不足的答案。
+def test_candidate_state_fallback_rejects_scope_mismatch() -> None:
+    evaluator = TrajectoryEvaluator()
+    hypotheses = [
+        HypothesisScore(
+            node_id="cmv_base",
+            label="Disease",
+            name="巨细胞病毒感染",
+            score=0.95,
+            metadata={
+                "anchor_tier": "strong_anchor",
+                "exact_scope_anchor_score": 0.62,
+                "family_scope_anchor_score": 0.0,
+                "generic_scope_penalty": 0.38,
+                "scope_requirement_missing_score": 0.22,
+                "missing_scope_facets": ["iris"],
+                "scope_mismatch_score": 0.0,
+            },
+        )
+    ]
+
+    scores = evaluator.score_candidate_hypotheses_without_trajectories(
+        hypotheses,
+        patient_context=PatientContext(raw_text="近期 ART 后病情恶化。"),
+    )
+
+    assert scores[0].metadata["verifier_should_accept"] is False
+    assert scores[0].metadata["verifier_reject_reason"] == "strong_alternative_not_ruled_out"
+    assert "补齐疾病作用域：iris" in scores[0].metadata["verifier_recommended_next_evidence"]
 
 
 # 验证在未达到可终止观察窗口前，llm verifier 会延后到后续轮次再调用。

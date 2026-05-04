@@ -38,7 +38,7 @@ def _build_brain(
             med_extractor=object(),
             entity_linker=object(),
             question_selector=object(),
-            stop_rule_engine=object(),
+            acceptance_controller=object(),
             report_builder=object(),
             evidence_parser=object(),
             hypothesis_manager=HypothesisManager(),
@@ -504,8 +504,8 @@ def test_service_can_switch_to_alternative_hypothesis_action_when_verifier_reque
     assert any(item["name"] == "新冠核酸阳性" for item in action.metadata["exam_candidate_evidence"])
 
 
-# 验证 anchor gate 指出真实强锚点属于备选诊断时，repair 直接围绕 anchored alternative 取动作。
-def test_service_anchor_controlled_repair_switches_to_anchored_alternative() -> None:
+# 验证 verifier 指出真实强锚点属于备选诊断时，repair 直接围绕 anchored alternative 取动作。
+def test_service_verifier_repair_switches_to_anchored_alternative() -> None:
     tracker = StateTracker()
     state = tracker.create_session("s_anchor_alt")
     state.candidate_hypotheses = [

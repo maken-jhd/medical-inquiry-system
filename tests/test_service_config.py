@@ -21,10 +21,6 @@ def test_load_brain_config_reads_yaml_file(tmp_path: Path) -> None:
                 "  structured_retry_count: 1",
                 "repair:",
                 "  enable_tree_reroot: false",
-                "stop:",
-                "  min_turn_index_before_final_answer: 3",
-                "  require_verifier_accept_flag: false",
-                "  acceptance_profile: guarded_lenient",
             ]
         ),
         encoding="utf-8",
@@ -38,6 +34,4 @@ def test_load_brain_config_reads_yaml_file(tmp_path: Path) -> None:
     assert config["path_evaluation"]["llm_verifier_min_trajectory_count"] == 2
     assert config["llm"]["structured_retry_count"] == 1
     assert config["repair"]["enable_tree_reroot"] is False
-    assert config["stop"]["min_turn_index_before_final_answer"] == 3
-    assert config["stop"]["require_verifier_accept_flag"] is False
-    assert config["stop"]["acceptance_profile"] == "guarded_lenient"
+    assert "stop" not in config

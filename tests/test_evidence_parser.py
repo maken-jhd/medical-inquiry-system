@@ -27,6 +27,18 @@ def test_a1_raises_when_llm_returns_no_key_features() -> None:
         parser.run_a1_key_symptom_extraction(PatientContext(raw_text="最近主要是畏光，还伴有视力下降。"))
 
 
+# 验证 service 兜底传入 empty_extraction_fallback 时，A1 不再二次触发空抽取失败。
+def test_a1_empty_extraction_fallback_returns_none_salient() -> None:
+    parser = EvidenceParser(llm_client=None)
+
+    result = parser.run_a1_key_symptom_extraction(
+        PatientContext(raw_text="症状比较轻微，来问问。", metadata={"empty_extraction_fallback": True})
+    )
+
+    assert result.key_features == []
+    assert result.selection_decision == "none_salient"
+
+
 def test_a1_normalizes_llm_feature_names() -> None:
     class FakeLlmClient:
         def is_available(self) -> bool:

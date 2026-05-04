@@ -90,7 +90,7 @@ export NEO4J_DATABASE="neo4j"
 
 export DASHSCOPE_API_KEY="你的 DashScope Key"
 export OPENAI_BASE_URL="https://dashscope.aliyuncs.com/compatible-mode/v1"
-export OPENAI_MODEL="qwen3-max"
+export OPENAI_MODEL="qwen3.5-flash"
 ```
 
 如果这些环境变量、Neo4j 服务或 LLM 调用不可用，页面会显示中文错误提示；此时切回“演示回放模式”仍可完整展示。
@@ -119,14 +119,13 @@ NEO4J_USER=neo4j
 NEO4J_PASSWORD=admin123456
 NEO4J_DATABASE=neo4j
 OPENAI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-OPENAI_MODEL=qwen3-max
+OPENAI_MODEL=qwen3.5-flash
 OPENAI_ENABLE_THINKING=false
-BRAIN_ACCEPTANCE_PROFILE=anchor_controlled
 TRAJECTORY_VERIFIER_ACCEPTANCE_PROFILE=guarded_lenient
 BRAIN_AGENT_EVAL_MODE=llm_verifier
 ```
 
-说明：`BRAIN_ACCEPTANCE_PROFILE` 控制结构化 stop policy，当前默认使用打薄后的 `anchor_controlled`；`TRAJECTORY_VERIFIER_ACCEPTANCE_PROFILE` 只控制轨迹 verifier prompt，默认仍保留 `guarded_lenient` 作为 verifier 提示词口径，不再启用旧版 guarded/PCP 组合 stop gate。
+说明：结构化 stop policy 已从运行链路移除，前端不再设置 `BRAIN_ACCEPTANCE_PROFILE`。当前 completed 只由 `llm_verifier` 或 observed-evidence final evaluator 的接受信号触发；verifier 拒绝时仍会保留 repair 链路继续补证据。`TRAJECTORY_VERIFIER_ACCEPTANCE_PROFILE` 只控制轨迹 verifier prompt，默认保留 `guarded_lenient` 作为 verifier 提示词口径。
 
 真实 API Key 不建议写入版本库。请复制本机私密配置模板：
 

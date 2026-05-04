@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import asdict, dataclass, is_dataclass
 from typing import Any, Type
 
@@ -143,6 +144,9 @@ class LlmClient:
             except Exception as exc:
                 last_error = self._classify_runtime_error(prompt_name, attempt_index, exc)
 
+            if attempt_index < total_attempts:
+                self._sleep_before_retry(attempt_index)
+
         if last_error is None:
             raise LlmStageFailedError(
                 stage=prompt_name,
@@ -152,6 +156,16 @@ class LlmClient:
             )
 
         raise last_error
+
+    # 结构化调用失败后做短退避，减少 qwen3.5-flash 偶发连接错误直接打断整例回放。
+    def _sleep_before_retry(self, attempt_index: int) -> None:
+        raw_value = os.getenv("OPENAI_STRUCTURED_RETRY_BACKOFF_SECONDS") or "0.8"
+        try:
+            base_seconds = float(raw_value)
+        except ValueError:
+            base_seconds = 0.8
+
+        time.sleep(min(max(base_seconds, 0.0) * (2 ** max(attempt_index - 1, 0)), 4.0))
 
     # 根据 prompt 名称和变量构建统一的文本提示。
     def _build_prompt(self, prompt_name: str, variables: dict) -> str:

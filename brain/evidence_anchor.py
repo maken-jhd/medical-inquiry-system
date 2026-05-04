@@ -14,6 +14,14 @@ from .types import EvidenceState, HypothesisScore, SessionState, SlotState
 # 一旦在真实会话里被明确命中，后续会优先作为强锚点或准强锚点参与排序。
 STRONG_ANCHOR_LABELS = {"Pathogen", "LabFinding", "ImagingFinding", "LabTest"}
 
+# observed anchor 需要进一步区分“精确命中 / 同族命中 / 背景命中 / 竞争性命中”。
+ANCHOR_SCOPE_EXACT = "exact_scope"
+ANCHOR_SCOPE_FAMILY = "family_scope"
+ANCHOR_SCOPE_PROVISIONAL = "provisional_scope"
+ANCHOR_SCOPE_PHENOTYPE = "phenotype_scope"
+ANCHOR_SCOPE_BACKGROUND = "background_scope"
+ANCHOR_SCOPE_COMPETING = "competing_scope"
+
 # 这组关系表示“疾病 <-> 证据”之间较强的诊断、确认或检查支持链路；
 # 命中这些关系时，会优先把证据视作 anchor 候选，而不是普通背景线索。
 ANCHOR_RELATION_TYPES = {
@@ -67,7 +75,6 @@ SPECIFIC_ANCHOR_FAMILY_TAGS = {
 DEFINITION_FAMILY_TAGS = {
     "detail",
     "metabolic_definition",
-    "blood_count",
 }
 
 
@@ -77,8 +84,11 @@ class EvidenceAnchorConfig:
 
     strong_anchor_bonus: float = 2.4
     provisional_anchor_bonus: float = 0.95
-    background_support_bonus: float = 0.18
+    family_anchor_bonus: float = 1.1
+    background_support_bonus: float = 0.10
     negative_anchor_penalty: float = 1.45
+    background_attractor_penalty: float = 0.82
+    scope_mismatch_penalty: float = 0.92
     present_clear_confidence: float = 1.0
     present_hedged_confidence: float = 0.55
     absent_clear_confidence: float = 1.0
@@ -155,8 +165,14 @@ class EvidenceAnchorAnalyzer:
             enriched,
             key=lambda item: (
                 -self._anchor_tier_priority(str(item.metadata.get("anchor_tier") or "")),
+                -float(item.metadata.get("exact_scope_anchor_score", 0.0)),
+                -float(item.metadata.get("family_scope_anchor_score", 0.0)),
                 -float(item.metadata.get("role_specificity_score", 0.0)),
+                -float(item.metadata.get("scope_specificity_score", 0.0)),
                 -float(item.metadata.get("observed_anchor_score", 0.0)),
+                float(item.metadata.get("background_attractor_score", 0.0)),
+                float(item.metadata.get("scope_mismatch_score", 0.0)),
+                float(item.metadata.get("generic_scope_penalty", 0.0)),
                 -float(item.score),
                 item.name,
             ),
@@ -262,6 +278,348 @@ class EvidenceAnchorAnalyzer:
 
         return frequency
 
+    # 给 observed anchor 计算一个“作用域系数”，避免背景命中和精确命中的权重混在一起。
+    def _anchor_scope_weight(self, scope: str) -> float:
+        return {
+            ANCHOR_SCOPE_EXACT: 1.0,
+            ANCHOR_SCOPE_FAMILY: 0.72,
+            ANCHOR_SCOPE_PROVISIONAL: 0.58,
+            ANCHOR_SCOPE_PHENOTYPE: 0.35,
+            ANCHOR_SCOPE_COMPETING: 0.24,
+            ANCHOR_SCOPE_BACKGROUND: 0.12,
+        }.get(scope, 0.2)
+
+    # 将原始 role 收敛成更稳定的作用域标签，供 A2 / stop / repair 共用。
+    def _scope_adjusted_role(self, role: str, scope: str) -> str:
+        if scope == ANCHOR_SCOPE_BACKGROUND:
+            return "background_context"
+
+        if scope in {ANCHOR_SCOPE_FAMILY, ANCHOR_SCOPE_COMPETING} and role in {"disease_specific_anchor", "definition_anchor"}:
+            return "family_anchor"
+
+        return role
+
+    # 根据候选名、证据名与关系类型，判断这条证据是精确命中、同族命中还是背景命中。
+    def _infer_anchor_scope(
+        self,
+        *,
+        item: ObservedEvidenceItem,
+        payload: dict,
+        label: str,
+        relation_type: str,
+        evidence_name: str,
+        candidate_name: str,
+        evidence_tags: set[str],
+        role: str,
+    ) -> tuple[str, str]:
+        evidence_text = self._normalize_text(evidence_name)
+        candidate_text = self._normalize_text(candidate_name)
+        payload_name = self._normalize_text(str(payload.get("name") or ""))
+        exact_name_match = (
+            len(evidence_text) > 0
+            and len(candidate_text) > 0
+            and (evidence_text == candidate_text or evidence_text in candidate_text or candidate_text in evidence_text)
+        )
+        scope_gap = self._clinical_scope_gap(candidate_text, evidence_text, payload_name)
+
+        if role == "background_context":
+            return ANCHOR_SCOPE_BACKGROUND, "role_background_context"
+
+        if relation_type == DISEASE_SELF_ANCHOR_RELATION_TYPE:
+            return ANCHOR_SCOPE_EXACT, "disease_self_match"
+
+        if self._is_background_evidence(evidence_name, candidate_name, evidence_tags, max(int(payload.get("disease_degree") or 0), 1)):
+            return ANCHOR_SCOPE_BACKGROUND, "background_keyword_or_family"
+
+        if scope_gap is not None:
+            return scope_gap
+
+        if label == "Pathogen" or relation_type == "HAS_PATHOGEN" or "type:pathogen" in evidence_tags:
+            if relation_type in {"RISK_FACTOR_FOR", "APPLIES_TO", "COMPLICATED_BY"}:
+                return ANCHOR_SCOPE_BACKGROUND, "pathogen_as_background_or_comorbidity"
+            if self._is_pathogen_family_scope(candidate_text, evidence_text, payload_name):
+                if self._is_pathogen_exact_scope(candidate_text, evidence_text, payload_name):
+                    return ANCHOR_SCOPE_EXACT, "pathogen_exact_match"
+                return ANCHOR_SCOPE_FAMILY, "pathogen_family_match"
+            return ANCHOR_SCOPE_BACKGROUND, "pathogen_not_named_in_candidate"
+
+        if exact_name_match:
+            return ANCHOR_SCOPE_EXACT, "normalized_name_match"
+
+        # 定义性关系本身就代表“这条细节值得拿来约束候选”，即使名称还没和疾病名精确对齐。
+        if relation_type in DETAIL_DEFINITION_RELATION_TYPES:
+            return ANCHOR_SCOPE_EXACT, "definition_relation_direct"
+
+        if label in {"LabFinding", "LabTest", "ImagingFinding", "ClinicalAttribute"}:
+            if self._has_site_specificity_tokens(candidate_text) and self._has_site_specificity_tokens(evidence_text):
+                return ANCHOR_SCOPE_EXACT, "site_specific_detail_match"
+
+            if len(evidence_tags & SPECIFIC_ANCHOR_FAMILY_TAGS) > 0 or relation_type in ANCHOR_RELATION_TYPES:
+                return ANCHOR_SCOPE_FAMILY, "specific_family_match"
+
+        if label == "ClinicalFinding" or relation_type == "MANIFESTS_AS":
+            return ANCHOR_SCOPE_PHENOTYPE, "phenotype_support"
+
+        if len(evidence_tags & SPECIFIC_ANCHOR_FAMILY_TAGS) > 0:
+            return ANCHOR_SCOPE_FAMILY, "specific_family_tag_match"
+
+        return ANCHOR_SCOPE_BACKGROUND, "fallback_background"
+
+    # 判断候选疾病的临床作用域是否被当前 observed evidence 真正覆盖。
+    # 这一步不是疾病补丁，而是防止“局部证据 -> 播散/泛化诊断”或“属级病原 -> 具体种/部位诊断”。
+    def _clinical_scope_gap(self, candidate_text: str, evidence_text: str, payload_name: str) -> tuple[str, str] | None:
+        candidate_tokens = self._clinical_scope_tokens(candidate_text)
+        evidence_tokens = self._clinical_scope_tokens(" ".join([evidence_text, payload_name]))
+        critical_candidate_tokens = self._critical_scope_tokens(candidate_tokens)
+
+        if len(critical_candidate_tokens) > 0:
+            missing = [
+                token
+                for token in sorted(critical_candidate_tokens)
+                if not self._scope_token_covered(token, evidence_tokens)
+            ]
+            if len(missing) > 0:
+                reason = "candidate_scope_not_observed:" + ",".join(missing)
+                if self._has_specific_scope_tokens(evidence_tokens):
+                    return ANCHOR_SCOPE_COMPETING, reason
+                return ANCHOR_SCOPE_FAMILY, reason
+
+        if self._is_generic_candidate_scope(candidate_text, candidate_tokens) and self._has_specific_scope_tokens(evidence_tokens):
+            return ANCHOR_SCOPE_FAMILY, "observed_evidence_more_specific_than_candidate"
+
+        return None
+
+    # 将候选疾病名和真实证据名的 scope facet 汇总成最终粒度画像。
+    # 它服务于“泛疾病 vs 部位特异疾病 / 基础感染 vs IRIS / 局部 vs 播散”的通用裁决。
+    def _build_candidate_scope_profile(
+        self,
+        *,
+        candidate_name: str,
+        observed_scope_facets: set[str],
+        scope_mismatch_reasons: Sequence[str],
+        has_observed_anchor: bool,
+    ) -> dict:
+        candidate_text = self._normalize_text(candidate_name)
+        candidate_facets = self._clinical_scope_tokens(candidate_text)
+        candidate_critical = self._critical_scope_tokens(candidate_facets)
+        observed_critical = self._critical_scope_tokens(observed_scope_facets)
+        missing_facets = [
+            token
+            for token in sorted(candidate_critical)
+            if not self._scope_token_covered(token, observed_scope_facets)
+        ]
+
+        covered_facets = [
+            token
+            for token in sorted(candidate_critical)
+            if self._scope_token_covered(token, observed_scope_facets)
+        ]
+        coverage_ratio = len(covered_facets) / len(candidate_critical) if len(candidate_critical) > 0 else 0.0
+        observed_site_facets = observed_critical & {"lung", "cns", "skin", "gi", "eye", "liver", "cervix", "mediastinum"}
+        candidate_site_facets = candidate_critical & {"lung", "cns", "skin", "gi", "eye", "liver", "cervix", "mediastinum"}
+        observed_more_specific = (
+            self._is_generic_candidate_scope(candidate_text, candidate_facets) and len(observed_critical) > 0
+        ) or (len(observed_site_facets) > 0 and len(candidate_site_facets) == 0)
+        generic_scope_penalty = 0.38 if observed_more_specific else 0.0
+        scope_requirement_missing_score = 0.0
+
+        if has_observed_anchor and len(missing_facets) > 0:
+            scope_requirement_missing_score = min(len(missing_facets) * 0.18, 0.54)
+
+        if "iris" in missing_facets:
+            scope_requirement_missing_score += 0.22
+
+        if "disseminated" in missing_facets:
+            scope_requirement_missing_score += 0.18
+
+        scope_specificity_score = 0.0
+        if len(candidate_critical) > 0:
+            scope_specificity_score = coverage_ratio * 0.7 + min(len(covered_facets) * 0.08, 0.24)
+        elif observed_more_specific:
+            scope_specificity_score = 0.0
+
+        return {
+            "candidate_scope_facets": sorted(candidate_facets),
+            "observed_scope_facets": sorted(observed_scope_facets),
+            "missing_scope_facets": missing_facets,
+            "covered_scope_facets": covered_facets,
+            "scope_specificity_score": round(scope_specificity_score, 4),
+            "generic_scope_penalty": round(generic_scope_penalty, 4),
+            "scope_requirement_missing_score": round(scope_requirement_missing_score, 4),
+            "scope_mismatch_reasons": list(scope_mismatch_reasons),
+        }
+
+    # 把疾病名和证据名里的部位、病程、病原精度等信息压成通用 scope token。
+    def _clinical_scope_tokens(self, text: str) -> set[str]:
+        normalized = self._normalize_text(text)
+        tokens: set[str] = set()
+
+        scope_rules = {
+            "lung": ("肺", "肺炎", "胸部", "支气管", "痰", "呼吸道", "肺泡灌洗", "bal", "balf"),
+            "cns": ("脑", "脑炎", "脑膜", "脑脊液", "颅内", "中枢", "神经"),
+            "skin": ("皮肤", "皮损", "皮疹", "软组织", "溃疡", "皮肤分泌物"),
+            "gi": ("食管", "结肠", "肠炎", "胃肠", "肠道"),
+            "eye": ("视网膜", "眼", "眼底"),
+            "liver": ("肝", "肝炎", "肝癌", "肝细胞"),
+            "cervix": ("宫颈",),
+            "mediastinum": ("纵隔",),
+            "disseminated": ("播散", "全身", "多器官", "血培养", "血液培养", "血液分枝杆菌"),
+            "iris": ("免疫重建", "iris", "抗病毒治疗后", "抗逆转录病毒治疗", "art", "art后", "病情稳定时突然恶化", "近期恶化", "重新恶化"),
+            "drug_resistant": ("耐药", "利福平"),
+            "malignancy": ("癌", "肉瘤", "淋巴瘤", "肿瘤", "恶性"),
+            "active_tb": ("活动性结核",),
+            "tb": ("结核", "mtb", "结核分枝杆菌", "xpert"),
+            "ntm": ("非结核", "ntm", "龟分枝杆菌", "偶然分枝杆菌", "脓肿分枝杆菌"),
+            "mycobacteria": ("分枝杆菌", "抗酸"),
+        }
+
+        for token, keywords in scope_rules.items():
+            if any(keyword in normalized for keyword in keywords):
+                tokens.add(token)
+
+        return tokens
+
+    def _critical_scope_tokens(self, tokens: set[str]) -> set[str]:
+        return {
+            token
+            for token in tokens
+            if token
+            in {
+                "lung",
+                "cns",
+                "skin",
+                "gi",
+                "eye",
+                "liver",
+                "cervix",
+                "mediastinum",
+                "disseminated",
+                "iris",
+                "drug_resistant",
+                "malignancy",
+                "active_tb",
+                "tb",
+                "ntm",
+            }
+        }
+
+    def _scope_token_covered(self, token: str, evidence_tokens: set[str]) -> bool:
+        if token == "disseminated":
+            site_tokens = evidence_tokens & {"lung", "cns", "skin", "gi", "eye", "liver", "cervix", "mediastinum"}
+            return "disseminated" in evidence_tokens or len(site_tokens) >= 2
+
+        if token == "active_tb":
+            return "active_tb" in evidence_tokens or ("tb" in evidence_tokens and "ntm" not in evidence_tokens)
+
+        if token == "tb":
+            return "tb" in evidence_tokens or "active_tb" in evidence_tokens
+
+        if token == "ntm":
+            return "ntm" in evidence_tokens
+
+        return token in evidence_tokens
+
+    def _has_specific_scope_tokens(self, tokens: set[str]) -> bool:
+        return len(self._critical_scope_tokens(tokens)) > 0 or "mycobacteria" in tokens
+
+    def _is_generic_candidate_scope(self, candidate_text: str, candidate_tokens: set[str]) -> bool:
+        if len(self._critical_scope_tokens(candidate_tokens)) > 0:
+            return False
+
+        return any(keyword in candidate_text for keyword in ("感染", "病", "阳性"))
+
+    # 病原证据如果只命中到同一病原家族但没有落到同一部位/同一疾病定义，应降为 family scope。
+    def _is_pathogen_family_scope(self, candidate_text: str, evidence_text: str, payload_name: str) -> bool:
+        if len(candidate_text) == 0 or len(evidence_text) == 0:
+            return False
+
+        if self._is_pathogen_exact_scope(candidate_text, evidence_text, payload_name):
+            return True
+
+        if evidence_text in candidate_text and self._has_site_specificity_tokens(candidate_text):
+            return True
+
+        pathogen_tokens = self._pathogen_family_tokens(evidence_text)
+        if len(pathogen_tokens) == 0:
+            return False
+
+        if not any(token in candidate_text for token in pathogen_tokens):
+            return False
+
+        return self._has_site_specificity_tokens(candidate_text)
+
+    # 如果候选本身只是“X感染 / X阳性”这一层，不带明确部位，病原证据可以视作更接近 exact scope。
+    def _is_pathogen_exact_scope(self, candidate_text: str, evidence_text: str, payload_name: str) -> bool:
+        if len(candidate_text) == 0 or len(evidence_text) == 0:
+            return False
+
+        if evidence_text == payload_name and not self._has_site_specificity_tokens(candidate_text):
+            return True
+
+        if evidence_text in candidate_text and not self._has_site_specificity_tokens(candidate_text):
+            return True
+
+        pathogen_tokens = self._pathogen_family_tokens(evidence_text)
+        if len(pathogen_tokens) == 0:
+            return False
+
+        return any(token in candidate_text for token in pathogen_tokens) and not self._has_site_specificity_tokens(candidate_text)
+
+    # 判断是否出现了明显的部位 / 病种细化词，用于区分 family 和 exact scope。
+    def _has_site_specificity_tokens(self, text: str) -> bool:
+        if len(text) == 0:
+            return False
+
+        site_tokens = (
+            "脑膜",
+            "脑炎",
+            "脑病",
+            "肺炎",
+            "肺部",
+            "肺孢子",
+            "呼吸道",
+            "食管",
+            "结肠",
+            "肠炎",
+            "胃炎",
+            "肝炎",
+            "肝癌",
+            "胆道",
+            "胰腺",
+            "心内膜",
+            "骨髓",
+            "视网膜",
+            "眼",
+            "皮肤",
+            "软组织",
+            "尿路",
+            "泌尿",
+        )
+        return any(token in text for token in site_tokens)
+
+    # 把常见病原名字拆成一个小的同族词表，避免同一种病原的不同部位都被当成 exact。
+    def _pathogen_family_tokens(self, text: str) -> set[str]:
+        rules = (
+            ("水痘带状疱疹", ("水痘带状疱疹", "带状疱疹", "vzv")),
+            ("巨细胞病毒", ("巨细胞病毒", "cmv")),
+            ("弓形虫", ("弓形虫", "toxoplasma", "toxoplasmagondii", "弓形虫病")),
+            ("隐球菌", ("隐球菌", "cryptococcus")),
+            ("结核分枝杆菌", ("结核", "分枝杆菌", "mtb", "xpert", "抗酸")),
+            ("肺孢子菌", ("肺孢子", "pcp", "pjp", "pneumocystis")),
+            ("人类疱疹病毒8", ("hhv8", "人类疱疹病毒8", "卡波西")),
+            ("乙肝病毒", ("乙肝", "hbv", "乙型肝炎")),
+            ("丙肝病毒", ("丙肝", "hcv", "丙型肝炎")),
+            ("hiv", ("hiv", "艾滋", "获得性免疫缺陷")),
+            ("新冠", ("新冠", "sarscov2", "covid")),
+        )
+        values: set[str] = set()
+
+        for family, keywords in rules:
+            if any(keyword in text for keyword in keywords):
+                values.add(family)
+
+        return values
+
     def _summarize_candidate(
         self,
         hypothesis: HypothesisScore,
@@ -270,6 +628,7 @@ class EvidenceAnchorAnalyzer:
     ) -> dict:
         strong: list[dict] = []
         definition: list[dict] = []
+        family_anchor: list[dict] = []
         provisional: list[dict] = []
         phenotype: list[dict] = []
         background: list[dict] = []
@@ -277,6 +636,9 @@ class EvidenceAnchorAnalyzer:
         low_cost_support: list[dict] = []
         low_cost_families: set[str] = set()
         observed_families: set[str] = set()
+        observed_scope_facets: set[str] = set()
+        scope_mismatch_reasons: list[str] = []
+        scope_mismatch_score = 0.0
 
         for item in observed_items:
             payload = self._best_payload_match(item, hypothesis)
@@ -312,6 +674,24 @@ class EvidenceAnchorAnalyzer:
                     match_frequency.get(item.node_id, self.config.default_disease_degree),
                 ),
             )
+            scope, scope_reason = self._infer_anchor_scope(
+                item=item,
+                payload=payload,
+                label=label,
+                relation_type=relation_type,
+                evidence_name=evidence_name,
+                candidate_name=hypothesis.name,
+                evidence_tags=evidence_tags,
+                role=role,
+            )
+            if item.polarity == "present" and item.resolution in {"clear", "hedged"}:
+                observed_scope_facets.update(self._clinical_scope_tokens(" ".join([evidence_name, item.name])))
+            if scope == ANCHOR_SCOPE_COMPETING or scope_reason.startswith("candidate_scope_not_observed"):
+                if scope_reason not in scope_mismatch_reasons:
+                    scope_mismatch_reasons.append(scope_reason)
+            adjusted_role = self._scope_adjusted_role(role, scope)
+            scope_weight = self._anchor_scope_weight(scope)
+            adjusted_score = round(score * scope_weight, 4)
             compact = {
                 "node_id": item.node_id,
                 "name": evidence_name,
@@ -320,8 +700,13 @@ class EvidenceAnchorAnalyzer:
                 "polarity": item.polarity,
                 "resolution": item.resolution,
                 "relation_type": relation_type,
-                "evidence_role": role,
-                "anchor_score": round(score, 4),
+                "evidence_role": adjusted_role,
+                "raw_evidence_role": role,
+                "anchor_scope": scope,
+                "anchor_scope_reason": scope_reason,
+                "anchor_scope_weight": round(scope_weight, 4),
+                "raw_anchor_score": round(score, 4),
+                "anchor_score": adjusted_score,
                 "source": item.source,
                 "source_turns": list(item.source_turns),
                 "evidence_tags": sorted(evidence_tags),
@@ -329,73 +714,104 @@ class EvidenceAnchorAnalyzer:
                 "evidence_cost": str(payload.get("evidence_cost") or item.metadata.get("evidence_cost") or ""),
             }
 
-            if self._is_negative_anchor(item, relation_type, label, role):
+            if self._is_negative_anchor(item, relation_type, label, role, scope):
                 negative.append(compact)
                 continue
 
             if item.polarity != "present":
                 continue
 
-            if item.resolution == "clear":
+            if item.resolution == "clear" and scope != ANCHOR_SCOPE_BACKGROUND:
                 observed_families.update(self._canonical_family_tags(evidence_tags))
                 if self._is_low_cost_profile_support(
                     item=item,
                     payload=payload,
                     label=label,
                     relation_type=relation_type,
-                    role=role,
+                    role=adjusted_role,
                     evidence_tags=evidence_tags,
                 ):
-                    families = self._low_cost_profile_families(evidence_tags, role)
+                    families = self._low_cost_profile_families(evidence_tags, adjusted_role)
                     low_cost_support.append({**compact, "low_cost_families": sorted(families)})
                     low_cost_families.update(families)
 
-            if role == "background_context":
+            if scope == ANCHOR_SCOPE_BACKGROUND:
                 background.append(compact)
                 continue
 
-            if role == "definition_anchor":
+            if adjusted_role == "definition_anchor":
                 if item.resolution == "clear":
                     definition.append(compact)
                 else:
                     provisional.append(compact)
                 continue
 
-            if role == "disease_specific_anchor":
+            if adjusted_role == "family_anchor":
+                family_anchor.append(compact)
+                if scope == ANCHOR_SCOPE_COMPETING:
+                    scope_mismatch_score += adjusted_score
+                continue
+
+            if adjusted_role == "disease_specific_anchor":
                 if item.resolution == "clear":
                     strong.append(compact)
                 else:
                     provisional.append(compact)
                 continue
 
-            if role == "phenotype_support":
+            if adjusted_role == "phenotype_support":
                 phenotype.append(compact)
             else:
                 background.append(compact)
 
         strong_score = sum(float(item.get("anchor_score", 0.0)) for item in strong)
         definition_score = sum(float(item.get("anchor_score", 0.0)) for item in definition)
+        family_score = sum(float(item.get("anchor_score", 0.0)) for item in family_anchor)
         provisional_score = sum(float(item.get("anchor_score", 0.0)) for item in provisional)
         phenotype_score = sum(float(item.get("anchor_score", 0.0)) for item in phenotype)
         background_score = sum(float(item.get("anchor_score", 0.0)) for item in background)
         negative_score = sum(float(item.get("anchor_score", 0.0)) for item in negative)
-        tier = self._select_anchor_tier(strong, definition, provisional, phenotype, background, negative)
+        exact_scope_total = strong_score + definition_score
+        provisional_total = provisional_score * 0.65
+        background_attractor_score = background_score if exact_scope_total + family_score == 0 else 0.0
+        tier = self._select_anchor_tier(strong, definition, family_anchor, provisional, phenotype, background, negative)
         missing_families, minimum_groups_available = self._minimum_family_gaps(hypothesis, observed_families)
         low_cost_present_clear_count = len(low_cost_support)
         low_cost_core_family_count = len(low_cost_families)
+        scope_profile = self._build_candidate_scope_profile(
+            candidate_name=hypothesis.name,
+            observed_scope_facets=observed_scope_facets,
+            scope_mismatch_reasons=scope_mismatch_reasons,
+            has_observed_anchor=(exact_scope_total + family_score + provisional_score + phenotype_score) > 0.0,
+        )
+        scope_mismatch_score += float(scope_profile["scope_requirement_missing_score"])
 
         return {
-            "observed_anchor_score": round(strong_score + definition_score + provisional_score * 0.65, 4),
+            "observed_anchor_score": round(exact_scope_total + family_score + provisional_total, 4),
+            "exact_scope_anchor_score": round(exact_scope_total, 4),
+            "family_scope_anchor_score": round(family_score, 4),
             "strong_anchor_score": round(strong_score, 4),
             "definition_anchor_score": round(definition_score, 4),
             "provisional_anchor_score": round(provisional_score, 4),
+            "family_anchor_score": round(family_score, 4),
             "phenotype_support_score": round(phenotype_score, 4),
             "background_support_score": round(background_score, 4),
+            "background_attractor_score": round(background_attractor_score, 4),
+            "scope_mismatch_score": round(scope_mismatch_score, 4),
+            "scope_specificity_score": round(float(scope_profile["scope_specificity_score"]), 4),
+            "generic_scope_penalty": round(float(scope_profile["generic_scope_penalty"]), 4),
+            "scope_requirement_missing_score": round(float(scope_profile["scope_requirement_missing_score"]), 4),
+            "candidate_scope_facets": scope_profile["candidate_scope_facets"],
+            "observed_scope_facets": scope_profile["observed_scope_facets"],
+            "missing_scope_facets": scope_profile["missing_scope_facets"],
+            "scope_mismatch_reasons": scope_profile["scope_mismatch_reasons"],
             "anchor_negative_score": round(negative_score, 4),
-            "role_specificity_score": round(strong_score + definition_score + provisional_score * 0.65 + phenotype_score * 0.25, 4),
+            "role_specificity_score": round(exact_scope_total + family_score * 0.8 + provisional_total + phenotype_score * 0.25, 4),
             "anchor_tier": tier,
+            "anchor_scope": ANCHOR_SCOPE_EXACT if exact_scope_total > 0 else ANCHOR_SCOPE_FAMILY if family_score > 0 else ANCHOR_SCOPE_PROVISIONAL if provisional_score > 0 else ANCHOR_SCOPE_PHENOTYPE if phenotype_score > 0 else ANCHOR_SCOPE_BACKGROUND if background_score > 0 else ANCHOR_SCOPE_COMPETING if negative_score > 0 else "speculative",
             "anchor_supporting_evidence": strong + definition,
             "definition_anchor_evidence": definition,
+            "family_anchor_evidence": family_anchor,
             "provisional_anchor_evidence": provisional,
             "phenotype_supporting_evidence": phenotype,
             "background_supporting_evidence": background,
@@ -411,7 +827,7 @@ class EvidenceAnchorAnalyzer:
             "low_cost_present_clear_count": low_cost_present_clear_count,
             "low_cost_profile_satisfied": low_cost_present_clear_count >= 2 and low_cost_core_family_count >= 2,
             "evidence_profile_acceptance_candidate": (
-                tier not in {"strong_anchor", "definition_anchor", "provisional_anchor", "negative_anchor"}
+                tier not in {"strong_anchor", "definition_anchor", "family_anchor", "provisional_anchor", "negative_anchor"}
                 and low_cost_present_clear_count >= 2
                 and low_cost_core_family_count >= 2
             ),
@@ -423,10 +839,15 @@ class EvidenceAnchorAnalyzer:
         bonus = (
             float(summary.get("strong_anchor_score", 0.0)) * self.config.strong_anchor_bonus
             + float(summary.get("definition_anchor_score", 0.0)) * self.config.strong_anchor_bonus
+            + float(summary.get("family_anchor_score", 0.0)) * self.config.family_anchor_bonus
             + float(summary.get("provisional_anchor_score", 0.0)) * self.config.provisional_anchor_bonus
             + float(summary.get("phenotype_support_score", 0.0)) * 0.35
             + float(summary.get("background_support_score", 0.0)) * self.config.background_support_bonus
+            + float(summary.get("scope_specificity_score", 0.0)) * 0.42
             - float(summary.get("anchor_negative_score", 0.0)) * self.config.negative_anchor_penalty
+            - float(summary.get("background_attractor_score", 0.0)) * self.config.background_attractor_penalty
+            - float(summary.get("scope_mismatch_score", 0.0)) * self.config.scope_mismatch_penalty
+            - float(summary.get("generic_scope_penalty", 0.0)) * 0.85
         )
         metadata = {
             **existing_metadata,
@@ -458,12 +879,26 @@ class EvidenceAnchorAnalyzer:
                     "candidate_id": hypothesis.node_id,
                     "candidate_name": hypothesis.name,
                     "anchor_tier": str(summary.get("anchor_tier") or "speculative"),
+                    "anchor_scope": str(summary.get("anchor_scope") or "speculative"),
                     "observed_anchor_score": float(summary.get("observed_anchor_score", 0.0)),
+                    "exact_scope_anchor_score": float(summary.get("exact_scope_anchor_score", 0.0)),
+                    "family_scope_anchor_score": float(summary.get("family_scope_anchor_score", 0.0)),
                     "role_specificity_score": float(summary.get("role_specificity_score", 0.0)),
+                    "family_anchor_score": float(summary.get("family_anchor_score", 0.0)),
                     "background_support_score": float(summary.get("background_support_score", 0.0)),
+                    "background_attractor_score": float(summary.get("background_attractor_score", 0.0)),
+                    "scope_mismatch_score": float(summary.get("scope_mismatch_score", 0.0)),
+                    "scope_specificity_score": float(summary.get("scope_specificity_score", 0.0)),
+                    "generic_scope_penalty": float(summary.get("generic_scope_penalty", 0.0)),
+                    "scope_requirement_missing_score": float(summary.get("scope_requirement_missing_score", 0.0)),
+                    "candidate_scope_facets": summary.get("candidate_scope_facets", []),
+                    "observed_scope_facets": summary.get("observed_scope_facets", []),
+                    "missing_scope_facets": summary.get("missing_scope_facets", []),
+                    "scope_mismatch_reasons": summary.get("scope_mismatch_reasons", []),
                     "anchor_negative_score": float(summary.get("anchor_negative_score", 0.0)),
                     "anchor_supporting_evidence": summary.get("anchor_supporting_evidence", []),
                     "definition_anchor_evidence": summary.get("definition_anchor_evidence", []),
+                    "family_anchor_evidence": summary.get("family_anchor_evidence", []),
                     "phenotype_supporting_evidence": summary.get("phenotype_supporting_evidence", []),
                     "anchor_negative_evidence": summary.get("anchor_negative_evidence", []),
                     "low_cost_support_families": summary.get("low_cost_support_families", []),
@@ -492,10 +927,18 @@ class EvidenceAnchorAnalyzer:
             "strong_anchor_candidates": [
                 item for item in candidates if str(item.get("anchor_tier") or "") in {"strong_anchor", "definition_anchor"}
             ],
+            "family_anchor_candidates": [
+                item for item in candidates if str(item.get("anchor_tier") or "") == "family_anchor"
+            ],
             "anchored_candidate_ids": [
                 str(item.get("candidate_id"))
                 for item in candidates
-                if str(item.get("anchor_tier") or "") in {"strong_anchor", "definition_anchor", "provisional_anchor"}
+                if str(item.get("anchor_tier") or "") in {
+                    "strong_anchor",
+                    "definition_anchor",
+                    "family_anchor",
+                    "provisional_anchor",
+                }
             ],
         }
 
@@ -651,8 +1094,11 @@ class EvidenceAnchorAnalyzer:
 
         return "background_context"
 
-    def _is_negative_anchor(self, item: ObservedEvidenceItem, relation_type: str, label: str, role: str) -> bool:
+    def _is_negative_anchor(self, item: ObservedEvidenceItem, relation_type: str, label: str, role: str, scope: str) -> bool:
         if item.polarity != "absent" or item.resolution != "clear":
+            return False
+
+        if scope == ANCHOR_SCOPE_BACKGROUND:
             return False
 
         return role in {"disease_specific_anchor", "definition_anchor"} or relation_type in ANCHOR_RELATION_TYPES
@@ -709,6 +1155,9 @@ class EvidenceAnchorAnalyzer:
         if role == "definition_anchor":
             return {"definition_detail"}
 
+        if role == "family_anchor":
+            return {"family_anchor"}
+
         return set()
 
     # 将旧审计标签和 catalog 标签压到同一命名空间，避免同一证据被重复计入 family coverage。
@@ -741,6 +1190,9 @@ class EvidenceAnchorAnalyzer:
 
         if self._is_hiv_specific_marker(evidence_text):
             return not any(keyword in candidate_text for keyword in ("hiv", "艾滋", "获得性免疫缺陷"))
+
+        if any(keyword in evidence_text for keyword in ("乙肝", "hbv", "乙型肝炎", "丙肝", "hcv", "丙型肝炎")):
+            return not any(keyword in candidate_text for keyword in ("乙肝", "hbv", "乙型肝炎", "丙肝", "hcv", "丙型肝炎", "肝炎"))
 
         if len(evidence_tags & BACKGROUND_FAMILY_TAGS) > 0 and len(evidence_tags & SPECIFIC_ANCHOR_FAMILY_TAGS) == 0:
             return True
@@ -849,6 +1301,7 @@ class EvidenceAnchorAnalyzer:
         self,
         strong: Sequence[dict],
         definition: Sequence[dict],
+        family_anchor: Sequence[dict],
         provisional: Sequence[dict],
         phenotype: Sequence[dict],
         background: Sequence[dict],
@@ -858,6 +1311,8 @@ class EvidenceAnchorAnalyzer:
             return "strong_anchor"
         if len(definition) > 0:
             return "definition_anchor"
+        if len(family_anchor) > 0:
+            return "family_anchor"
         if len(provisional) > 0:
             return "provisional_anchor"
         if len(phenotype) > 0:
@@ -870,8 +1325,9 @@ class EvidenceAnchorAnalyzer:
 
     def _anchor_tier_priority(self, tier: str) -> int:
         return {
-            "strong_anchor": 4,
-            "definition_anchor": 4,
+            "strong_anchor": 5,
+            "definition_anchor": 5,
+            "family_anchor": 4,
             "provisional_anchor": 3,
             "phenotype_supported": 2,
             "background_supported": 1,
@@ -882,6 +1338,8 @@ class EvidenceAnchorAnalyzer:
     def _missing_evidence_roles(self, tier: str) -> list[str]:
         if tier == "provisional_anchor":
             return ["clear_confirmation"]
+        if tier == "family_anchor":
+            return ["disease_specific_anchor", "definition_anchor", "clear_confirmation"]
         if tier in {"background_supported", "speculative", "negative_anchor"}:
             return ["disease_specific_anchor", "definition_anchor"]
         if tier == "phenotype_supported":

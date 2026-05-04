@@ -12,8 +12,8 @@
 
 - 主流程是 `A1 / A2 / A3` 三个阶段
 - `pending action interpretation` 是每轮正式进入 A1/A2/A3 之前的统一回答消化层
-- `anchor` 不是独立阶段，而是横切在 `A2` 重排、停机接受、verifier repair 三处的真实证据控制层
-- [`brain/stop_rules.py`](../brain/stop_rules.py) 这个文件名保留了历史名称，但当前默认语义已经是 `anchor_controlled acceptance gate`
+- `anchor` 不是独立阶段，而是横切在 `A2` 重排、verifier 评估和 repair 三处的真实证据控制层
+- [`brain/acceptance_controller.py`](../brain/acceptance_controller.py) 是当前最终接受入口，只消费 verifier / observed-evidence final evaluator 的接受或拒绝信号
 
 如果你在源码或历史输出里看到 `A4`，通常指的是历史残留命名，例如部分 `source_stage` metadata；它已经不是当前对外描述系统运行链路时的主阶段名称。
 
@@ -188,10 +188,10 @@
 
 ### 4.6 `StopDecision`
 
-表示某个 stop / accept 判断的结构化结果。当前最重要的两类判断是：
+表示某个阶段结束或最终接受判断的结构化结果。当前最重要的两类用途是：
 
-- `check_sufficiency()`：低成本启发式判断
-- `should_accept_final_answer()`：真正的 anchor-controlled 接受闸门
+- `should_accept_final_answer()`：verifier-only 最终接受控制
+- `no_exam_and_no_low_cost_questions / repeated_chief_complaint_without_signal`：无法继续有效追问时的阶段性报告
 
 ## 5. 一张总图：当前单轮 `process_turn()` 做了什么
 
@@ -222,7 +222,6 @@ sequenceDiagram
         B->>T: run_reasoning_search()
         T-->>B: SearchResult + final_answer_scores
     end
-    B->>G: check_sufficiency()
     B->>G: should_accept_final_answer()
     alt 可以接受当前答案
         G-->>B: final_report
@@ -647,26 +646,13 @@ update_from_pending_action()
 
 之间的切换
 
-即使它给出了局部 `STOP` 倾向，也会在后面被 `_gate_pending_action_route()` 先降回 A3，交给 anchor-controlled 接受层再做全局确认。
+即使它给出了局部 `STOP` 倾向，也会在后面被 `_gate_pending_action_route()` 先降回 A3，交给 search + verifier 再做全局确认。
 
 ## 8. A3 搜索之后，当前是如何决定“停还是继续问”
 
 这是当前版本相比旧文档变化最大的地方。
 
-### 8.1 先做一个低成本启发式 stop
-
-调用：
-
-- `StopRuleEngine.check_sufficiency()`
-
-它只看：
-
-- top1 分数
-- top1 和 top2 的 margin
-
-这个判断还很粗，只能算“便宜的初筛”。
-
-### 8.2 再从 trajectory 里选出当前最优答案
+### 8.1 从 trajectory 里选出当前最优答案
 
 调用：
 
@@ -674,40 +660,29 @@ update_from_pending_action()
 
 它从 `search_result.final_answer_scores` 里挑一个当前最优答案，作为后续真正接受判断的输入。
 
-### 8.3 真正的停机闸门是 `should_accept_final_answer()`
+### 8.2 真正的最终接受入口是 `should_accept_final_answer()`
 
 调用：
 
-- `StopRuleEngine.should_accept_final_answer(best_answer_score, session_state)`
+- `VerifierAcceptanceController.should_accept_final_answer(best_answer_score, session_state)`
 
-当前默认会读取：
+它不再读取 stop profile，也不再叠加 turn、trajectory、anchor、score 等阈值。当前规则只有两条：
 
-- `acceptance_profile = anchor_controlled`
+- `llm_verifier` 或 `observed_evidence_final_evaluator` 接受，则 `final_answer_accepted`
+- verifier 明确拒绝，则 `verifier_rejected_stop`，并把 `repair_reject_reason / path_control_reason` 交给 repair 继续补证据
 
-它现在综合考虑的不是旧 stop rule 合同，而是这些结构化条件：
+### 8.3 当前 `anchor` 具体用于什么
 
-- 最少轮次窗口
-- trajectory 数量窗口
-- verifier 是否硬拒绝
-- 当前答案有没有真实 observed anchor
-- 是否存在更强 anchored alternative
-- 是否存在 clear negative definition evidence
-- 基础 `consistency / agent_evaluation / final_score` 阈值
-
-### 8.4 当前 `anchor` 具体拦什么
-
-在 `anchor_controlled` profile 下，当前答案大致分为下面几类：
+`anchor` 仍然会把候选标成：
 
 - `strong_anchor`
 - `definition_anchor`
-- `provisional_anchor`
+- `family_anchor`
 - `background_supported`
 - `speculative`
 - `negative_anchor`
 
-当前接受层的原则是：
-
-- 只有命中了可接受 observed anchor 的答案，才有资格进入最终接受
+但它现在主要影响 A2 排序、trajectory evaluator 的真实证据评分、scope guard 和 repair 选问；不再作为独立 stop gate 放行或拒停。
 - 纯背景证据支撑的答案不能直接作为最终结论
 - 若真实会话里另一个候选有更强锚点，当前 top answer 会被挡下
 - 若存在清晰的定义性反证，也会被挡下
@@ -794,8 +769,8 @@ process_turn()
 | `A2` | 仍是 `A2`，但会紧接 observed anchor rerank |
 | `A3` | 仍是 `A3`，负责 `R2 + action + search + rollout + question selection` |
 | `A4` | 不再作为主阶段；其职责拆散到了 `pending_action interpretation + evidence write-back + route decision` |
-| `stop rule` | 文件名还在，但主语义已经是 `anchor-controlled acceptance + repair gate` |
-| “症状问完直接停” | 现在必须再经过 search / trajectory / anchor / verifier 的全局确认 |
+| `stop rule` | 已从主链路删除；当前是 `verifier-only acceptance + repair` |
+| “症状问完直接停” | 现在必须再经过 search / trajectory / verifier 的全局确认 |
 
 ## 11. 推荐按什么顺序读源码
 
@@ -813,10 +788,10 @@ process_turn()
    - 看 A2 组织与 verifier repair 重排
 6. [`brain/action_builder.py`](../brain/action_builder.py)
    - 看动作构造和 A3 提问渲染
-7. [`brain/stop_rules.py`](../brain/stop_rules.py)
-   - 看 `should_accept_final_answer()`
-8. [`brain/trajectory_evaluator.py`](../brain/trajectory_evaluator.py)
+7. [`brain/trajectory_evaluator.py`](../brain/trajectory_evaluator.py)
    - 看 best answer 选择和 verifier 结果
+8. [`brain/acceptance_controller.py`](../brain/acceptance_controller.py)
+   - 看 verifier-only 最终接受控制
 
 ## 12. 最后一句话总结当前版本
 

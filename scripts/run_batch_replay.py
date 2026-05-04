@@ -70,6 +70,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="禁用断点续跑；即使输出目录中已有 replay_results.jsonl，也会重新运行全部病例。",
     )
+    parser.add_argument(
+        "--api-error-retries",
+        type=int,
+        default=1,
+        help="遇到 APIConnectionError / Connection error 时，单病例额外自动重试次数。",
+    )
     return parser.parse_args()
 
 
@@ -120,12 +126,75 @@ def _build_unexpected_case_failure_result(case, exc: Exception, *, stage: str) -
     )
 
 
-def _run_single_case_guarded(case, max_turns: int):
-    try:
-        return _run_single_case(case, max_turns)
-    except Exception as exc:
-        # batch runner 再兜一层：即使单病例出现普通运行时异常，也只把该病例记为 failed。
-        return _build_unexpected_case_failure_result(case, exc, stage="batch_runner")
+def _run_single_case_guarded(case, max_turns: int, api_error_retries: int = 1):
+    retry_count = max(int(api_error_retries), 0)
+    retries_used = 0
+
+    while True:
+        try:
+            result = _run_single_case(case, max_turns)
+        except Exception as exc:
+            if retries_used < retry_count and _is_retryable_api_exception(exc):
+                retries_used += 1
+                continue
+
+            # batch runner 再兜一层：即使单病例出现普通运行时异常，也只把该病例记为 failed。
+            result = _build_unexpected_case_failure_result(case, exc, stage="batch_runner")
+            _annotate_batch_retry(result, retries_used)
+            return result
+
+        if retries_used < retry_count and _is_retryable_api_error_result(result):
+            retries_used += 1
+            continue
+
+        _annotate_batch_retry(result, retries_used)
+        return result
+
+
+def _is_retryable_api_exception(exc: Exception) -> bool:
+    text = f"{type(exc).__name__}: {exc}"
+    return _contains_retryable_api_error(text)
+
+
+def _is_retryable_api_error_result(result: object) -> bool:
+    if not isinstance(result, ReplayResult) or result.status != "failed":
+        return False
+
+    error_payload = dict(result.error or {})
+    text = " ".join(
+        str(error_payload.get(key) or "")
+        for key in ("code", "stage", "prompt_name", "message", "error_type")
+    )
+    return _contains_retryable_api_error(text)
+
+
+def _contains_retryable_api_error(text: str) -> bool:
+    normalized = text.lower()
+    return any(
+        marker in normalized
+        for marker in (
+            "apiconnectionerror",
+            "connection error",
+            "api connection error",
+        )
+    )
+
+
+def _annotate_batch_retry(result: object, retries_used: int) -> None:
+    if not isinstance(result, ReplayResult):
+        return
+
+    result.timing["batch_retry_attempts"] = retries_used
+    if retries_used <= 0:
+        return
+
+    result.timing["retried_after_api_connection_error"] = True
+    if result.status == "failed":
+        result.error = {
+            **dict(result.error or {}),
+            "batch_retry_attempts": retries_used,
+            "retried_after_api_connection_error": True,
+        }
 
 
 def _format_progress_line(completed: int, total: int) -> str:
@@ -242,6 +311,7 @@ def _run_cases_streaming(
     *,
     max_turns: int,
     case_concurrency: int,
+    api_error_retries: int = 1,
     on_case_start=None,
     on_result=None,
     progress_callback=None,
@@ -260,7 +330,7 @@ def _run_cases_streaming(
         for index, case in enumerate(cases, start=1):
             if on_case_start is not None:
                 on_case_start(case, index, total)
-            result = _run_single_case_guarded(case, max_turns)
+            result = _run_single_case_guarded(case, max_turns, api_error_retries)
             if on_result is not None:
                 on_result(result, case, index, total)
             callback(index, total, finished=index == total)
@@ -284,7 +354,7 @@ def _run_cases_streaming(
             started += 1
             if on_case_start is not None:
                 on_case_start(case, started, total)
-            futures[executor.submit(_run_single_case_guarded, case, max_turns)] = case
+            futures[executor.submit(_run_single_case_guarded, case, max_turns, api_error_retries)] = case
 
         while futures:
             for future in as_completed(list(futures.keys())):
@@ -306,7 +376,9 @@ def _run_cases_streaming(
                     started += 1
                     if on_case_start is not None:
                         on_case_start(next_case, started, total)
-                    futures[executor.submit(_run_single_case_guarded, next_case, max_turns)] = next_case
+                    futures[
+                        executor.submit(_run_single_case_guarded, next_case, max_turns, api_error_retries)
+                    ] = next_case
                 break
     except KeyboardInterrupt:
         interrupted = True
@@ -317,7 +389,14 @@ def _run_cases_streaming(
             executor.shutdown(wait=True, cancel_futures=False)
 
 
-def _run_cases(cases, *, max_turns: int, case_concurrency: int, progress_callback=None):
+def _run_cases(
+    cases,
+    *,
+    max_turns: int,
+    case_concurrency: int,
+    api_error_retries: int = 1,
+    progress_callback=None,
+):
     indexed_results: dict[int, Any] = {}
     case_index_map = {case.case_id: index for index, case in enumerate(cases)}
 
@@ -329,6 +408,7 @@ def _run_cases(cases, *, max_turns: int, case_concurrency: int, progress_callbac
         cases,
         max_turns=max_turns,
         case_concurrency=case_concurrency,
+        api_error_retries=api_error_retries,
         on_result=collect_result,
         progress_callback=progress_callback,
     )
@@ -670,6 +750,7 @@ def main() -> int:
         (
             f"启动 batch replay：总病例 {len(cases)}，已完成 {len(existing_results)}，"
             f"待运行 {len(pending_cases)}，并发 {max(int(args.case_concurrency), 1)}，"
+            f"api_error_retries={max(int(args.api_error_retries), 0)}，"
             f"resume={'off' if args.no_resume else 'on'}，llm_available={str(llm_available).lower()}"
         ),
     )
@@ -677,6 +758,7 @@ def main() -> int:
         (
             f"[batch_replay] 启动：总病例 {len(cases)}，已完成 {len(existing_results)}，"
             f"待运行 {len(pending_cases)}，并发 {max(int(args.case_concurrency), 1)}，"
+            f"API 连接错误重试 {max(int(args.api_error_retries), 0)} 次，"
             f"resume={'off' if args.no_resume else 'on'}，llm_available={str(llm_available).lower()}"
         )
     )
@@ -734,6 +816,8 @@ def main() -> int:
         slowest_turn_total_seconds = float(result.timing.get("slowest_turn_total_seconds", 0.0) or 0.0)
         error_payload = dict(result.error or {})
         error_suffix = ""
+        retry_attempts = int(result.timing.get("batch_retry_attempts", 0) or 0)
+        retry_suffix = f"，batch_retry_attempts={retry_attempts}" if retry_attempts > 0 else ""
         if result.status == "failed":
             error_suffix = (
                 f"，error_code={str(error_payload.get('code', ''))}"
@@ -748,7 +832,7 @@ def main() -> int:
                 f"patient_answer_seconds_total={_format_duration_value(patient_total_seconds)}，brain_turn_seconds_total={_format_duration_value(brain_total_seconds)}，"
                 f"finalize_seconds={_format_duration_value(finalize_seconds)}，slowest_turn={slowest_turn_index}:{_format_duration_value(slowest_turn_total_seconds)}s，"
                 f"本轮完成 {completed}/{total}，累计完成 {len(results)}/{len(cases)}"
-                f"{error_suffix}"
+                f"{retry_suffix}{error_suffix}"
             ),
         )
         _emit_terminal_line(
@@ -756,7 +840,7 @@ def main() -> int:
                 f"[batch_replay] 病例完成 {len(results)}/{len(cases)}："
                 f"case_id={result.case_id}，status={result.status}，"
                 f"total_seconds={_format_duration_value(total_seconds)}，turns={len(result.turns)}"
-                f"{error_suffix}"
+                f"{retry_suffix}{error_suffix}"
             )
         )
 
@@ -801,6 +885,7 @@ def main() -> int:
                 pending_cases,
                 max_turns=args.max_turns,
                 case_concurrency=args.case_concurrency,
+                api_error_retries=args.api_error_retries,
                 on_case_start=handle_case_start,
                 on_result=persist_result,
             )

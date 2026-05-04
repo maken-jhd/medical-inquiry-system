@@ -16,6 +16,8 @@ class ActionBuilderConfig:
     exam_context_action_type: str = "collect_exam_context"
     general_exam_context_action_type: str = "collect_general_exam_context"
     red_flag_bonus: float = 1.5
+    low_cost_discriminative_bonus: float = 0.28
+    background_probe_penalty: float = 0.22
 
 
 class ActionBuilder:
@@ -97,7 +99,23 @@ class ActionBuilder:
             priority += recommended_bonus
             accessibility_bias = self._compute_accessibility_bias(acquisition_mode, evidence_cost)
             priority += accessibility_bias
+            low_cost_discriminative_bonus = self._low_cost_discriminative_bonus(
+                acquisition_mode=acquisition_mode,
+                evidence_cost=evidence_cost,
+                evidence_tags=evidence_tags,
+                question_type_hint=question_type_hint,
+                target_name=str(row.get("name", row.get("node_id", ""))),
+            )
+            priority += low_cost_discriminative_bonus
             patient_burden = self._estimate_patient_burden(acquisition_mode, evidence_cost, question_type_hint)
+            answerability_score = self._estimate_answerability_score(
+                action_type=self.config.default_action_type,
+                acquisition_mode=acquisition_mode,
+                evidence_cost=evidence_cost,
+                question_type_hint=question_type_hint,
+                label=str(row.get("label", "")),
+            )
+            priority += answerability_score * 0.45
 
             # 高成本检查证据不会直接问“结果是什么”，
             # 而是先看当前 session 里是否已经知道患者做没做过这类检查。
@@ -180,6 +198,7 @@ class ActionBuilder:
                         "acquisition_mode": acquisition_mode,
                         "evidence_cost": evidence_cost,
                         "accessibility_bias": accessibility_bias,
+                        "answerability_score": answerability_score,
                         "discriminative_gain": discriminative_gain,
                         "novelty_score": novelty_score,
                         "patient_burden": patient_burden,
@@ -191,6 +210,7 @@ class ActionBuilder:
                         "verifier_recommended_match_score": verifier_recommended_match_score,
                         "hypothesis_recommended_match_score": hypothesis_recommended_match_score,
                         "joint_recommended_match_score": joint_recommended_match_score,
+                        "low_cost_discriminative_bonus": low_cost_discriminative_bonus,
                         "evidence_tags": sorted(evidence_tags),
                     },
                 )
@@ -445,6 +465,13 @@ class ActionBuilder:
                     "verifier_recommended_match_score": verifier_recommended_match_score,
                     "hypothesis_recommended_match_score": hypothesis_recommended_match_score,
                     "joint_recommended_match_score": joint_recommended_match_score,
+                    "answerability_score": self._estimate_answerability_score(
+                        action_type=action_type,
+                        acquisition_mode=acquisition_mode,
+                        evidence_cost=evidence_cost,
+                        question_type_hint=exam_kind,
+                        label=str(row.get("label", "")),
+                    ),
                     "exam_candidate_evidence": [candidate_payload],
                     "exam_examples": [candidate_payload["name"]],
                     "evidence_tags": sorted(
@@ -462,6 +489,16 @@ class ActionBuilder:
 
         # 若该类动作已存在，只补充候选证据、示例名称和 family tags，不再新建动作。
         action.prior_score = max(action.prior_score, priority - 0.05)
+        action.metadata["answerability_score"] = max(
+            float(action.metadata.get("answerability_score", 0.0)),
+            self._estimate_answerability_score(
+                action_type=action.action_type,
+                acquisition_mode=acquisition_mode,
+                evidence_cost=evidence_cost,
+                question_type_hint=str(row.get("question_type_hint", candidate_exam_kind)),
+                label=str(action.target_node_label),
+            ),
+        )
         action.metadata["discriminative_gain"] = max(
             float(action.metadata.get("discriminative_gain", 0.0)),
             discriminative_gain,
@@ -579,28 +616,129 @@ class ActionBuilder:
     # 使用 acquisition_mode / evidence_cost 估算患者负担。
     def _estimate_patient_burden(self, acquisition_mode: str, evidence_cost: str, question_type_hint: str) -> float:
         if evidence_cost == "low" or acquisition_mode in {"direct_ask", "history_known"}:
-            return 0.2
+            return 0.14
 
         if evidence_cost == "medium" or acquisition_mode == "needs_clinician_assessment":
-            return 0.4
+            return 0.48
 
         if evidence_cost == "high" or acquisition_mode in {"needs_lab_test", "needs_imaging", "needs_pathogen_test"}:
-            return 0.65
+            return 0.8
 
         return 0.55 if question_type_hint in {"lab", "imaging", "pathogen"} else 0.25
 
     # 轻量成本偏置：只在信息量接近时影响排序，不阻止高价值检查证据。
     def _compute_accessibility_bias(self, acquisition_mode: str, evidence_cost: str) -> float:
         if acquisition_mode in {"direct_ask", "history_known"} or evidence_cost == "low":
-            return 0.18
+            return 0.34
 
         if acquisition_mode == "needs_clinician_assessment" or evidence_cost == "medium":
-            return 0.04
+            return 0.08
 
         if acquisition_mode in {"needs_lab_test", "needs_imaging", "needs_pathogen_test"} or evidence_cost == "high":
-            return -0.08
+            return -0.16
 
         return 0.0
+
+    # 低成本问题也要区分“有鉴别价值”和“只是背景信息”。
+    def _low_cost_discriminative_bonus(
+        self,
+        *,
+        acquisition_mode: str,
+        evidence_cost: str,
+        evidence_tags: set[str],
+        question_type_hint: str,
+        target_name: str,
+    ) -> float:
+        is_low_cost = acquisition_mode in {"direct_ask", "history_known"} or evidence_cost == "low"
+        if not is_low_cost:
+            return 0.0
+
+        semantic_tags = {tag for tag in evidence_tags if not tag.startswith("type:")}
+        background_tags = {"immune_status", "underlying_infection", "general_risk", "constitutional_symptom", "viral_load", "population_risk"}
+        discriminative_tags = {
+            "respiratory_symptom",
+            "neurologic_symptom",
+            "skin_symptom",
+            "gi_symptom",
+            "metabolic_definition",
+            "detail",
+            "general_detail",
+            "exposure_risk",
+            "pathology",
+            "tumor_marker",
+            "respiratory",
+            "systemic",
+            "risk",
+            "tuberculosis",
+            "pcp_specific",
+        }
+        normalized_name = self._normalize_match_text(target_name)
+
+        if any(keyword in normalized_name for keyword in ("cd4", "免疫", "hiv感染", "hiv感染者", "hivaids", "发热", "发烧", "年龄", "性别")):
+            return -self.config.background_probe_penalty
+
+        if len(semantic_tags & discriminative_tags) > 0:
+            return self.config.low_cost_discriminative_bonus
+
+        if question_type_hint in {"symptom", "risk", "detail"} and len(semantic_tags - background_tags) > 0:
+            return self.config.low_cost_discriminative_bonus * 0.65
+
+        if len(semantic_tags) > 0 and semantic_tags <= background_tags:
+            return -self.config.background_probe_penalty
+
+        if any(keyword in normalized_name for keyword in ("cd4", "免疫", "hiv感染", "hiv感染者", "hivaids", "发热", "发烧", "年龄", "性别")):
+            return -self.config.background_probe_penalty
+
+        return 0.0
+
+    # 估算患者能否直接回答当前动作，以及它是否值得被优先追问。
+    def _estimate_answerability_score(
+        self,
+        *,
+        action_type: str,
+        acquisition_mode: str,
+        evidence_cost: str,
+        question_type_hint: str,
+        label: str,
+    ) -> float:
+        if action_type == self.config.general_exam_context_action_type:
+            return 0.78
+
+        if action_type == self.config.exam_context_action_type:
+            if evidence_cost == "high" or acquisition_mode in {"needs_lab_test", "needs_imaging", "needs_pathogen_test"}:
+                return 0.22
+            return 0.5
+
+        if acquisition_mode in {"direct_ask", "history_known"} or evidence_cost == "low":
+            return 1.0
+
+        if acquisition_mode == "needs_clinician_assessment" or evidence_cost == "medium":
+            return 0.55
+
+        if acquisition_mode in {"needs_lab_test", "needs_imaging", "needs_pathogen_test"} or evidence_cost == "high":
+            return 0.16
+
+        if label == "ClinicalFinding":
+            return 0.72
+
+        if question_type_hint in {"lab", "imaging", "pathogen"}:
+            return 0.25
+
+        return 0.48
+
+    def _normalize_match_text(self, text: str) -> str:
+        return (
+            str(text or "")
+            .strip()
+            .lower()
+            .replace(" ", "")
+            .replace("（", "(")
+            .replace("）", ")")
+            .replace("-", "")
+            .replace("_", "")
+            .replace("/", "")
+            .replace("+", "")
+        )
 
     # 检查上下文动作的展示名。
     def _exam_context_display_name(self, exam_kind: str) -> str:

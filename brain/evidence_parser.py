@@ -108,6 +108,12 @@ class EvidenceParser:
                 reasoning="沿用当前患者上下文中的统一提及项。",
                 metadata={"source": "patient_context"},
             )
+        elif bool(patient_context.metadata.get("empty_extraction_fallback", False)):
+            turn_result = TurnInterpretationResult(
+                mentions=[],
+                reasoning="本轮未抽取到稳定医学提及项，沿用空提及兜底结果。",
+                metadata={"source": "empty_extraction_fallback"},
+            )
         else:
             turn_result = self.interpret_turn(patient_context.raw_text)
 

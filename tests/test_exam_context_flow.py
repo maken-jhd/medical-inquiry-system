@@ -74,7 +74,7 @@ def _build_brain(
             med_extractor=object(),
             entity_linker=entity_linker or object(),
             question_selector=object(),
-            stop_rule_engine=object(),
+            acceptance_controller=object(),
             report_builder=ReportBuilder(),
             evidence_parser=EvidenceParser(llm_client=llm_client),
             hypothesis_manager=HypothesisManager(),

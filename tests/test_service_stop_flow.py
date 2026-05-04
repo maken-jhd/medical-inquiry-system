@@ -44,6 +44,35 @@ class ColdStartRetriever(DummyRetriever):
         ]
 
 
+class ColdStartWithR2Retriever(ColdStartRetriever):
+    """同时提供全局冷启动和候选内低成本证据，验证 fallback 优先扩展现有诊断路径。"""
+
+    def retrieve_r2_expected_evidence(
+        self,
+        hypothesis: HypothesisScore,
+        session_state: SessionState,
+        top_k: int | None = None,
+    ) -> list[dict]:
+        _ = hypothesis, session_state, top_k
+        return [
+            {
+                "node_id": "symptom_rash",
+                "label": "ClinicalFinding",
+                "name": "皮疹",
+                "relation_type": "MANIFESTS_AS",
+                "relation_weight": 0.8,
+                "node_weight": 1.0,
+                "contradiction_priority": 0.8,
+                "question_type_hint": "symptom",
+                "priority": 2.0,
+                "is_red_flag": False,
+                "topic_id": "Disease",
+                "acquisition_mode": "direct_ask",
+                "evidence_cost": "low",
+            }
+        ]
+
+
 class EvidenceProfileRetriever(DummyRetriever):
     """提供固定候选证据画像，验证 service 会注入 A2 展示字段。"""
 
@@ -84,8 +113,8 @@ class FakeStateTracker:
         return self.state
 
 
-class FakeStopRuleEngine:
-    """返回预设 accept decision，并保留一个基础 sufficiency 结果。"""
+class FakeAcceptanceController:
+    """返回预设 accept decision，模拟 verifier-only 最终接受控制。"""
 
     def __init__(self, accept_decision: StopDecision) -> None:
         self.accept_decision = accept_decision
@@ -97,10 +126,6 @@ class FakeStopRuleEngine:
     ) -> StopDecision:
         _ = answer_score, session_state
         return self.accept_decision
-
-    def check_sufficiency(self, session_state: SessionState, hypotheses: list[object]) -> StopDecision:
-        _ = session_state, hypotheses
-        return StopDecision(True, "top1_margin_sufficient", 1.0)
 
 
 class FakeTrajectoryEvaluator:
@@ -161,16 +186,12 @@ class MinimalRouter:
         return RouteDecision(stage="A2", reason="minimal_test_route")
 
 
-class NonStoppingRuleEngine:
-    """测试中始终保持继续问诊。"""
-
-    def check_sufficiency(self, session_state: SessionState, hypotheses: list[object]) -> StopDecision:
-        _ = session_state, hypotheses
-        return StopDecision(False, "insufficient_information", 0.0)
+class NonAcceptingController:
+    """测试中始终不接受最终答案。"""
 
     def should_accept_final_answer(self, answer_score: object, session_state: SessionState) -> StopDecision:
         _ = answer_score, session_state
-        return StopDecision(False, "no_answer_score", 0.0)
+        return StopDecision(False, "verifier_not_ready", 0.0)
 
 
 class EmptyTrajectoryEvaluator:
@@ -189,7 +210,7 @@ def _build_brain(state: SessionState, accept_decision: StopDecision, best_answer
             med_extractor=object(),
             entity_linker=object(),
             question_selector=object(),
-            stop_rule_engine=FakeStopRuleEngine(accept_decision),
+            acceptance_controller=FakeAcceptanceController(accept_decision),
             report_builder=ReportBuilder(),
             evidence_parser=object(),
             hypothesis_manager=object(),
@@ -315,7 +336,7 @@ def test_choose_cold_start_probe_action_when_a2_a3_has_no_action() -> None:
             med_extractor=object(),
             entity_linker=object(),
             question_selector=QuestionSelector(),
-            stop_rule_engine=object(),
+            acceptance_controller=object(),
             report_builder=ReportBuilder(),
             evidence_parser=object(),
             hypothesis_manager=object(),
@@ -335,6 +356,38 @@ def test_choose_cold_start_probe_action_when_a2_a3_has_no_action() -> None:
     assert action.target_node_name == "HIV感染或免疫抑制背景"
 
 
+def test_cold_start_probe_prefers_remaining_low_cost_r2_over_global_background() -> None:
+    state = SessionState(session_id="s3_r2", turn_index=2)
+    state.candidate_hypotheses = [
+        HypothesisScore(node_id="d1", label="Disease", name="候选疾病", score=1.0),
+    ]
+    brain = ConsultationBrain(
+        BrainDependencies(
+            state_tracker=FakeStateTracker(state),
+            retriever=ColdStartWithR2Retriever(),
+            med_extractor=object(),
+            entity_linker=object(),
+            question_selector=QuestionSelector(),
+            acceptance_controller=object(),
+            report_builder=ReportBuilder(),
+            evidence_parser=object(),
+            hypothesis_manager=object(),
+            action_builder=ActionBuilder(),
+            router=object(),
+            mcts_engine=object(),
+            simulation_engine=object(),
+            trajectory_evaluator=object(),
+            llm_client=object(),
+        )
+    )
+
+    action = brain._choose_cold_start_probe_action("s3_r2")
+
+    assert action is not None
+    assert action.target_node_name == "皮疹"
+    assert action.metadata["cold_start_source"] == "r2_low_cost_expansion"
+
+
 def test_process_turn_asks_chief_complaint_when_patient_only_greets() -> None:
     tracker = StateTracker()
     tracker.create_session("s4")
@@ -345,7 +398,7 @@ def test_process_turn_asks_chief_complaint_when_patient_only_greets() -> None:
             med_extractor=EmptyMedExtractor(),
             entity_linker=EmptyEntityLinker(),
             question_selector=QuestionSelector(),
-            stop_rule_engine=NonStoppingRuleEngine(),
+            acceptance_controller=NonAcceptingController(),
             report_builder=ReportBuilder(),
             evidence_parser=EmptyEvidenceParser(),
             hypothesis_manager=object(),
@@ -388,7 +441,7 @@ def test_chief_complaint_pending_action_routes_next_reply_back_to_a1() -> None:
             med_extractor=EmptyMedExtractor(),
             entity_linker=EmptyEntityLinker(),
             question_selector=QuestionSelector(),
-            stop_rule_engine=NonStoppingRuleEngine(),
+            acceptance_controller=NonAcceptingController(),
             report_builder=ReportBuilder(),
             evidence_parser=EmptyEvidenceParser(),
             hypothesis_manager=object(),
@@ -419,7 +472,7 @@ def test_process_turn_stops_after_repeated_chief_complaint_without_signal() -> N
             med_extractor=EmptyMedExtractor(),
             entity_linker=EmptyEntityLinker(),
             question_selector=QuestionSelector(),
-            stop_rule_engine=NonStoppingRuleEngine(),
+            acceptance_controller=NonAcceptingController(),
             report_builder=ReportBuilder(),
             evidence_parser=EmptyEvidenceParser(),
             hypothesis_manager=object(),
@@ -457,7 +510,7 @@ def test_service_skips_a2_refresh_during_regular_a3_followup() -> None:
             med_extractor=EmptyMedExtractor(),
             entity_linker=EmptyEntityLinker(),
             question_selector=QuestionSelector(),
-            stop_rule_engine=NonStoppingRuleEngine(),
+            acceptance_controller=NonAcceptingController(),
             report_builder=ReportBuilder(),
             evidence_parser=EmptyEvidenceParser(),
             hypothesis_manager=object(),
@@ -494,7 +547,7 @@ def test_service_marks_a2_refresh_for_strong_exam_evidence() -> None:
             med_extractor=EmptyMedExtractor(),
             entity_linker=EmptyEntityLinker(),
             question_selector=QuestionSelector(),
-            stop_rule_engine=NonStoppingRuleEngine(),
+            acceptance_controller=NonAcceptingController(),
             report_builder=ReportBuilder(),
             evidence_parser=EmptyEvidenceParser(),
             hypothesis_manager=object(),
@@ -546,7 +599,7 @@ def test_service_builds_a2_evidence_profiles_for_frontend() -> None:
             med_extractor=object(),
             entity_linker=object(),
             question_selector=object(),
-            stop_rule_engine=object(),
+            acceptance_controller=object(),
             report_builder=ReportBuilder(),
             evidence_parser=object(),
             hypothesis_manager=object(),

@@ -34,6 +34,10 @@ class TrajectoryEvaluatorConfig:
     agent_eval_mode: str = "fallback"
     llm_verifier_min_turn_index: int = 0
     llm_verifier_min_trajectory_count: int = 1
+    observed_anchor_agent_bonus_cap: float = 0.28
+    simulated_key_evidence_penalty_cap: float = 0.12
+    observed_final_accept_threshold: float = 0.72
+    observed_final_scope_mismatch_block_threshold: float = 0.28
 
 
 class TrajectoryEvaluator:
@@ -96,6 +100,21 @@ class TrajectoryEvaluator:
                 answer_candidates=answer_candidates,
                 session_turn_index=session_turn_index,
             )
+            anchor_profile = self._anchor_profile_for_answer(patient_context, answer_id)
+            anchor_bonus = self._anchor_alignment_bonus(anchor_profile)
+            simulated_penalty, simulated_metadata = self._simulated_key_evidence_penalty(
+                trajectories,
+                anchor_bonus=anchor_bonus,
+                anchor_profile=anchor_profile,
+            )
+            agent_evaluation = max(min(agent_evaluation + anchor_bonus - simulated_penalty, 1.0), 0.0)
+            agent_metadata.update(
+                {
+                    **self._anchor_profile_metadata(anchor_profile),
+                    "observed_anchor_agent_bonus": round(anchor_bonus, 4),
+                    **simulated_metadata,
+                }
+            )
             final_score = (
                 consistency * self.config.consistency_weight
                 + diversity * self.config.diversity_weight
@@ -150,15 +169,31 @@ class TrajectoryEvaluator:
                 observed_evidence=observed_evidence,
             )
             observed_support_count = len(observed_support)
-            support_bonus = min(observed_support_count * 0.08, 0.18)
+            anchor_profile = self._anchor_profile_for_answer(patient_context, hypothesis.node_id)
+            if len(anchor_profile) == 0:
+                anchor_profile = dict(hypothesis.metadata)
+            anchor_bonus = self._anchor_alignment_bonus(anchor_profile)
+            observed_final = self._evaluate_observed_final_candidate(
+                hypothesis=hypothesis,
+                anchor_profile=anchor_profile,
+                observed_support_count=observed_support_count,
+                normalized_score=normalized_score,
+                candidate_rank=index + 1,
+            )
+            support_bonus = min(observed_support_count * 0.08, 0.18) + anchor_bonus
             rank_penalty = index * 0.04
-            agent_evaluation = max(min(0.22 + normalized_score * 0.28 + support_bonus - rank_penalty, 0.62), 0.0)
+            heuristic_agent_evaluation = max(min(0.22 + normalized_score * 0.28 + support_bonus - rank_penalty, 0.74), 0.0)
+            agent_evaluation = max(
+                heuristic_agent_evaluation,
+                float(observed_final["observed_final_score"]) if bool(observed_final["should_accept_stop"]) else min(float(observed_final["observed_final_score"]), 0.68),
+            )
             consistency = max(0.12 - index * 0.025, 0.04)
             diversity = 0.0
-            final_score = (
+            final_score = max(
                 consistency * self.config.consistency_weight
                 + diversity * self.config.diversity_weight
-                + agent_evaluation * self.config.agent_eval_weight
+                + agent_evaluation * self.config.agent_eval_weight,
+                float(observed_final["observed_final_score"]) * 0.58,
             )
             scores.append(
                 FinalAnswerScore(
@@ -170,18 +205,298 @@ class TrajectoryEvaluator:
                     final_score=final_score,
                     metadata={
                         "trajectory_count": 0,
-                        "verifier_mode": "candidate_state_fallback",
-                        "verifier_called": False,
+                        "verifier_mode": "observed_evidence_final_evaluator",
+                        "verifier_called": True,
+                        "verifier_should_accept": bool(observed_final["should_accept_stop"]),
+                        "verifier_reject_reason": str(observed_final["reject_reason"]),
+                        "verifier_reasoning": str(observed_final["reasoning"]),
+                        "verifier_missing_evidence": list(observed_final["missing_evidence"]),
+                        "verifier_recommended_next_evidence": list(observed_final["recommended_next_evidence"]),
+                        "verifier_alternative_candidates": [],
+                        "verifier_accept_reason": str(observed_final["accept_reason"]),
+                        "verifier_reject_reason_source": "observed_evidence_final_evaluator",
+                        "verifier_schema_valid": True,
                         "answer_score_source": "candidate_state_fallback",
                         "candidate_rank": index + 1,
                         "candidate_state_score": hypothesis.score,
+                        "heuristic_agent_evaluation": round(heuristic_agent_evaluation, 4),
                         "observed_answer_specific_support_count": observed_support_count,
                         "observed_answer_specific_support": observed_support,
+                        "observed_anchor_agent_bonus": round(anchor_bonus, 4),
+                        **observed_final["metadata"],
+                        **self._anchor_profile_metadata(anchor_profile),
                     },
                 )
             )
 
         return sorted(scores, key=lambda item: (-item.final_score, item.answer_name))
+
+    # 没有 rollout trajectory 时，用真实 observed evidence 做一次轻量最终评估。
+    # 这相当于 deterministic verifier：只消费真实会话证据，不读取模拟路径里的阳性。
+    def _evaluate_observed_final_candidate(
+        self,
+        *,
+        hypothesis: HypothesisScore,
+        anchor_profile: dict,
+        observed_support_count: int,
+        normalized_score: float,
+        candidate_rank: int,
+    ) -> dict:
+        if not isinstance(anchor_profile, dict):
+            anchor_profile = {}
+
+        exact_score = float(anchor_profile.get("exact_scope_anchor_score", 0.0) or 0.0)
+        family_score = float(anchor_profile.get("family_scope_anchor_score", 0.0) or 0.0)
+        definition_score = float(anchor_profile.get("definition_anchor_score", 0.0) or 0.0)
+        phenotype_score = float(anchor_profile.get("phenotype_support_score", 0.0) or 0.0)
+        background_score = float(anchor_profile.get("background_support_score", 0.0) or 0.0)
+        negative_score = float(anchor_profile.get("anchor_negative_score", 0.0) or 0.0)
+        scope_mismatch_score = float(anchor_profile.get("scope_mismatch_score", 0.0) or 0.0)
+        generic_scope_penalty = float(anchor_profile.get("generic_scope_penalty", 0.0) or 0.0)
+        scope_requirement_missing_score = float(anchor_profile.get("scope_requirement_missing_score", 0.0) or 0.0)
+        scope_specificity_score = float(anchor_profile.get("scope_specificity_score", 0.0) or 0.0)
+        low_cost_present_clear_count = int(anchor_profile.get("low_cost_present_clear_count", 0) or 0)
+        low_cost_core_family_count = int(anchor_profile.get("low_cost_core_family_count", 0) or 0)
+        low_cost_profile_satisfied = bool(anchor_profile.get("low_cost_profile_satisfied", False))
+        minimum_groups_available = bool(anchor_profile.get("minimum_evidence_groups_available", False))
+        family_coverage_satisfied = bool(anchor_profile.get("minimum_evidence_family_coverage_satisfied", False))
+        anchor_tier = str(anchor_profile.get("anchor_tier") or "speculative")
+        answer_name = hypothesis.name or hypothesis.node_id
+
+        scope_block_score = scope_mismatch_score + generic_scope_penalty + scope_requirement_missing_score
+        has_exact_anchor = exact_score + definition_score >= 0.35 or anchor_tier in {"strong_anchor", "definition_anchor"}
+        has_family_coverage = minimum_groups_available and family_coverage_satisfied and (exact_score + family_score + phenotype_score) > 0.0
+        has_low_cost_profile = low_cost_profile_satisfied and low_cost_present_clear_count >= 2 and low_cost_core_family_count >= 2
+        has_clear_conflict = negative_score > 0.0 or scope_block_score >= self.config.observed_final_scope_mismatch_block_threshold
+
+        observed_final_score = (
+            0.28
+            + normalized_score * 0.16
+            + min(exact_score * 0.28, 0.24)
+            + min(definition_score * 0.24, 0.18)
+            + min(family_score * 0.16, 0.12)
+            + min(phenotype_score * 0.06, 0.08)
+            + min(scope_specificity_score * 0.16, 0.12)
+            + min(low_cost_present_clear_count * 0.055, 0.16)
+            + min(low_cost_core_family_count * 0.045, 0.14)
+            + min(observed_support_count * 0.035, 0.10)
+            + min(background_score * 0.01, 0.025)
+            - negative_score * 0.18
+            - scope_block_score * 0.24
+            - max(candidate_rank - 1, 0) * 0.035
+        )
+        observed_final_score = max(min(observed_final_score, 0.94), 0.0)
+
+        should_accept = False
+        accept_reason = ""
+        if not has_clear_conflict and has_exact_anchor and observed_final_score >= 0.62:
+            should_accept = True
+            accept_reason = "observed_strong_anchor_sufficient"
+        elif not has_clear_conflict and has_family_coverage and observed_final_score >= 0.66:
+            should_accept = True
+            accept_reason = "observed_family_coverage_sufficient"
+        elif not has_clear_conflict and has_low_cost_profile and observed_final_score >= self.config.observed_final_accept_threshold:
+            should_accept = True
+            accept_reason = "observed_low_cost_profile_sufficient"
+
+        missing_evidence = self._observed_final_missing_evidence(anchor_profile)
+        recommended_next_evidence = list(missing_evidence[:4])
+        reject_reason = "missing_key_support"
+        if has_clear_conflict:
+            reject_reason = "strong_alternative_not_ruled_out"
+        elif not has_exact_anchor and not has_family_coverage and not has_low_cost_profile:
+            reject_reason = "missing_key_support"
+
+        reasoning = (
+            f"candidate_state_fallback 使用真实会话证据评估“{answer_name}”："
+            f" exact={exact_score:.3f}, family={family_score:.3f}, low_cost={low_cost_present_clear_count}/{low_cost_core_family_count},"
+            f" scope_block={scope_block_score:.3f}。"
+        )
+
+        return {
+            "should_accept_stop": should_accept,
+            "accept_reason": accept_reason or "observed_evidence_not_sufficient",
+            "reject_reason": "none" if should_accept else reject_reason,
+            "reasoning": reasoning,
+            "missing_evidence": [] if should_accept else missing_evidence,
+            "recommended_next_evidence": [] if should_accept else recommended_next_evidence,
+            "observed_final_score": round(observed_final_score, 4),
+            "metadata": {
+                "observed_final_evaluator_applied": True,
+                "observed_final_score": round(observed_final_score, 4),
+                "observed_final_accept_basis": accept_reason,
+                "observed_final_scope_block_score": round(scope_block_score, 4),
+                "observed_final_has_exact_anchor": has_exact_anchor,
+                "observed_final_has_family_coverage": has_family_coverage,
+                "observed_final_has_low_cost_profile": has_low_cost_profile,
+                "observed_final_has_clear_conflict": has_clear_conflict,
+            },
+        }
+
+    def _observed_final_missing_evidence(self, anchor_profile: dict) -> list[str]:
+        values: list[str] = []
+
+        for item in anchor_profile.get("anchor_missing_evidence_families", []):
+            text = str(item).strip()
+            if len(text) > 0:
+                values.append(f"补齐证据族：{text}")
+
+        for item in anchor_profile.get("missing_scope_facets", []):
+            text = str(item).strip()
+            if len(text) > 0:
+                values.append(f"补齐疾病作用域：{text}")
+
+        for item in anchor_profile.get("missing_evidence_roles", []):
+            text = str(item).strip()
+            if len(text) > 0:
+                values.append(f"补齐证据角色：{text}")
+
+        return self._unique_strings(values)
+
+    # 从 cumulative patient_context 中取当前答案对应的 observed anchor 摘要。
+    def _anchor_profile_for_answer(self, patient_context: PatientContext | None, answer_id: str) -> dict:
+        if patient_context is None:
+            return {}
+
+        anchor_index = patient_context.metadata.get("observed_anchor_index", {})
+        if not isinstance(anchor_index, dict):
+            return {}
+
+        summaries = anchor_index.get("candidate_anchor_summary", [])
+        if not isinstance(summaries, list):
+            return {}
+
+        for item in summaries:
+            if not isinstance(item, dict):
+                continue
+
+            if str(item.get("candidate_id") or "") == answer_id:
+                return dict(item)
+
+        return {}
+
+    # 把 anchor scope 转成 answer score 的轻量加分；背景证据只保留很小贡献。
+    def _anchor_alignment_bonus(self, profile: dict) -> float:
+        if not isinstance(profile, dict) or len(profile) == 0:
+            return 0.0
+
+        exact_score = float(profile.get("exact_scope_anchor_score", 0.0) or 0.0)
+        if exact_score <= 0.0:
+            exact_score = float(profile.get("strong_anchor_score", 0.0) or 0.0) + float(
+                profile.get("definition_anchor_score", 0.0) or 0.0
+            )
+        family_score = float(profile.get("family_scope_anchor_score", 0.0) or 0.0)
+        if family_score <= 0.0:
+            family_score = float(profile.get("family_anchor_score", 0.0) or 0.0)
+        phenotype_score = float(profile.get("phenotype_support_score", 0.0) or 0.0)
+        background_score = float(profile.get("background_support_score", 0.0) or 0.0)
+        negative_score = float(profile.get("anchor_negative_score", 0.0) or 0.0)
+        background_attractor_score = float(profile.get("background_attractor_score", 0.0) or 0.0)
+        scope_mismatch_score = float(profile.get("scope_mismatch_score", 0.0) or 0.0)
+
+        raw_bonus = (
+            exact_score * 0.22
+            + family_score * 0.16
+            + phenotype_score * 0.05
+            + min(background_score * 0.015, 0.025)
+            - negative_score * 0.18
+            - background_attractor_score * 0.06
+            - scope_mismatch_score * 0.08
+        )
+        return max(min(raw_bonus, self.config.observed_anchor_agent_bonus_cap), 0.0)
+
+    # rollout 里模拟出来的关键阳性如果没有真实 anchor 承接，只能作为路径探索成本，而不能抬高最终答案。
+    def _simulated_key_evidence_penalty(
+        self,
+        trajectories: Sequence[ReasoningTrajectory],
+        *,
+        anchor_bonus: float,
+        anchor_profile: dict,
+    ) -> tuple[float, dict]:
+        simulated_positive_key_evidence: list[dict] = []
+
+        for trajectory in trajectories:
+            for item in self._extract_simulated_trajectory_evidence(trajectory):
+                if str(item.get("polarity") or "") == "present" and bool(item.get("is_key_evidence", False)):
+                    simulated_positive_key_evidence.append(item)
+
+        simulated_names = self._unique_strings(str(item.get("name") or "") for item in simulated_positive_key_evidence)
+        simulated_score = min(len(simulated_names) * 0.04, self.config.simulated_key_evidence_penalty_cap)
+        has_observed_anchor = anchor_bonus > 0.0 or float(anchor_profile.get("observed_anchor_score", 0.0) or 0.0) > 0.0
+        penalty = 0.0 if has_observed_anchor else simulated_score
+
+        return penalty, {
+            "simulated_trajectory_score": round(simulated_score, 4),
+            "simulated_key_evidence_penalty": round(penalty, 4),
+            "simulated_positive_key_evidence_names": simulated_names,
+        }
+
+    # 把 anchor profile 中最常用字段压回 FinalAnswerScore.metadata，方便 report / stop / benchmark 查看。
+    def _anchor_profile_metadata(self, profile: dict) -> dict:
+        if not isinstance(profile, dict) or len(profile) == 0:
+            return {}
+
+        keys = (
+            "anchor_tier",
+            "anchor_scope",
+            "observed_anchor_score",
+            "exact_scope_anchor_score",
+            "family_scope_anchor_score",
+            "family_anchor_score",
+            "background_support_score",
+            "background_attractor_score",
+            "scope_mismatch_score",
+            "scope_specificity_score",
+            "generic_scope_penalty",
+            "scope_requirement_missing_score",
+            "candidate_scope_facets",
+            "observed_scope_facets",
+            "missing_scope_facets",
+            "scope_mismatch_reasons",
+            "anchor_negative_score",
+            "anchor_supporting_evidence",
+            "family_anchor_evidence",
+            "anchor_negative_evidence",
+            "minimum_evidence_groups_available",
+            "minimum_evidence_family_coverage_satisfied",
+            "anchor_missing_evidence_families",
+            "missing_evidence_roles",
+            "low_cost_present_clear_count",
+            "low_cost_core_family_count",
+            "low_cost_profile_satisfied",
+        )
+        return {key: profile.get(key) for key in keys if key in profile}
+
+    # LLM verifier guard 也消费 anchor analyzer 已经对齐好的 observed 支持，避免纯文本 overlap 漏召回。
+    def _observed_support_from_anchor_profile(self, profile: dict) -> list[dict]:
+        if not isinstance(profile, dict) or len(profile) == 0:
+            return []
+
+        values: list[dict] = []
+        seen_keys: set[tuple[str, str]] = set()
+
+        for key in ("anchor_supporting_evidence", "family_anchor_evidence", "provisional_anchor_evidence"):
+            payload = profile.get(key, [])
+            if not isinstance(payload, list):
+                continue
+
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+
+                normalized = dict(item)
+                dedupe_key = (
+                    str(normalized.get("node_id") or ""),
+                    str(normalized.get("name") or normalized.get("observed_name") or ""),
+                )
+
+                if dedupe_key in seen_keys:
+                    continue
+
+                seen_keys.add(dedupe_key)
+                values.append(normalized)
+
+        return values
 
     # 估计同一答案下轨迹的多样性。
     def _compute_diversity(self, trajectories: List[ReasoningTrajectory]) -> float:
@@ -240,7 +555,7 @@ class TrajectoryEvaluator:
 
             if llm_result is not None:
                 # verifier 返回的 should_accept / reject_reason / accept_reason
-                # 会直接成为 stop_rules 和 repair 的控制信号。
+                # 会直接成为最终接受控制和 repair 的信号。
                 return llm_result["score"], {
                     "verifier_mode": "llm_verifier",
                     "verifier_called": True,
@@ -272,6 +587,13 @@ class TrajectoryEvaluator:
                         False,
                     ),
                     "observed_evidence_guard_reason": llm_result.get("observed_evidence_guard_reason", ""),
+                    "scope_acceptance_guard_applied": llm_result.get("scope_acceptance_guard_applied", False),
+                    "scope_acceptance_guard_blocked": llm_result.get("scope_acceptance_guard_blocked", False),
+                    "scope_acceptance_guard_reason": llm_result.get("scope_acceptance_guard_reason", ""),
+                    "scope_acceptance_guard_missing_scope_facets": llm_result.get(
+                        "scope_acceptance_guard_missing_scope_facets",
+                        [],
+                    ),
                 }
 
         if self.config.agent_eval_mode != "fallback":
@@ -336,6 +658,9 @@ class TrajectoryEvaluator:
             answer_name=answer_name,
             observed_evidence=observed_session_evidence,
         )
+        anchor_profile = self._anchor_profile_for_answer(patient_context, answer_id)
+        if len(observed_support) == 0:
+            observed_support = self._observed_support_from_anchor_profile(anchor_profile)
 
         try:
             payload = self.llm_client.run_structured_prompt(
@@ -398,6 +723,11 @@ class TrajectoryEvaluator:
             observed_support=observed_support,
             simulated_trajectory_evidence=simulated_trajectory_evidence,
         )
+        guard_metadata = self._apply_scope_acceptance_guard(
+            answer_name=answer_name,
+            anchor_profile=anchor_profile,
+            guard_metadata=guard_metadata,
+        )
         should_accept_stop_value = bool(guard_metadata["should_accept_stop"])
         score = float(guard_metadata["score"])
         reject_reason = str(guard_metadata["reject_reason"])
@@ -412,6 +742,16 @@ class TrajectoryEvaluator:
             accept_reason_source = "guarded_observed_evidence_guard"
             accept_schema_valid = False
             reject_reason_source = "observed_evidence_guard"
+            schema_valid = False
+        elif not should_accept_stop_value and bool(guard_metadata["metadata"].get("scope_acceptance_guard_blocked", False)):
+            accept_reason = self._infer_accept_reason(
+                should_accept_stop=False,
+                score=score,
+                reject_reason=reject_reason,
+            )
+            accept_reason_source = "scope_acceptance_guard"
+            accept_schema_valid = False
+            reject_reason_source = "scope_acceptance_guard"
             schema_valid = False
 
         return {
@@ -429,6 +769,63 @@ class TrajectoryEvaluator:
             "accept_reason_source": accept_reason_source,
             "accept_schema_valid": accept_schema_valid,
             **guard_metadata["metadata"],
+        }
+
+    # LLM verifier 可能接受“同病原但粒度不对”的答案；
+    # 这里用 observed anchor 的 scope 画像做一次确定性校验。
+    def _apply_scope_acceptance_guard(
+        self,
+        *,
+        answer_name: str,
+        anchor_profile: dict,
+        guard_metadata: dict,
+    ) -> dict:
+        if not bool(guard_metadata.get("should_accept_stop", False)):
+            return guard_metadata
+
+        if not isinstance(anchor_profile, dict) or len(anchor_profile) == 0:
+            return guard_metadata
+
+        scope_mismatch_score = float(anchor_profile.get("scope_mismatch_score", 0.0) or 0.0)
+        generic_scope_penalty = float(anchor_profile.get("generic_scope_penalty", 0.0) or 0.0)
+        scope_requirement_missing_score = float(anchor_profile.get("scope_requirement_missing_score", 0.0) or 0.0)
+        missing_scope_facets = [
+            str(item)
+            for item in anchor_profile.get("missing_scope_facets", [])
+            if len(str(item).strip()) > 0
+        ]
+        scope_block_score = scope_mismatch_score + generic_scope_penalty + scope_requirement_missing_score
+
+        if scope_block_score < self.config.observed_final_scope_mismatch_block_threshold and len(missing_scope_facets) == 0:
+            return guard_metadata
+
+        recommended = self._merge_unique_strings(
+            list(guard_metadata.get("recommended_next_evidence", [])),
+            [f"补齐疾病作用域：{item}" for item in missing_scope_facets],
+        )
+        missing = self._merge_unique_strings(
+            list(guard_metadata.get("missing_evidence", [])),
+            [f"补齐疾病作用域：{item}" for item in missing_scope_facets],
+        )
+        metadata = dict(guard_metadata.get("metadata", {}))
+        metadata.update(
+            {
+                "scope_acceptance_guard_applied": True,
+                "scope_acceptance_guard_blocked": True,
+                "scope_acceptance_guard_reason": (
+                    f"候选答案“{answer_name}”的真实证据作用域不足，scope_block_score={scope_block_score:.3f}。"
+                ),
+                "scope_acceptance_guard_missing_scope_facets": missing_scope_facets,
+            }
+        )
+        return {
+            **guard_metadata,
+            "should_accept_stop": False,
+            "score": min(float(guard_metadata.get("score", 0.0) or 0.0), 0.64),
+            "reject_reason": "strong_alternative_not_ruled_out",
+            "missing_evidence": missing,
+            "recommended_next_evidence": recommended,
+            "metadata": metadata,
         }
 
     # 如果 verifier 想基于 rollout 模拟阳性停机，但真实会话没有当前答案的特异支持，则强制改为拒停。

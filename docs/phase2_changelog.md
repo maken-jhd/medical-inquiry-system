@@ -3822,3 +3822,342 @@ conda run -n GraduationDesign python -m pytest -q
   - `26 passed`
   - `60 passed`
   - `212 passed`
+
+## 三十九、2026-05-04：五类诊断算法问题的统一修复
+
+### 本次目标
+
+- 从算法根源处理 smoke80 暴露的 `best_final_answer` 错误，而不是继续增加病例级补丁
+- 将 observed anchor 从“有无强锚点”细化为“精确作用域 / 同族作用域 / 背景作用域”
+- 让 A2 排序、repair 反馈、trajectory 聚合和 cold-start fallback 共用同一套真实观测证据信号
+
+### 本次实现
+
+- 更新：
+  - [brain/evidence_anchor.py](/Users/loki/Workspace/GraduationDesign/brain/evidence_anchor.py)
+  - [brain/hypothesis_manager.py](/Users/loki/Workspace/GraduationDesign/brain/hypothesis_manager.py)
+  - [brain/trajectory_evaluator.py](/Users/loki/Workspace/GraduationDesign/brain/trajectory_evaluator.py)
+  - [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - [brain/stop_rules.py](/Users/loki/Workspace/GraduationDesign/brain/stop_rules.py)
+  - [brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
+  - 相关 anchor、trajectory、repair、cold-start 单测
+- 具体改动：
+  - `EvidenceAnchorAnalyzer` 新增 `anchor_scope`：`exact_scope / family_scope / phenotype_scope / background_scope / competing_scope`
+  - 病原证据如果只说明“同一种病原”，但候选是脑膜炎、肺炎、肝炎、视网膜炎等部位特异疾病，会降为 `family_anchor`；只有精确疾病或定义性证据才进入 `strong_anchor / definition_anchor`
+  - HBV/HCV 共病、HIV/CD4/发热/免疫低下等泛背景证据被压到 `background_supported`，并记录 `background_attractor_score`
+  - `blood_count` 不再因为 family tag 被全局当作 definition anchor；定义性 detail 仍由 `DIAGNOSED_BY / REQUIRES_DETAIL` 或真正定义阈值驱动
+  - A2 anchor rerank 改为优先比较 `exact_scope_anchor_score`，其次比较 `family_scope_anchor_score`，再看 phenotype/background，减少卡波西、COVID、HIV/CD4 背景吸引子
+  - repair 新增 `repair_feedback_counts`：同一答案连续因 `missing_key_support / missing_required_anchor / insufficient_evidence_family_coverage / trajectory_insufficient` 被拒停时，会逐轮增加当前答案降权；已有 observed anchor 的备选会获得 repair 抬分
+  - `TrajectoryEvaluator` 读取 `observed_anchor_index`，把 exact/family anchor 写入 `FinalAnswerScore.metadata` 并转成 `observed_anchor_agent_bonus`
+  - rollout 模拟关键阳性如果没有真实 observed anchor 承接，会产生 `simulated_key_evidence_penalty`，不再让模拟路径单独把错误答案顶到最前
+  - `score_candidate_hypotheses_without_trajectories()` 也消费 anchor profile，缓解 top hypothesis 已经正确但 `best_answer=None / no_answer_score` 的断层
+  - cold-start fallback 先扩展当前候选下仍可直接回答的低成本 R2 证据；没有低成本证据时才退回全局探针，并降权 HIV/CD4/年龄/发热等抽象背景问题
+
+### 结果影响
+
+- 同病原不同部位/亚型的错误会更少被单一病原证据直接接受，系统会继续追问部位、影像、症状或定义性检查
+- 乙肝、HIV/CD4、发热、免疫低下这类背景证据仍能提供上下文，但不再轻易压过真实特异证据
+- repair 不再只是一轮 soft hint；重复缺口会回写到候选排序，推动系统切换到更有真实支持的备选或补更关键的证据
+- trajectory 聚合更接近 Med-MCTS 的边界：rollout 负责探索，真实患者回答负责最终答案排序与可接受性
+
+### 验证
+
+- 执行：
+
+```bash
+conda run -n GraduationDesign python -m pytest tests/test_evidence_anchor.py tests/test_hypothesis_manager.py tests/test_trajectory_evaluator.py tests/test_service_stop_flow.py tests/test_service_repair_flow.py tests/test_stop_rules.py -q
+conda run -n GraduationDesign python -m pytest -q
+```
+
+- 结果：
+  - `60 passed`
+  - `219 passed`
+
+## 四十、2026-05-04：批量模型替换 smoke 与回放链路运行时修复
+
+### 本次目标
+
+- 评估当前动态问诊链路是否必须继续使用 `qwen3-max`
+- 用统一 10 例 smoke 对比 `qwen3-max / qwen3.5-flash / qwen3.5-plus` 的正确率与耗时
+- 修复阻塞批量回放的运行时问题，避免模型对比结果被代码异常污染
+
+### 本次实现
+
+- 更新：
+  - [frontend/config_loader.py](/Users/loki/Workspace/GraduationDesign/frontend/config_loader.py)
+  - [brain/evidence_anchor.py](/Users/loki/Workspace/GraduationDesign/brain/evidence_anchor.py)
+  - [brain/trajectory_evaluator.py](/Users/loki/Workspace/GraduationDesign/brain/trajectory_evaluator.py)
+  - [README.md](/Users/loki/Workspace/GraduationDesign/README.md)
+  - [tests/test_frontend_config_loader.py](/Users/loki/Workspace/GraduationDesign/tests/test_frontend_config_loader.py)
+- 具体改动：
+  - `apply_config_to_environment()` 允许命令行里显式设置的 `OPENAI_MODEL` 覆盖 `frontend.local.yaml` 默认模型，便于不修改本地私密配置就做模型 smoke
+  - 修复 `EvidenceAnchorAnalyzer` 的作用域/签名回归，恢复 definition-anchor 与 negative-anchor 的运行链路
+  - 修复 `TrajectoryEvaluator` 的 observed-anchor fallback 链路，避免 verifier 分支在读取 anchor profile 时触发运行时异常
+  - `TrajectoryEvaluator._observed_support_from_anchor_profile()` 对 anchor evidence 做轻量去重，减少 verifier 输入里重复证据
+
+### 模型 smoke
+
+- 统一参数：
+
+```bash
+conda run -n GraduationDesign python -B scripts/run_batch_replay.py \
+  --cases-file simulator/focused_acceptance_cases.jsonl \
+  --max-turns 5 \
+  --case-concurrency 1 \
+  --no-resume
+```
+
+- 输出目录：
+  - `test_outputs/model_swap_eval/20260504_model_swap_eval_final/qwen3-max/smoke10/`
+  - `test_outputs/model_swap_eval/20260504_model_swap_eval_final/qwen3.5-flash/smoke10/`
+  - `test_outputs/model_swap_eval/20260504_model_swap_eval_final/qwen3.5-plus/smoke10/`
+- 结果摘要：
+  - `qwen3-max`：`final_answer_exact_hit_rate=0.2`，`hypothesis_hit_rate=0.6`，`average_case_seconds=135.7743`，`accepted_final_answer_count=0`
+  - `qwen3.5-flash`：`final_answer_exact_hit_rate=0.2`，`hypothesis_hit_rate=0.7`，`average_case_seconds=53.0081`，`accepted_final_answer_count=1`
+  - `qwen3.5-plus`：`final_answer_exact_hit_rate=0.2`，`hypothesis_hit_rate=0.8`，`average_case_seconds=87.1138`，`accepted_final_answer_count=0`
+
+### 结果影响
+
+- 在这组 10 例里，`qwen3-max` 没有表现出更高的最终命中率，反而平均单例耗时最高
+- `qwen3.5-plus` 比 `flash` 更慢，但没有换来更好的 `final_answer_exact_hit_rate` 或 stop 完成率
+- `qwen3.5-flash` 目前是三者里性价比最高的候选：速度明显快于 `max` 和 `plus`，而关键准确率指标没有更差
+
+### 验证
+
+- 执行：
+
+```bash
+conda run -n GraduationDesign python -B -m pytest tests/test_evidence_anchor.py tests/test_trajectory_evaluator.py tests/test_frontend_config_loader.py -q
+```
+
+- 结果：
+  - `16 passed`
+
+## 四十一、2026-05-04：默认 replay 模型切换为 qwen3.5-flash
+
+### 本次目标
+
+- 将本地回放与前端默认 LLM 从 `qwen3-max` 切换为 `qwen3.5-flash`
+- 保留命令行环境变量覆盖能力，方便后续继续做模型对比或消融实验
+
+### 本次实现
+
+- 更新：
+  - [configs/frontend.yaml](/Users/loki/Workspace/GraduationDesign/configs/frontend.yaml)
+  - [frontend/config_loader.py](/Users/loki/Workspace/GraduationDesign/frontend/config_loader.py)
+  - [README.md](/Users/loki/Workspace/GraduationDesign/README.md)
+  - [frontend/README.md](/Users/loki/Workspace/GraduationDesign/frontend/README.md)
+  - [tests/test_frontend_config_loader.py](/Users/loki/Workspace/GraduationDesign/tests/test_frontend_config_loader.py)
+- 具体改动：
+  - `configs/frontend.yaml` 默认模型改为 `qwen3.5-flash`
+  - `frontend/config_loader.py` 保留显式 `OPENAI_MODEL`，避免命令行临时模型被 YAML 覆盖
+  - README 同步默认模型与模型对比运行说明
+
+### 验证
+
+- 执行：
+
+```bash
+conda run -n GraduationDesign python -m pytest tests/test_frontend_config_loader.py -q
+```
+
+- 结果：
+  - `1 passed`
+
+## 四十二、2026-05-04：top1/top3 评估口径补充与全量单测回归
+
+### 本次目标
+
+- 在保留原有 `final_answer_exact_hit` 与 `hypothesis_hit` 的基础上，显式增加更适合 benchmark 复盘的两个口径
+- 让未完成病例报告也能直接判断“最终答案是否已命中”和“真实诊断是否已进入前三候选”
+
+### 本次实现
+
+- 更新：
+  - [simulator/benchmark.py](/Users/loki/Workspace/GraduationDesign/simulator/benchmark.py)
+  - [tests/test_benchmark.py](/Users/loki/Workspace/GraduationDesign/tests/test_benchmark.py)
+  - [README.md](/Users/loki/Workspace/GraduationDesign/README.md)
+  - [simulator/README.md](/Users/loki/Workspace/GraduationDesign/simulator/README.md)
+- 具体改动：
+  - `BenchmarkSummary` 新增 `top1_final_answer_hit_count / top1_final_answer_hit_rate`
+  - `BenchmarkSummary` 新增 `top3_hypothesis_hit_count / top3_hypothesis_hit_rate`
+  - `non_completed_cases.json` 的每条病例记录新增 `top1_final_answer_hit / top3_hypothesis_hit`
+  - `top1_final_answer_hit` 使用严格最终答案命中口径；`top3_hypothesis_hit` 使用最终候选前三的家族级召回口径
+
+### 验证
+
+- 执行：
+
+```bash
+conda run -n GraduationDesign python -m pytest tests/test_evidence_anchor.py tests/test_stop_rules.py tests/test_evidence_parser.py tests/test_benchmark.py tests/test_action_builder.py tests/test_service_stop_flow.py tests/test_service_repair_flow.py tests/test_hypothesis_manager.py tests/test_run_batch_replay.py tests/test_retriever.py tests/test_question_selector.py tests/test_llm_client_profiles.py -q
+conda run -n GraduationDesign python -m pytest -q
+```
+
+- 结果：
+  - `108 passed`
+  - `223 passed`
+
+## 四十三、2026-05-04：旁路结构化 stop gate 的全量消融开关
+
+### 本次目标
+
+- 为验证“只移除 stop rule 阈值，保留 verifier + repair”增加运行时消融模式
+- 保留旧 `anchor_controlled` 代码，不删除 stop / verifier / repair 相关实现，便于后续随时切回对比
+
+### 本次实现
+
+- 更新：
+  - [brain/stop_rules.py](/Users/loki/Workspace/GraduationDesign/brain/stop_rules.py)
+  - [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml)
+  - [configs/frontend.yaml](/Users/loki/Workspace/GraduationDesign/configs/frontend.yaml)
+  - [frontend/config_loader.py](/Users/loki/Workspace/GraduationDesign/frontend/config_loader.py)
+  - [tests/test_stop_rules.py](/Users/loki/Workspace/GraduationDesign/tests/test_stop_rules.py)
+- 具体改动：
+  - 新增 `acceptance_profile=no_stop_gate`，别名兼容 `disabled / off / no-stop-gate`
+  - `should_accept_final_answer()` 在该 profile 下旁路 `turn_index / anchor_controlled / trajectory_count / consistency / agent_eval / final_score` 等 stop rule 阈值
+  - 当 verifier 已调用且接受时返回 `should_stop=true / reason=final_answer_accepted`
+  - 当 verifier 已调用且拒绝时返回 `should_stop=false / reason=verifier_rejected_stop`，保留 repair 控制信号
+  - `check_sufficiency()` 在该 profile 下不再触发 hypothesis margin stop，避免另一条 stop gate 继续影响消融
+  - verifier 尚未调用时返回 `stop_gate_disabled` 并继续追问，避免没有 verifier 的早期 best answer 直接 completed
+  - 默认配置切换为 `no_stop_gate`，本机 `configs/frontend.local.yaml` 也同步改为该 profile，确保 `run_batch_replay.py` 读取本地配置后不会回到 `anchor_controlled`
+
+### 验证
+
+- 执行：
+
+```bash
+conda run -n GraduationDesign python -m pytest tests/test_stop_rules.py tests/test_service_stop_flow.py tests/test_replay_engine.py tests/test_benchmark.py tests/test_frontend_config_loader.py -q
+```
+
+- 结果：
+  - `31 passed`
+
+## 四十四、2026-05-04：error-focus smoke95 病例集与旧 replay 输出清理
+
+### 本次目标
+
+- 从最新 `qwen3.5-flash + no_stop_gate` 全量 replay 中抽取后续专门回归的困难病例
+- 删除旧版 smoke80 与历史 replay 输出，避免后续复盘时混淆新旧结果
+
+### 本次输出
+
+- 新增病例集：
+  - `test_outputs/simulator_cases/graph_cases_20260502_role_qc/error_focus_smoke95_qwen35_no_stop_gate/cases.jsonl`
+  - `test_outputs/simulator_cases/graph_cases_20260502_role_qc/error_focus_smoke95_qwen35_no_stop_gate/cases.json`
+  - `test_outputs/simulator_cases/graph_cases_20260502_role_qc/error_focus_smoke95_qwen35_no_stop_gate/manifest.json`
+  - `test_outputs/simulator_cases/graph_cases_20260502_role_qc/error_focus_smoke95_qwen35_no_stop_gate/summary.md`
+- 抽取规则：
+  - `completed::wrong_accepted`
+  - `failed::api_connection_error`
+  - `max_turn_reached::no_top1_final_answer_hit`
+- 病例数：
+  - total: `95`
+  - wrong accepted: `38`
+  - API failed: `6`
+  - max-turn 且 top1 未命中: `51`
+- 病例类型：
+  - competitive: `18`
+  - exam_driven: `25`
+  - low_cost: `27`
+  - ordinary: `25`
+
+### 清理结果
+
+- `test_outputs/simulator_replay/` 下仅保留：
+  - `graph_cases_20260502_role_qc_full_qwen35_flash_no_stop_gate`
+- 删除旧版：
+  - `test_outputs/simulator_replay/graph_cases_20260502_role_qc_smoke80_qwen35_flash`
+  - 其他旧 replay 输出目录
+  - `test_outputs/simulator_cases/graph_cases_20260502_role_qc/non_completed_smoke80`
+
+## 四十五、2026-05-04：fallback final evaluator、scope-aware 粒度守门与 low-cost explorer
+
+### 本次目标
+
+- 不继续微调 stop threshold，改为增强诊断链路本身：
+  - `candidate_state_fallback` 没有 trajectory 时也能做真实证据最终评估
+  - 减少泛疾病、部位特异疾病、IRIS、播散型疾病之间的粒度错误接受
+  - 提升 low-cost 病例的有效证据揭示，避免只围绕 HIV/CD4/发热等背景线索漂移
+  - 强 observed anchor 进入后扩展同病原 sibling 候选召回
+
+### 本次实现
+
+- 更新：
+  - [brain/trajectory_evaluator.py](/Users/loki/Workspace/GraduationDesign/brain/trajectory_evaluator.py)
+  - [brain/evidence_anchor.py](/Users/loki/Workspace/GraduationDesign/brain/evidence_anchor.py)
+  - [brain/retriever.py](/Users/loki/Workspace/GraduationDesign/brain/retriever.py)
+  - [brain/action_builder.py](/Users/loki/Workspace/GraduationDesign/brain/action_builder.py)
+  - [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - [brain/stop_rules.py](/Users/loki/Workspace/GraduationDesign/brain/stop_rules.py)
+  - [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml)
+  - [brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
+  - 相关单测
+- 具体改动：
+  - `score_candidate_hypotheses_without_trajectories()` 新增 observed-evidence final evaluator：没有 rollout trajectory 时，根据真实 anchor、minimum family coverage、low-cost profile、负证据与 scope mismatch 生成 verifier-like metadata
+  - `no_stop_gate` 现在识别 `observed_evidence_final_evaluator`：接受时可 `final_answer_accepted`，拒绝时仍进入 verifier/repair 控制链
+  - `trajectory_agent_verifier` 的 LLM 接受结果后新增 deterministic scope guard：如果 `scope_mismatch_score / generic_scope_penalty / missing_scope_facets` 表示证据粒度不足，会改成 `strong_alternative_not_ruled_out`
+  - `EvidenceAnchorAnalyzer` 新增 `candidate_scope_facets / observed_scope_facets / missing_scope_facets / scope_specificity_score / generic_scope_penalty / scope_requirement_missing_score`，用于统一处理泛疾病、部位特异、IRIS 和播散型粒度
+  - `GraphRetriever` 新增 `retrieve_scope_sibling_candidates()`，强 observed anchor 进入后按病原/作用域关键词召回同族 sibling 疾病，再交给 anchor/scope rerank 裁决
+  - `ActionBuilder` 为低成本动作增加 `low_cost_discriminative_bonus` 与背景问题降权，`ConsultationBrain` 新增 low-cost explorer，从 top3 候选 R2 中主动选择可直接回答、非背景且有区分度的问题
+
+### 验证
+
+- 执行：
+
+```bash
+conda run -n GraduationDesign python -m pytest tests/test_trajectory_evaluator.py tests/test_stop_rules.py tests/test_action_builder.py tests/test_evidence_anchor.py tests/test_service_repair_flow.py -q
+```
+
+- 结果：
+  - `63 passed`
+
+## 四十六、2026-05-04：移除结构化 stop rule，保留 verifier + repair
+
+### 本次目标
+
+- 从诊断运行链路中删除结构化 stop rule，避免继续用 turn、trajectory、anchor、score 等额外阈值阻断问诊结束
+- 保留 verifier 与 repair：verifier 接受则 completed，verifier 拒绝则继续生成 repair 控制信号和下一问
+- 针对批量 replay 中偶发的 `APIConnectionError / Connection error`，增加单病例自动重试 1 次
+
+### 本次实现
+
+- 删除：
+  - `brain/stop_rules.py`
+  - `tests/test_stop_rules.py`
+- 新增：
+  - [brain/acceptance_controller.py](/Users/loki/Workspace/GraduationDesign/brain/acceptance_controller.py)
+  - [tests/test_acceptance_controller.py](/Users/loki/Workspace/GraduationDesign/tests/test_acceptance_controller.py)
+- 更新：
+  - [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - [scripts/run_batch_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_batch_replay.py)
+  - [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml)
+  - [configs/frontend.yaml](/Users/loki/Workspace/GraduationDesign/configs/frontend.yaml)
+  - [frontend/config_loader.py](/Users/loki/Workspace/GraduationDesign/frontend/config_loader.py)
+  - [README.md](/Users/loki/Workspace/GraduationDesign/README.md)
+  - [brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
+  - [frontend/README.md](/Users/loki/Workspace/GraduationDesign/frontend/README.md)
+  - [simulator/README.md](/Users/loki/Workspace/GraduationDesign/simulator/README.md)
+
+### 具体改动
+
+- `ConsultationBrain` 不再 import / 实例化 / 调用 `StopRuleEngine`
+- `VerifierAcceptanceController` 只消费两类 verifier-like 结果：
+  - `llm_verifier`
+  - `observed_evidence_final_evaluator`
+- 当 `verifier_should_accept=true` 时返回 `final_answer_accepted`
+- 当 verifier 明确拒绝时返回 `verifier_rejected_stop`，并保留 `repair_reject_reason / path_control_reason` 给 repair 使用
+- `configs/brain.yaml` 移除 `stop:` 段；前端配置不再设置 `BRAIN_ACCEPTANCE_PROFILE`
+- `run_batch_replay.py` 新增 `--api-error-retries`，默认 `1`；单病例返回 failed 或抛异常时，只要错误文本包含 `APIConnectionError / Connection error`，就自动重试
+
+### 验证
+
+- 执行：
+
+```bash
+conda run -n GraduationDesign python -m pytest tests/test_acceptance_controller.py tests/test_service_stop_flow.py tests/test_service_repair_flow.py tests/test_exam_context_flow.py tests/test_run_batch_replay.py tests/test_service_config.py tests/test_frontend_config_loader.py -q
+conda run -n GraduationDesign python -m pytest -q
+```
+
+- 结果：
+  - `54 passed`
+  - 全量 `222 passed`
