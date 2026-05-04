@@ -62,6 +62,15 @@ class LlmClient:
     def is_available(self) -> bool:
         return self._client is not None
 
+    # 主动关闭底层 HTTP 客户端，便于 batch worker 结束时释放长连接。
+    def close(self) -> None:
+        if self._client is None:
+            return
+
+        close_fn = getattr(self._client, "close", None)
+        if callable(close_fn):
+            close_fn()
+
     # 读取结构化调用失败后的重试次数；默认只重试一次。
     def _read_structured_retry_count(self) -> int:
         raw_value = os.getenv("OPENAI_STRUCTURED_RETRY_COUNT") or "1"

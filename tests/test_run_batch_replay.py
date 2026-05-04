@@ -164,6 +164,7 @@ def test_run_cases_retries_api_connection_error_once(monkeypatch) -> None:
         return ReplayResult(case_id=case.case_id, case_title=case.title, status="completed")
 
     monkeypatch.setattr(run_batch_replay, "_run_single_case", fake_run_single_case)
+    monkeypatch.setattr(run_batch_replay, "_sleep_before_api_retry", lambda retry_index: 0.0)
 
     results = run_batch_replay._run_cases(cases, max_turns=8, case_concurrency=1, api_error_retries=1)
 
@@ -171,6 +172,97 @@ def test_run_cases_retries_api_connection_error_once(monkeypatch) -> None:
     assert results[0].status == "completed"
     assert results[0].timing["batch_retry_attempts"] == 1
     assert results[0].timing["retried_after_api_connection_error"] is True
+    assert results[0].timing["batch_retry_cooldown_seconds_total"] == 0.0
+
+
+def test_run_cases_reuses_worker_llm_client_in_serial_mode(monkeypatch) -> None:
+    run_batch_replay._cleanup_worker_runtimes(reset_current_thread=True)
+    cases = [
+        SimpleNamespace(case_id="case1", title="病例1", true_conditions=[], true_disease_phase=None, red_flags=[]),
+        SimpleNamespace(case_id="case2", title="病例2", true_conditions=[], true_disease_phase=None, red_flags=[]),
+    ]
+    created_client_ids: list[int] = []
+    build_client_ids: list[int] = []
+    patient_client_ids: list[int] = []
+
+    class FakeLlmClient:
+        def __init__(self) -> None:
+            created_client_ids.append(id(self))
+
+        def close(self) -> None:
+            return None
+
+    class FakeBrain:
+        def __init__(self, llm_client) -> None:
+            self.llm_client = llm_client
+            self.deps = SimpleNamespace(retriever=SimpleNamespace(client=None))
+
+        def start_session(self, session_id: str) -> None:
+            _ = session_id
+
+        def process_turn(self, session_id: str, patient_text: str) -> dict:
+            _ = session_id, patient_text
+            return {"final_report": {"summary": "ok"}}
+
+    class FakePatientAgent:
+        def __init__(self, *, use_llm: bool, llm_client) -> None:
+            _ = use_llm
+            patient_client_ids.append(id(llm_client))
+
+        def open_case(self, case) -> SimpleNamespace:
+            _ = case
+            return SimpleNamespace(opening_text="最近不舒服。")
+
+    def fake_build_default_brain_from_env(config_overrides=None, llm_client=None):
+        _ = config_overrides
+        build_client_ids.append(id(llm_client))
+        return FakeBrain(llm_client)
+
+    monkeypatch.setattr(run_batch_replay, "LlmClient", FakeLlmClient)
+    monkeypatch.setattr(run_batch_replay, "build_default_brain_from_env", fake_build_default_brain_from_env)
+    monkeypatch.setattr(run_batch_replay, "VirtualPatientAgent", FakePatientAgent)
+
+    results = run_batch_replay._run_cases(cases, max_turns=8, case_concurrency=1)
+
+    assert [result.status for result in results] == ["completed", "completed"]
+    assert len(created_client_ids) == 1
+    assert len(set(build_client_ids)) == 1
+    assert len(set(patient_client_ids)) == 1
+    assert build_client_ids[0] == patient_client_ids[0]
+
+
+def test_run_cases_waits_before_retrying_api_connection_error(monkeypatch) -> None:
+    run_batch_replay._cleanup_worker_runtimes(reset_current_thread=True)
+    cases = [SimpleNamespace(case_id="case1", title="病例1")]
+    cooldown_calls: list[float] = []
+    calls: list[str] = []
+
+    def fake_run_single_case(case, max_turns: int):
+        _ = max_turns
+        calls.append(case.case_id)
+        if len(calls) == 1:
+            return ReplayResult(
+                case_id=case.case_id,
+                case_title=case.title,
+                status="failed",
+                error={
+                    "code": "llm_stage_failed",
+                    "stage": "turn_interpreter",
+                    "message": "结构化大模型调用失败：APIConnectionError: Connection error.",
+                    "attempts": 3,
+                },
+            )
+        return ReplayResult(case_id=case.case_id, case_title=case.title, status="completed")
+
+    monkeypatch.setattr(run_batch_replay, "_run_single_case", fake_run_single_case)
+    monkeypatch.setenv("BATCH_API_ERROR_COOLDOWN_SECONDS", "1.5")
+    monkeypatch.setattr(run_batch_replay, "sleep", lambda seconds: cooldown_calls.append(seconds))
+
+    results = run_batch_replay._run_cases(cases, max_turns=8, case_concurrency=1, api_error_retries=1)
+
+    assert len(calls) == 2
+    assert cooldown_calls == [1.5]
+    assert results[0].timing["batch_retry_cooldown_seconds_total"] == 1.5
 
 
 def test_format_heartbeat_line_reports_oldest_active_case(monkeypatch) -> None:

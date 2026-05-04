@@ -338,7 +338,7 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 - `slot_truth_map` 使用真实图谱 `target_node_id` 作为 key，中文证据名称写入 `aliases`
 - 当前已同时支持输出 `cases.jsonl` 和便于人工查看的 `cases.json`
 - `run_batch_replay.py` 当前可直接读取 `JSONL` 或 `JSON` 数组病例文件
-- `run_batch_replay.py` 当前支持病例级并发，默认 `--case-concurrency 4`；并发时每个病例使用独立 brain 实例，避免共享 `StateTracker`
+- `run_batch_replay.py` 当前支持病例级并发，默认 `--case-concurrency 4`；并发时每个病例仍使用独立 brain 实例，避免共享 `StateTracker`，但同一 worker 会复用一套 LLM client，减少短连接抖动
 - 对于标准 batch replay，先做小样本 smoke 更合适；当前支持 `--limit 10` 只先跑前 10 个病例
 - `run_batch_replay.py` 当前会直接向终端设备输出运行信息；即使通过 `conda run` 启动，也会在病例启动、病例完成和长时间运行期间持续输出可见日志
 - `run_batch_replay.py` 当前会在终端持续输出病例级进度条，并每 15 秒输出一次心跳，例如“已完成病例：2 / 10，活动病例：2，当前最久：case_xxx（已运行 12:30）”
@@ -346,7 +346,7 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 - `run_batch_replay.py` 做模型对比时，如果命令行里显式设置了 `OPENAI_MODEL`，会优先使用该环境变量；这便于在不改动本地私密配置的前提下切换 `qwen3-max / qwen3.5-flash / qwen3.5-plus`
 - `run_batch_replay.py` 当前启动时会直接记录 `llm_available=true/false`；如果为 `false`，批量回放会尽早失败，不再退回旧规则链路
 - `run_batch_replay.py` 当前会在每个病例完成后立即追加写入 `replay_results.jsonl`、`run.log`，并刷新 `benchmark_summary.json` 与 `status.json`；评测摘要会同时给出 `top1_final_answer_hit` 口径和 `top3_hypothesis_hit` 口径，便于区分“最终答案已对”和“候选前三已召回”
-- `run_batch_replay.py` 当前已支持单病例 `failed` 语义：若 `brain` 抛出 LLM 领域错误，该病例会带 `error.code / error.stage / error.message / error.attempts` 落盘，其他病例继续运行
+- `run_batch_replay.py` 当前已支持单病例 `failed` 语义：若 `brain` 抛出 LLM 领域错误，该病例会带 `error.code / error.stage / error.message / error.attempts` 落盘，其他病例继续运行；遇到 `APIConnectionError / Connection error` 时，batch 外层会在整例重试前先做一次冷却退避，并把累计冷却时长写入 `timing.batch_retry_cooldown_seconds_total`
 - `run_batch_replay.py` 默认支持断点续跑：若输出目录里已经有 `replay_results.jsonl`，会自动跳过已完成病例；如需强制重跑，可加 `--no-resume`
 - `run_batch_replay.py` 当前会记录病例级耗时信息：每个病例的 opening、初始 brain、逐轮 patient/brain、finalize 和总耗时会写入 `replay_results.jsonl`，并在 `benchmark_summary.json` / `status.json` 中聚合 `timing_summary`；运行日志对亚秒级耗时会保留更高精度，避免全部显示成 `0.00`
 - `simulator/replay_engine.py` 当前会先累计原始浮点耗时，再在落盘前统一 round；这能减少毫秒级病例里 `brain_turn_seconds_total` 被逐轮 round 放大的误导

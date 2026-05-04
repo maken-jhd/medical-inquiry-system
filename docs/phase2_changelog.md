@@ -4161,3 +4161,46 @@ conda run -n GraduationDesign python -m pytest -q
 - 结果：
   - `54 passed`
   - 全量 `222 passed`
+
+## 四十七、2026-05-04：batch replay 复用 worker 级 LLM client，并为 APIConnectionError 增加冷却
+
+### 本次目标
+
+- 降低标准 `batch replay` 在 `case_concurrency > 1` 时的 LLM 建连抖动，减少同一时间段大量新建 HTTP client 带来的连接雪崩
+- 让 `APIConnectionError / Connection error` 在整例重试前先退避冷却，而不是立刻再次打到同一 provider
+
+### 本次实现
+
+- 更新：
+  - [brain/llm_client.py](/Users/loki/Workspace/GraduationDesign/brain/llm_client.py)
+  - [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - [scripts/run_batch_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_batch_replay.py)
+  - [tests/test_run_batch_replay.py](/Users/loki/Workspace/GraduationDesign/tests/test_run_batch_replay.py)
+  - [README.md](/Users/loki/Workspace/GraduationDesign/README.md)
+  - [simulator/README.md](/Users/loki/Workspace/GraduationDesign/simulator/README.md)
+
+### 具体改动
+
+- `run_batch_replay.py` 新增线程本地 worker runtime：
+  - 同一 worker 会复用一套 `LlmClient`
+  - 每个 case 仍然新建独立 `brain`，因此不会共享 `StateTracker / SessionState`
+  - `VirtualPatientAgent` 与 `brain` 在同一 worker / 同一 case 内共用这套 client，减少 `brain + patient` 双 client 并发建连
+- `build_default_brain_from_env()` / `build_default_brain()` 现在支持注入外部 `llm_client`，便于 batch worker 传入共享 client
+- `LlmClient` 新增 `close()`，方便 batch worker 结束时显式释放底层 HTTP 客户端
+- batch 外层的 `APIConnectionError / Connection error` 整例重试现在会先执行冷却退避：
+  - 冷却基线读取 `BATCH_API_ERROR_COOLDOWN_SECONDS`，默认 `2.0`
+  - 冷却按重试次数指数退避，并限制最大 `12s`
+  - 累计冷却时长会写入 `timing.batch_retry_cooldown_seconds_total`；失败病例 `error` 中也会带同名字段
+
+### 验证
+
+- 执行：
+
+```bash
+conda run -n GraduationDesign python -m pytest tests/test_run_batch_replay.py -q
+conda run -n GraduationDesign python -m py_compile scripts/run_batch_replay.py brain/service.py brain/llm_client.py
+```
+
+- 结果：
+  - `17 passed`
+  - `py_compile` 通过

@@ -4314,7 +4314,11 @@ def _merge_brain_config(base: dict, overrides: dict | None) -> dict:
 
 
 # 基于现有依赖的默认实现，快速构造一个可运行的问诊大脑。
-def build_default_brain(client: Neo4jClient, config_overrides: dict | None = None) -> ConsultationBrain:
+def build_default_brain(
+    client: Neo4jClient,
+    config_overrides: dict | None = None,
+    llm_client: LlmClient | None = None,
+) -> ConsultationBrain:
     config = _merge_brain_config(load_brain_config(), config_overrides)
     search_config = dict(config.get("search", {}))
     kg_config = dict(config.get("kg", {}))
@@ -4324,9 +4328,12 @@ def build_default_brain(client: Neo4jClient, config_overrides: dict | None = Non
     a2_config = dict(config.get("a2", {}))
     fallback_config = dict(config.get("fallback", {}))
     repair_config = dict(config.get("repair", {}))
-    llm_client = LlmClient(
-        structured_retry_count=int(llm_config.get("structured_retry_count", 1)),
+    configured_retry_count = int(llm_config.get("structured_retry_count", 1))
+    llm_client = llm_client or LlmClient(
+        structured_retry_count=configured_retry_count,
     )
+    # 共享 worker 级 client 时，仍然按当前 brain 配置对齐结构化调用重试次数。
+    llm_client.structured_retry_count = configured_retry_count
     if not llm_client.is_available():
         raise LlmUnavailableError(
             stage="brain_startup",
@@ -4430,9 +4437,12 @@ def build_default_brain(client: Neo4jClient, config_overrides: dict | None = Non
 
 
 # 从环境变量读取 Neo4j 配置，并构造一个默认问诊大脑。
-def build_default_brain_from_env(config_overrides: dict | None = None) -> ConsultationBrain:
+def build_default_brain_from_env(
+    config_overrides: dict | None = None,
+    llm_client: LlmClient | None = None,
+) -> ConsultationBrain:
     client = Neo4jClient.from_env()
-    return build_default_brain(client, config_overrides=config_overrides)
+    return build_default_brain(client, config_overrides=config_overrides, llm_client=llm_client)
 
 
 # 读取第二阶段默认配置文件。

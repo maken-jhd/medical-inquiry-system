@@ -9,9 +9,10 @@ import signal
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from time import time
+from time import sleep, time
 from typing import Any
 
 
@@ -32,6 +33,19 @@ from simulator.replay_engine import ReplayConfig, ReplayEngine, ReplayResult, Re
 _TERMINAL_HANDLE = None
 _TERMINAL_LOCK = threading.Lock()
 _HEARTBEAT_INTERVAL_SECONDS = 15.0
+_WORKER_RUNTIME_LOCAL = threading.local()
+_WORKER_RUNTIME_LOCK = threading.Lock()
+_WORKER_RUNTIMES: list["_ReplayWorkerRuntime"] = []
+
+
+@dataclass
+class _ReplayWorkerRuntime:
+    """保存单个 batch worker 会跨病例复用的轻量运行资源。"""
+
+    llm_client: LlmClient
+
+    def close(self) -> None:
+        self.llm_client.close()
 
 
 # 解析命令行参数。
@@ -79,9 +93,59 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _read_api_error_cooldown_seconds() -> float:
+    raw_value = os.getenv("BATCH_API_ERROR_COOLDOWN_SECONDS") or "2.0"
+
+    try:
+        cooldown_seconds = float(raw_value)
+    except ValueError:
+        cooldown_seconds = 2.0
+
+    return max(cooldown_seconds, 0.0)
+
+
+def _sleep_before_api_retry(retry_index: int) -> float:
+    # batch 外层只在连接错误时做冷却，尽量错开下一次整例重跑的建连脉冲。
+    base_seconds = _read_api_error_cooldown_seconds()
+    cooldown_seconds = min(base_seconds * (2 ** max(int(retry_index) - 1, 0)), 12.0)
+
+    if cooldown_seconds > 0.0:
+        sleep(cooldown_seconds)
+
+    return cooldown_seconds
+
+
+def _get_worker_runtime() -> _ReplayWorkerRuntime:
+    runtime = getattr(_WORKER_RUNTIME_LOCAL, "runtime", None)
+    if runtime is not None:
+        return runtime
+
+    runtime = _ReplayWorkerRuntime(llm_client=LlmClient())
+    _WORKER_RUNTIME_LOCAL.runtime = runtime
+    with _WORKER_RUNTIME_LOCK:
+        _WORKER_RUNTIMES.append(runtime)
+    return runtime
+
+
+def _cleanup_worker_runtimes(*, reset_current_thread: bool = False) -> None:
+    with _WORKER_RUNTIME_LOCK:
+        runtimes = list(_WORKER_RUNTIMES)
+        _WORKER_RUNTIMES.clear()
+
+    for runtime in runtimes:
+        try:
+            runtime.close()
+        except Exception:
+            pass
+
+    if reset_current_thread and hasattr(_WORKER_RUNTIME_LOCAL, "runtime"):
+        delattr(_WORKER_RUNTIME_LOCAL, "runtime")
+
+
 def _run_single_case(case, max_turns: int):
-    brain = build_default_brain_from_env()
-    patient_agent = VirtualPatientAgent(use_llm=True)
+    worker_runtime = _get_worker_runtime()
+    brain = build_default_brain_from_env(llm_client=worker_runtime.llm_client)
+    patient_agent = VirtualPatientAgent(use_llm=True, llm_client=worker_runtime.llm_client)
     engine = ReplayEngine(
         brain=brain,
         patient_agent=patient_agent,
@@ -129,6 +193,7 @@ def _build_unexpected_case_failure_result(case, exc: Exception, *, stage: str) -
 def _run_single_case_guarded(case, max_turns: int, api_error_retries: int = 1):
     retry_count = max(int(api_error_retries), 0)
     retries_used = 0
+    total_cooldown_seconds = 0.0
 
     while True:
         try:
@@ -136,18 +201,20 @@ def _run_single_case_guarded(case, max_turns: int, api_error_retries: int = 1):
         except Exception as exc:
             if retries_used < retry_count and _is_retryable_api_exception(exc):
                 retries_used += 1
+                total_cooldown_seconds += _sleep_before_api_retry(retries_used)
                 continue
 
             # batch runner 再兜一层：即使单病例出现普通运行时异常，也只把该病例记为 failed。
             result = _build_unexpected_case_failure_result(case, exc, stage="batch_runner")
-            _annotate_batch_retry(result, retries_used)
+            _annotate_batch_retry(result, retries_used, total_cooldown_seconds=total_cooldown_seconds)
             return result
 
         if retries_used < retry_count and _is_retryable_api_error_result(result):
             retries_used += 1
+            total_cooldown_seconds += _sleep_before_api_retry(retries_used)
             continue
 
-        _annotate_batch_retry(result, retries_used)
+        _annotate_batch_retry(result, retries_used, total_cooldown_seconds=total_cooldown_seconds)
         return result
 
 
@@ -180,11 +247,12 @@ def _contains_retryable_api_error(text: str) -> bool:
     )
 
 
-def _annotate_batch_retry(result: object, retries_used: int) -> None:
+def _annotate_batch_retry(result: object, retries_used: int, *, total_cooldown_seconds: float = 0.0) -> None:
     if not isinstance(result, ReplayResult):
         return
 
     result.timing["batch_retry_attempts"] = retries_used
+    result.timing["batch_retry_cooldown_seconds_total"] = round(float(total_cooldown_seconds), 4)
     if retries_used <= 0:
         return
 
@@ -193,6 +261,7 @@ def _annotate_batch_retry(result: object, retries_used: int) -> None:
         result.error = {
             **dict(result.error or {}),
             "batch_retry_attempts": retries_used,
+            "batch_retry_cooldown_seconds_total": round(float(total_cooldown_seconds), 4),
             "retried_after_api_connection_error": True,
         }
 
@@ -327,13 +396,16 @@ def _run_cases_streaming(
     callback(0, total, finished=False)
 
     if normalized_concurrency == 1 or len(cases) <= 1:
-        for index, case in enumerate(cases, start=1):
-            if on_case_start is not None:
-                on_case_start(case, index, total)
-            result = _run_single_case_guarded(case, max_turns, api_error_retries)
-            if on_result is not None:
-                on_result(result, case, index, total)
-            callback(index, total, finished=index == total)
+        try:
+            for index, case in enumerate(cases, start=1):
+                if on_case_start is not None:
+                    on_case_start(case, index, total)
+                result = _run_single_case_guarded(case, max_turns, api_error_retries)
+                if on_result is not None:
+                    on_result(result, case, index, total)
+                callback(index, total, finished=index == total)
+        finally:
+            _cleanup_worker_runtimes(reset_current_thread=True)
         return
 
     completed = 0
@@ -387,6 +459,7 @@ def _run_cases_streaming(
     finally:
         if not interrupted:
             executor.shutdown(wait=True, cancel_futures=False)
+        _cleanup_worker_runtimes(reset_current_thread=True)
 
 
 def _run_cases(
@@ -698,6 +771,7 @@ def main() -> int:
     heartbeat_stop_event = threading.Event()
     current_timing_summary = _build_timing_summary(results)
     llm_available = LlmClient().is_available()
+    api_error_cooldown_seconds = _read_api_error_cooldown_seconds()
 
     if not llm_available:
         _write_json(
@@ -751,6 +825,7 @@ def main() -> int:
             f"启动 batch replay：总病例 {len(cases)}，已完成 {len(existing_results)}，"
             f"待运行 {len(pending_cases)}，并发 {max(int(args.case_concurrency), 1)}，"
             f"api_error_retries={max(int(args.api_error_retries), 0)}，"
+            f"api_error_cooldown_seconds={api_error_cooldown_seconds:.2f}，"
             f"resume={'off' if args.no_resume else 'on'}，llm_available={str(llm_available).lower()}"
         ),
     )
@@ -759,6 +834,7 @@ def main() -> int:
             f"[batch_replay] 启动：总病例 {len(cases)}，已完成 {len(existing_results)}，"
             f"待运行 {len(pending_cases)}，并发 {max(int(args.case_concurrency), 1)}，"
             f"API 连接错误重试 {max(int(args.api_error_retries), 0)} 次，"
+            f"冷却基线 {api_error_cooldown_seconds:.2f} 秒，"
             f"resume={'off' if args.no_resume else 'on'}，llm_available={str(llm_available).lower()}"
         )
     )

@@ -117,7 +117,7 @@
 - [run_batch_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_batch_replay.py)
   - 使用 seed cases 或指定病例文件批量运行回放，并输出评测摘要。
   - 当前支持读取 `JSONL` 或 `JSON` 数组病例文件。
-  - 当前支持病例级并发，默认 `--case-concurrency 4`；每个并发任务使用独立 brain 实例，避免共享会话状态。
+  - 当前支持病例级并发，默认 `--case-concurrency 4`；每个并发任务使用独立 brain 实例，避免共享会话状态，但同一 worker 会复用一套 LLM client，减少批量 replay 时的建连抖动。
   - 当前支持 `--limit`，便于先做 10 例左右的小样本 smoke。
   - 当前会自动读取 `configs/frontend.yaml` 与 `configs/frontend.local.yaml`，把 Neo4j / LLM / brain 配置桥接到 CLI 运行环境，避免 replay 入口和前端实时模式配置脱节。
   - 当前会直接向终端设备输出运行信息；即使通过 `conda run` 启动，也会看到病例启动、病例完成和运行中心跳。
@@ -128,7 +128,7 @@
   - 当前 `non_completed_cases.json` 会只记录 `status != completed` 的异常诊断病例，并按 `failed::*`、`max_turn_reached::top_exact_correct_but_rejected`、`max_turn_reached::true_candidate_but_final_wrong`、`max_turn_reached::no_final_answer` 等类别分组，方便全量 benchmark 后优先复盘。
   - 当前 `replay_results.jsonl` / `status.json` / `benchmark_summary.json` / `non_completed_cases.json` / `run.log` 都已支持 `failed` 病例语义；失败病例会保留 `error.code / error.stage / error.prompt_name / error.message / error.attempts`。
   - 当前 batch runner 也补了一层单病例异常保护；即使某个 worker 内部抛出普通 Python 异常，也会尽量把该病例转成 `failed` 结果继续整批运行，而不是直接让整个 smoke 异常终止。
-  - 当前对 `APIConnectionError / Connection error` 类单病例失败默认额外重试 1 次，可用 `--api-error-retries N` 调整；重试结果会在 `timing.batch_retry_attempts` 与失败病例 `error.batch_retry_attempts` 中记录。
+  - 当前对 `APIConnectionError / Connection error` 类单病例失败默认额外重试 1 次，可用 `--api-error-retries N` 调整；batch 外层会在整例重试前先做冷却退避，累计冷却时长会写入 `timing.batch_retry_cooldown_seconds_total`，失败病例 `error` 中也会带同名字段。
   - 当前默认支持断点续跑；如果输出目录里已有完成病例，会自动跳过这些病例，只继续未完成部分。若需要强制重跑，可使用 `--no-resume`。
   - 当前会记录病例级耗时拆分：`opening_seconds`、`initial_brain_seconds`、逐轮 `patient_answer_seconds / brain_turn_seconds`、`finalize_seconds` 与 `total_seconds`，并把聚合摘要写入 `benchmark_summary.json` / `status.json`；运行日志对亚秒级耗时会保留更高精度。
   - 当前续跑读取历史 `replay_results.jsonl` 时也会保留逐轮 `patient_answer_seconds / brain_turn_seconds / total_seconds`，便于后续继续做 turn 级复盘。
