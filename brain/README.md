@@ -143,6 +143,7 @@
   - 第二阶段的总编排层。
   - 当前已经串联 `turn_interpreter -> mention merge -> A1 -> A2 -> R2/A3 -> rollout -> report` 的搜索闭环。
   - 当前也是读取 [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml) 并构造默认依赖的入口。
+  - 当前 benchmark 已支持 `search_policy.root_action_mode = mcts | greedy`：默认保持 MCTS 根动作 exploitation，`greedy` 用于做 `KG + Greedy` 消融。
   - `process_turn()` 当前已按“统一解释本轮回答 -> 消化上一轮 pending action -> 判断本轮阶段 -> search / verifier / repair -> 输出下一问或最终报告”的顺序补充分段中文注释，便于顺着源码阅读控制流。
   - 当前会先把可信实体链接回填到 `mention.node_id / normalized_name`，再派生 `PatientContext` 和 `A1`，保证 opening 证据、slot 更新、R1 和 mention_context 使用同一图谱锚点。
   - 当前会把 `exam_context` 回答中的检查名与结果原文再次送入实体链接；可信命中 `LabFinding / ImagingFinding / Pathogen` 时直接写入 slot/evidence_state，且不再围绕 `__exam_context__::general` 重复追问。
@@ -213,6 +214,7 @@
 - [mcts_engine.py](/Users/loki/Workspace/GraduationDesign/brain/mcts_engine.py)
   - 负责按 `UCT` 公式在候选动作和树节点中做动态选择。
   - 当前已支持状态签名、tree policy、子节点扩展和 reward 回传。
+  - 当前也支持 `select_root_action_greedy()`，用于在 benchmark 中隔离根动作的贪心选择策略。
 
 - [simulation_engine.py](/Users/loki/Workspace/GraduationDesign/brain/simulation_engine.py)
   - 负责对候选动作做浅层局部预演。

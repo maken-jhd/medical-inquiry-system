@@ -157,3 +157,64 @@ def test_mcts_engine_select_root_action_skips_already_asked_targets() -> None:
 
     assert selected is not None
     assert selected.action_id == "fresh"
+
+
+# 验证 greedy 根动作选择只看局部先验分，不再被 rollout 平均价值主导。
+def test_mcts_engine_select_root_action_greedy_prefers_higher_prior_score() -> None:
+    engine = MctsEngine()
+    tree = SearchTree()
+    root = TreeNode(node_id="root", state_signature="root", parent_id=None, action_from_parent=None, stage="A2", depth=0)
+    high_value_low_prior = TreeNode(
+        node_id="root::high_value",
+        state_signature="high_value",
+        parent_id="root",
+        action_from_parent="high_value",
+        stage="A3",
+        depth=1,
+        visit_count=6,
+        total_value=5.4,
+        average_value=0.9,
+        metadata={
+            "prior_score": 0.3,
+            "action": MctsAction(
+                action_id="high_value",
+                action_type="verify_evidence",
+                target_node_id="node_low_prior",
+                target_node_label="ClinicalFinding",
+                target_node_name="低优先级证据",
+                prior_score=0.3,
+            ),
+        },
+    )
+    low_value_high_prior = TreeNode(
+        node_id="root::high_prior",
+        state_signature="high_prior",
+        parent_id="root",
+        action_from_parent="high_prior",
+        stage="A3",
+        depth=1,
+        visit_count=1,
+        total_value=0.4,
+        average_value=0.4,
+        metadata={
+            "prior_score": 0.8,
+            "action": MctsAction(
+                action_id="high_prior",
+                action_type="verify_evidence",
+                target_node_id="node_high_prior",
+                target_node_label="LabFinding",
+                target_node_name="高优先级证据",
+                prior_score=0.8,
+            ),
+        },
+    )
+    tree.add_node(root)
+    tree.add_node(high_value_low_prior)
+    tree.add_node(low_value_high_prior)
+    tree.add_edge("root", "root::high_value")
+    tree.add_edge("root", "root::high_prior")
+
+    selected = engine.select_root_action_greedy(tree)
+
+    assert selected is not None
+    assert selected.action_id == "high_prior"

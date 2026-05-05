@@ -227,29 +227,44 @@ class MctsEngine:
         )
         return node.average_value + prior_score + exploration
 
+    # 收集根节点下仍可用于真实下一问选择的孩子，统一处理“已问过目标”的过滤。
+    def _collect_selectable_root_children(
+        self,
+        tree: SearchTree,
+        excluded_target_node_ids: Sequence[str] | None = None,
+    ) -> list[TreeNode]:
+        if tree.root_id is None:
+            return []
+
+        root = tree.get_node(tree.root_id)
+        excluded_ids = set(excluded_target_node_ids or [])
+        children: list[TreeNode] = []
+
+        for child_id in root.children_ids:
+            child = tree.get_node(child_id)
+            action = child.metadata.get("action")
+
+            if not isinstance(action, MctsAction):
+                continue
+
+            # 根节点选真实下一问时，显式排除已经问过的 target，减少重复追问。
+            if action.target_node_id in excluded_ids:
+                continue
+
+            children.append(child)
+
+        return children
+
     # 从根节点的子节点中选择当前平均价值最高的动作。
     def select_root_action(
         self,
         tree: SearchTree,
         excluded_target_node_ids: Sequence[str] | None = None,
     ) -> Optional[MctsAction]:
-        if tree.root_id is None:
-            return None
-
-        root = tree.get_node(tree.root_id)
-        excluded_ids = set(excluded_target_node_ids or [])
-        children = []
-
-        for child_id in root.children_ids:
-            child = tree.get_node(child_id)
-            action = child.metadata.get("action")
-
-            # 根节点选真实下一问时，显式排除已经问过的 target，减少重复追问。
-            if isinstance(action, MctsAction) and action.target_node_id in excluded_ids:
-                continue
-
-            children.append(child)
-
+        children = self._collect_selectable_root_children(
+            tree,
+            excluded_target_node_ids=excluded_target_node_ids,
+        )
         if len(children) == 0:
             return None
 
@@ -261,6 +276,30 @@ class MctsEngine:
                 -item.average_value,
                 -item.visit_count,
                 -float(item.metadata.get("prior_score", 0.0)),
+                item.node_id,
+            ),
+        )[0]
+        action = best_child.metadata.get("action")
+        return action if isinstance(action, MctsAction) else None
+
+    # greedy 模式只看 root action 的局部先验，不消费 rollout 平均价值做根动作选择。
+    def select_root_action_greedy(
+        self,
+        tree: SearchTree,
+        excluded_target_node_ids: Sequence[str] | None = None,
+    ) -> Optional[MctsAction]:
+        children = self._collect_selectable_root_children(
+            tree,
+            excluded_target_node_ids=excluded_target_node_ids,
+        )
+        if len(children) == 0:
+            return None
+
+        best_child = sorted(
+            children,
+            key=lambda item: (
+                -float(item.metadata.get("prior_score", 0.0)),
+                -item.visit_count,
                 item.node_id,
             ),
         )[0]

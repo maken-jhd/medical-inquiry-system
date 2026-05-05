@@ -24,10 +24,21 @@ if str(PROJECT_ROOT) not in sys.path:
 from brain.llm_client import LlmClient
 from brain.service import build_default_brain_from_env
 from frontend.config_loader import apply_config_to_environment, load_frontend_config
-from simulator.benchmark import build_non_completed_case_report, summarize_benchmark
+from simulator.benchmark import (
+    benchmark_summary_to_payload,
+    build_benchmark_cohort_summary,
+    build_non_completed_case_report,
+    summarize_benchmark,
+)
 from simulator.generate_cases import build_seed_cases, load_cases_jsonl, write_cases_jsonl
 from simulator.patient_agent import VirtualPatientAgent
-from simulator.replay_engine import ReplayConfig, ReplayEngine, ReplayResult, ReplayTurn
+from simulator.replay_engine import (
+    ReplayConfig,
+    ReplayEngine,
+    ReplayResult,
+    ReplayTurn,
+    extract_case_benchmark_fields,
+)
 
 
 _TERMINAL_HANDLE = None
@@ -159,9 +170,14 @@ def _run_single_case(case, max_turns: int):
 
 
 def _build_unexpected_case_failure_result(case, exc: Exception, *, stage: str) -> ReplayResult:
+    case_benchmark_fields = extract_case_benchmark_fields(case)
     return ReplayResult(
         case_id=str(getattr(case, "case_id", "")),
         case_title=str(getattr(case, "title", "")),
+        case_type=case_benchmark_fields["case_type"],
+        case_qc_status=case_benchmark_fields["case_qc_status"],
+        benchmark_qc_status=case_benchmark_fields["benchmark_qc_status"],
+        case_qc_reasons=case_benchmark_fields["case_qc_reasons"],
         status="failed",
         final_report={},
         timing={
@@ -511,6 +527,10 @@ def _replay_result_to_payload(result: ReplayResult) -> dict[str, Any]:
 
 
 def _payload_to_replay_result(payload: dict[str, Any]) -> ReplayResult:
+    raw_case_qc_reasons = payload.get("case_qc_reasons") or []
+    if not isinstance(raw_case_qc_reasons, list):
+        raw_case_qc_reasons = []
+
     turns = [
         ReplayTurn(
             question_node_id=str(item.get("question_node_id", "")),
@@ -521,6 +541,30 @@ def _payload_to_replay_result(payload: dict[str, Any]) -> ReplayResult:
             stage=str(item.get("stage", "A3")),
             search_report=dict(item.get("search_report", {})),
             search_metadata=dict(item.get("search_metadata", {})),
+            asked_action_id=str(item.get("asked_action_id", "")),
+            asked_action_type=str(item.get("asked_action_type", "")),
+            asked_target_node_label=str(item.get("asked_target_node_label", "")),
+            asked_target_node_name=str(item.get("asked_target_node_name", "")),
+            asked_action_hypothesis_id=str(item.get("asked_action_hypothesis_id", "")),
+            asked_action_group=str(item.get("asked_action_group", "unknown")),
+            asked_action_question_type_hint=str(item.get("asked_action_question_type_hint", "")),
+            asked_action_acquisition_mode=str(item.get("asked_action_acquisition_mode", "")),
+            asked_action_evidence_cost=str(item.get("asked_action_evidence_cost", "unknown")),
+            asked_action_selected_source=str(item.get("asked_action_selected_source", "")),
+            asked_action_selected_source_priority_rank=int(
+                item.get("asked_action_selected_source_priority_rank", 0) or 0
+            ),
+            truth_hit=bool(item.get("truth_hit", False)),
+            revealed_slot_group=str(item.get("revealed_slot_group", "")),
+            revealed_slot_label=str(item.get("revealed_slot_label", "")),
+            revealed_slot_name=str(item.get("revealed_slot_name", "")),
+            revealed_slot_value=item.get("revealed_slot_value"),
+            revealed_slot_positive=item.get("revealed_slot_positive"),
+            revealed_slot_families=[
+                str(family)
+                for family in (item.get("revealed_slot_families") or [])
+                if len(str(family).strip()) > 0
+            ],
             patient_answer_seconds=float(item.get("patient_answer_seconds", 0.0) or 0.0),
             brain_turn_seconds=float(item.get("brain_turn_seconds", 0.0) or 0.0),
             total_seconds=float(item.get("total_seconds", 0.0) or 0.0),
@@ -532,13 +576,23 @@ def _payload_to_replay_result(payload: dict[str, Any]) -> ReplayResult:
     return ReplayResult(
         case_id=str(payload.get("case_id", "")),
         case_title=str(payload.get("case_title", "")),
+        case_type=str(payload.get("case_type", "")),
+        case_qc_status=str(payload.get("case_qc_status", "")),
+        benchmark_qc_status=str(payload.get("benchmark_qc_status", "")),
+        case_qc_reasons=[str(item) for item in raw_case_qc_reasons if str(item).strip()],
         opening_text=str(payload.get("opening_text", "")),
+        opening_revealed_slot_ids=[
+            str(item)
+            for item in (payload.get("opening_revealed_slot_ids") or [])
+            if len(str(item).strip()) > 0
+        ],
         true_conditions=list(payload.get("true_conditions", [])),
         true_disease_phase=payload.get("true_disease_phase"),
         red_flags=list(payload.get("red_flags", [])),
         turns=turns,
         final_report=dict(payload.get("final_report", {})),
         initial_output=dict(payload.get("initial_output", {})),
+        analysis=dict(payload.get("analysis", {})),
         status=str(payload.get("status", "pending")),
         timing=dict(payload.get("timing", {})),
         error=dict(payload.get("error", {})),
@@ -576,6 +630,37 @@ def _load_existing_replay_results(results_file: Path) -> list[ReplayResult]:
     return results
 
 
+def _enrich_replay_result_from_case(result: ReplayResult, case: object | None) -> ReplayResult:
+    if case is None:
+        return result
+
+    case_benchmark_fields = extract_case_benchmark_fields(case)
+
+    if not result.case_title:
+        result.case_title = str(getattr(case, "title", "") or "")
+    if not result.case_type:
+        result.case_type = case_benchmark_fields["case_type"]
+    if not result.case_qc_status:
+        result.case_qc_status = case_benchmark_fields["case_qc_status"]
+    if not result.benchmark_qc_status:
+        result.benchmark_qc_status = case_benchmark_fields["benchmark_qc_status"]
+    if not result.case_qc_reasons:
+        result.case_qc_reasons = list(case_benchmark_fields["case_qc_reasons"])
+
+    return result
+
+
+def _enrich_replay_results_from_cases(results: list[ReplayResult], cases: list[object]) -> list[ReplayResult]:
+    case_lookup = {
+        str(getattr(case, "case_id", "") or "").strip(): case
+        for case in cases
+        if len(str(getattr(case, "case_id", "") or "").strip()) > 0
+    }
+    for result in results:
+        _enrich_replay_result_from_case(result, case_lookup.get(result.case_id))
+    return results
+
+
 def _append_replay_result(result: ReplayResult, output_file: Path) -> None:
     output_file.parent.mkdir(parents=True, exist_ok=True)
     with output_file.open("a", encoding="utf-8") as handle:
@@ -602,11 +687,12 @@ def _build_summary_payload(
     case_limit: int,
 ) -> dict[str, Any]:
     summary = summarize_benchmark(results)
-    payload = json.loads(json.dumps(summary, ensure_ascii=False, default=lambda obj: obj.__dict__))
+    payload = benchmark_summary_to_payload(summary)
     payload["case_concurrency"] = max(int(case_concurrency), 1)
     payload["case_file"] = case_file
     payload["case_limit"] = int(case_limit)
     payload["timing_summary"] = _build_timing_summary(results)
+    payload.update(build_benchmark_cohort_summary(results))
     return payload
 
 
@@ -763,6 +849,7 @@ def main() -> int:
     existing_results: list[ReplayResult] = []
     if not args.no_resume:
         existing_results = _load_existing_replay_results(results_file)
+        existing_results = _enrich_replay_results_from_cases(existing_results, cases)
 
     completed_case_ids = {result.case_id for result in existing_results}
     pending_cases = [case for case in cases if case.case_id not in completed_case_ids]
@@ -855,6 +942,7 @@ def main() -> int:
         _ = case
         with runtime_state_lock:
             active_cases.pop(result.case_id, None)
+            _enrich_replay_result_from_case(result, case)
             _append_replay_result(result, results_file)
             results.append(result)
 

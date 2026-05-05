@@ -2,7 +2,9 @@
 
 from pathlib import Path
 
+from brain.search_tree import SearchTree
 from brain.service import build_default_brain, load_brain_config
+from brain.types import MctsAction
 
 
 class FakeAvailableLlmClient:
@@ -26,6 +28,8 @@ def test_load_brain_config_reads_yaml_file(tmp_path: Path) -> None:
             [
                 "search:",
                 "  num_rollouts: 5",
+                "search_policy:",
+                "  root_action_mode: greedy",
                 "rollout_control:",
                 "  enable_multi_branch_rollout: true",
                 "  branch_budget_per_action: 2",
@@ -56,6 +60,7 @@ def test_load_brain_config_reads_yaml_file(tmp_path: Path) -> None:
     config = load_brain_config(config_path)
 
     assert config["search"]["num_rollouts"] == 5
+    assert config["search_policy"]["root_action_mode"] == "greedy"
     assert config["rollout_control"]["enable_multi_branch_rollout"] is True
     assert config["rollout_control"]["branch_budget_per_action"] == 2
     assert config["path_evaluation"]["agent_eval_mode"] == "llm_verifier"
@@ -79,6 +84,9 @@ def test_build_default_brain_maps_a3_and_repair_config() -> None:
     brain = build_default_brain(
         client=object(),
         config_overrides={
+            "search_policy": {
+                "root_action_mode": "greedy",
+            },
             "a3": {
                 "enable_early_exam_context_rescue": True,
                 "early_exam_context_turn_limit": 3,
@@ -116,6 +124,7 @@ def test_build_default_brain_maps_a3_and_repair_config() -> None:
         llm_client=FakeAvailableLlmClient(),
     )
 
+    assert brain.deps.search_policy.root_action_mode == "greedy"
     assert brain.deps.a3_routing_policy.enable_early_exam_context_rescue is True
     assert brain.deps.a3_routing_policy.early_exam_context_turn_limit == 3
     assert brain.deps.a3_routing_policy.early_exam_context_revealed_count_threshold == 1
@@ -137,3 +146,42 @@ def test_build_default_brain_maps_a3_and_repair_config() -> None:
     assert brain.deps.hypothesis_manager.config.enable_multi_hypothesis_feedback is True
     assert brain.deps.hypothesis_manager.config.use_scope_weighted_feedback is True
     assert brain.deps.hypothesis_manager.config.max_related_hypotheses_per_evidence == 4
+
+
+# 验证 service 层会按 search_policy 把根动作选择分发给 mcts 或 greedy selector。
+def test_search_policy_dispatches_root_action_selector() -> None:
+    brain = build_default_brain(
+        client=object(),
+        config_overrides={
+            "search_policy": {
+                "root_action_mode": "greedy",
+            },
+        },
+        llm_client=FakeAvailableLlmClient(),
+    )
+    greedy_action = MctsAction(
+        action_id="greedy_action",
+        action_type="verify_evidence",
+        target_node_id="node_greedy",
+        target_node_label="ClinicalFinding",
+        target_node_name="咳嗽",
+        prior_score=0.8,
+    )
+    mcts_action = MctsAction(
+        action_id="mcts_action",
+        action_type="verify_evidence",
+        target_node_id="node_mcts",
+        target_node_label="ClinicalFinding",
+        target_node_name="发热",
+        prior_score=0.6,
+    )
+
+    brain.deps.mcts_engine.select_root_action = lambda tree, excluded_target_node_ids=None: mcts_action
+    brain.deps.mcts_engine.select_root_action_greedy = lambda tree, excluded_target_node_ids=None: greedy_action
+
+    selected_greedy = brain._select_root_action_with_policy(SearchTree())
+    brain.deps.search_policy.root_action_mode = "mcts"
+    selected_mcts = brain._select_root_action_with_policy(SearchTree())
+
+    assert selected_greedy is greedy_action
+    assert selected_mcts is mcts_action

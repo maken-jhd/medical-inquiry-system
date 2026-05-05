@@ -317,6 +317,11 @@ def test_build_status_payload_hides_internal_active_case_fields() -> None:
 def test_payload_to_replay_result_preserves_turn_timing_fields() -> None:
     payload = {
         "case_id": "case1",
+        "case_type": "competitive",
+        "case_qc_status": "eligible",
+        "benchmark_qc_status": "eligible",
+        "case_qc_reasons": [],
+        "opening_revealed_slot_ids": ["slot0"],
         "turns": [
             {
                 "question_node_id": "slot1",
@@ -334,22 +339,98 @@ def test_payload_to_replay_result_preserves_turn_timing_fields() -> None:
                 "search_metadata": {
                     "selected_action_source": "repair_selected_action",
                 },
+                "asked_action_id": "verify::slot1",
+                "asked_action_type": "verify_evidence",
+                "asked_target_node_label": "ClinicalFinding",
+                "asked_target_node_name": "发热",
+                "asked_action_hypothesis_id": "d1",
+                "asked_action_group": "symptom",
+                "asked_action_question_type_hint": "symptom",
+                "asked_action_acquisition_mode": "direct_ask",
+                "asked_action_evidence_cost": "low",
+                "asked_action_selected_source": "repair_selected_action",
+                "asked_action_selected_source_priority_rank": 2,
+                "truth_hit": True,
+                "revealed_slot_group": "symptom",
+                "revealed_slot_label": "ClinicalFinding",
+                "revealed_slot_name": "发热",
+                "revealed_slot_value": True,
+                "revealed_slot_positive": True,
+                "revealed_slot_families": ["constitutional_symptom"],
                 "patient_answer_seconds": 1.23,
                 "brain_turn_seconds": 4.56,
                 "total_seconds": 5.79,
             }
         ],
+        "analysis": {
+            "question_count_total": 1,
+        },
         "timing": {"total_seconds": 5.8},
     }
 
     result = run_batch_replay._payload_to_replay_result(payload)
 
     assert len(result.turns) == 1
+    assert result.case_type == "competitive"
+    assert result.case_qc_status == "eligible"
+    assert result.benchmark_qc_status == "eligible"
+    assert result.opening_revealed_slot_ids == ["slot0"]
+    assert result.analysis["question_count_total"] == 1
     assert result.turns[0].patient_answer_seconds == 1.23
     assert result.turns[0].brain_turn_seconds == 4.56
     assert result.turns[0].total_seconds == 5.79
     assert result.turns[0].search_report["turn_index"] == 2
     assert result.turns[0].search_metadata["selected_action_source"] == "repair_selected_action"
+    assert result.turns[0].asked_action_group == "symptom"
+    assert result.turns[0].revealed_slot_families == ["constitutional_symptom"]
+
+
+def test_build_summary_payload_includes_cohort_summaries() -> None:
+    results = [
+        ReplayResult(
+            case_id="case1",
+            case_title="病例1",
+            case_type="ordinary",
+            case_qc_status="eligible",
+            benchmark_qc_status="eligible",
+            true_conditions=["活动性结核病"],
+            final_report={
+                "candidate_hypotheses": [{"name": "活动性结核病"}],
+                "best_final_answer": {"answer_name": "活动性结核病"},
+                "stop_reason": "final_answer_accepted",
+            },
+            status="completed",
+        ),
+        ReplayResult(
+            case_id="case2",
+            case_title="病例2",
+            case_type="low_cost",
+            case_qc_status="weak_anchor",
+            benchmark_qc_status="ineligible",
+            true_conditions=["血脂异常"],
+            final_report={
+                "candidate_hypotheses": [{"name": "肥胖"}],
+                "best_final_answer": {"answer_name": "肥胖"},
+                "stop_reason": "final_answer_accepted",
+            },
+            status="completed",
+        ),
+    ]
+
+    payload = run_batch_replay._build_summary_payload(
+        results,
+        case_concurrency=4,
+        case_file="cases.jsonl",
+        case_limit=0,
+    )
+
+    assert payload["eligible_summary"]["case_count"] == 1
+    assert "analysis_summary" in payload
+    assert payload["analysis_summary"]["case_count"] == 2
+    assert payload["case_type_summaries"]["ordinary"]["case_count"] == 1
+    assert "analysis_summary" in payload["case_type_summaries"]["ordinary"]
+    assert payload["case_type_summaries"]["low_cost"]["wrong_accepted_count"] == 1
+    assert payload["case_qc_status_summaries"]["weak_anchor"]["case_count"] == 1
 
 
 # 验证主流程会跳过已完成病例，并把新结果直接追加写入输出目录。

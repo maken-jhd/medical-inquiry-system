@@ -34,7 +34,19 @@ class FakeBrain:
             return {
                 "next_question": "近期是否有发热？",
                 "pending_action": {
+                    "action_id": "verify::symptom_fever",
+                    "action_type": "verify_evidence",
                     "target_node_id": "发热",
+                    "target_node_label": "ClinicalFinding",
+                    "target_node_name": "发热",
+                    "hypothesis_id": "disease_pcp",
+                    "metadata": {
+                        "question_type_hint": "symptom",
+                        "acquisition_mode": "direct_ask",
+                        "evidence_cost": "low",
+                        "selected_action_source": "default_search_action",
+                        "selected_action_source_priority_rank": 4,
+                    },
                 },
                 "search_report": {
                     "turn_index": 1,
@@ -87,8 +99,15 @@ def test_replay_engine_runs_case_to_completion() -> None:
     assert "发热" in result.opening_text
     assert "发热" in brain.first_inputs["replay::case1"]
     assert len(result.turns) == 1
+    assert result.opening_revealed_slot_ids == ["发热"]
     assert result.turns[0].question_node_id == "发热"
     assert result.turns[0].answer_text == "有。"
+    assert result.turns[0].asked_action_id == "verify::symptom_fever"
+    assert result.turns[0].asked_action_group == "symptom"
+    assert result.turns[0].asked_action_evidence_cost == "low"
+    assert result.turns[0].truth_hit is True
+    assert result.turns[0].revealed_slot_group == "symptom"
+    assert result.turns[0].revealed_slot_positive is True
     assert result.initial_output["search_report"]["search_metadata"]["selected_action_source"] == "default_search_action"
     assert result.turns[0].search_report["turn_index"] == 2
     assert result.turns[0].search_metadata["repair_mode"] == "none"
@@ -98,6 +117,10 @@ def test_replay_engine_runs_case_to_completion() -> None:
     assert result.timing["initial_brain_seconds"] >= 0.0
     assert result.timing["total_seconds"] >= 0.0
     assert result.timing["turn_count"] == 1
+    assert result.analysis["question_count_total"] == 1
+    assert result.analysis["question_count_by_group"]["symptom"] == 1
+    assert result.analysis["question_truth_hit_count_by_group"]["symptom"] == 1
+    assert result.analysis["positive_coverage_rate_by_group"]["symptom"] == 1.0
     assert result.final_report["summary"] == "测试完成"
 
 

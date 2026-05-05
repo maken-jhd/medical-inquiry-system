@@ -238,6 +238,7 @@
 
 - 当前有 replay、competitive 病例、graph-case sampling 等工具
 - 但还缺少一组固定、可持续回归的“诊断链路专项用例集”
+- 当前 benchmark 主矩阵与执行顺序已单独整理到 [diagnosis_benchmark_experiment_design.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_benchmark_experiment_design.md)，后续这里更聚焦“还缺什么能力”
 
 待办：
 

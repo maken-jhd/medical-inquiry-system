@@ -4,9 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
-from typing import Iterable, List
+from typing import Callable, Iterable, List
 
-from .replay_engine import ReplayResult
+from .replay_engine import (
+    ReplayResult,
+    STANDARD_ANALYSIS_GROUPS,
+    STANDARD_COST_BUCKETS,
+    STANDARD_QUESTION_GROUPS,
+)
 
 
 FAMILY_MATCH_RATIO_THRESHOLD = 0.88
@@ -46,6 +51,43 @@ class BenchmarkSummary:
     red_flag_hit_count: int
     red_flag_hit_rate: float
     status_breakdown: dict[str, int] = field(default_factory=dict)
+
+
+def benchmark_summary_to_payload(summary: BenchmarkSummary) -> dict:
+    """将 BenchmarkSummary 转成可直接写 JSON 的 payload。"""
+
+    return {
+        "case_count": int(summary.case_count),
+        "completed_count": int(summary.completed_count),
+        "completion_rate": float(summary.completion_rate),
+        "max_turn_reached_count": int(summary.max_turn_reached_count),
+        "average_turns": float(summary.average_turns),
+        "average_revealed_slots": float(summary.average_revealed_slots),
+        "hypothesis_hit_count": int(summary.hypothesis_hit_count),
+        "hypothesis_hit_rate": float(summary.hypothesis_hit_rate),
+        "top3_hypothesis_hit_count": int(summary.top3_hypothesis_hit_count),
+        "top3_hypothesis_hit_rate": float(summary.top3_hypothesis_hit_rate),
+        "final_answer_count": int(summary.final_answer_count),
+        "final_answer_exact_hit_count": int(summary.final_answer_exact_hit_count),
+        "final_answer_exact_hit_rate": float(summary.final_answer_exact_hit_rate),
+        "top1_final_answer_hit_count": int(summary.top1_final_answer_hit_count),
+        "top1_final_answer_hit_rate": float(summary.top1_final_answer_hit_rate),
+        "final_answer_family_hit_count": int(summary.final_answer_family_hit_count),
+        "final_answer_family_hit_rate": float(summary.final_answer_family_hit_rate),
+        "accepted_final_answer_count": int(summary.accepted_final_answer_count),
+        "accepted_exact_hit_count": int(summary.accepted_exact_hit_count),
+        "accepted_exact_accuracy": float(summary.accepted_exact_accuracy),
+        "accepted_family_hit_count": int(summary.accepted_family_hit_count),
+        "accepted_family_accuracy": float(summary.accepted_family_accuracy),
+        "wrong_accepted_count": int(summary.wrong_accepted_count),
+        "family_wrong_accepted_count": int(summary.family_wrong_accepted_count),
+        "top_exact_correct_but_rejected_count": int(summary.top_exact_correct_but_rejected_count),
+        "top_family_correct_but_rejected_count": int(summary.top_family_correct_but_rejected_count),
+        "red_flag_case_count": int(summary.red_flag_case_count),
+        "red_flag_hit_count": int(summary.red_flag_hit_count),
+        "red_flag_hit_rate": float(summary.red_flag_hit_rate),
+        "status_breakdown": dict(summary.status_breakdown),
+    }
 
 
 # 汇总多条回放结果，生成更完整的离线评测指标。
@@ -184,6 +226,172 @@ def build_non_completed_case_report(results: Iterable[ReplayResult]) -> dict:
     }
 
 
+def build_benchmark_cohort_summary(results: Iterable[ReplayResult]) -> dict:
+    """按病例 QC 状态与病例类型生成分层 benchmark 指标。"""
+
+    results_list = list(results)
+    return {
+        "analysis_summary": build_replay_analysis_summary(results_list),
+        "metadata_field_coverage": {
+            "case_qc_status": _field_coverage_count(results_list, "case_qc_status"),
+            "benchmark_qc_status": _field_coverage_count(results_list, "benchmark_qc_status"),
+            "case_type": _field_coverage_count(results_list, "case_type"),
+        },
+        "eligible_summary": benchmark_summary_to_payload(
+            summarize_benchmark(_filter_by_field(results_list, "case_qc_status", "eligible"))
+        ),
+        "eligible_analysis_summary": build_replay_analysis_summary(
+            _filter_by_field(results_list, "case_qc_status", "eligible")
+        ),
+        "case_qc_status_summaries": _build_grouped_summaries(
+            results_list,
+            key_fn=lambda item: str(getattr(item, "case_qc_status", "") or "").strip() or "unknown",
+        ),
+        "benchmark_qc_status_summaries": _build_grouped_summaries(
+            results_list,
+            key_fn=lambda item: str(getattr(item, "benchmark_qc_status", "") or "").strip() or "unknown",
+        ),
+        "case_type_summaries": _build_grouped_summaries(
+            results_list,
+            key_fn=lambda item: str(getattr(item, "case_type", "") or "").strip() or "unknown",
+        ),
+    }
+
+
+def build_replay_analysis_summary(results: Iterable[ReplayResult]) -> dict:
+    """汇总 replay 里的问法分布、truth 命中与 required family coverage 指标。"""
+
+    results_list = list(results)
+    case_count = len(results_list)
+    question_count_by_group = _empty_counter(STANDARD_QUESTION_GROUPS)
+    question_truth_hit_count_by_group = _empty_counter(STANDARD_QUESTION_GROUPS)
+    question_count_by_cost = _empty_counter(STANDARD_COST_BUCKETS)
+    askable_positive_truth_count_by_group = _empty_counter(STANDARD_ANALYSIS_GROUPS)
+    revealed_positive_truth_count_by_group = _empty_counter(STANDARD_ANALYSIS_GROUPS)
+    selected_action_source_count: dict[str, int] = {}
+
+    question_count_total = 0
+    truth_hit_question_count_total = 0
+    analysis_populated_count = 0
+    required_family_group_count_total = 0
+    required_family_groups_covered_on_opening_total = 0
+    required_family_groups_covered_after_replay_total = 0
+    required_family_coverage_gain_total = 0
+    cases_with_askable_positive_truth_by_group = _empty_counter(STANDARD_ANALYSIS_GROUPS)
+    cases_zero_revealed_positive_truth_by_group = _empty_counter(STANDARD_ANALYSIS_GROUPS)
+
+    for result in results_list:
+        analysis = getattr(result, "analysis", {}) or {}
+        if not isinstance(analysis, dict) or len(analysis) == 0:
+            continue
+
+        analysis_populated_count += 1
+        question_count_total += int(analysis.get("question_count_total", 0) or 0)
+        truth_hit_question_count_total += int(analysis.get("truth_hit_question_count_total", 0) or 0)
+        required_family_group_count_total += int(analysis.get("required_family_group_count", 0) or 0)
+        required_family_groups_covered_on_opening_total += int(
+            analysis.get("required_family_groups_covered_on_opening", 0) or 0
+        )
+        required_family_groups_covered_after_replay_total += int(
+            analysis.get("required_family_groups_covered_after_replay", 0) or 0
+        )
+        required_family_coverage_gain_total += int(analysis.get("required_family_coverage_gain", 0) or 0)
+
+        _merge_counter(question_count_by_group, analysis.get("question_count_by_group"), allowed_keys=STANDARD_QUESTION_GROUPS)
+        _merge_counter(
+            question_truth_hit_count_by_group,
+            analysis.get("question_truth_hit_count_by_group"),
+            allowed_keys=STANDARD_QUESTION_GROUPS,
+        )
+        _merge_counter(question_count_by_cost, analysis.get("question_count_by_cost"), allowed_keys=STANDARD_COST_BUCKETS)
+        _merge_counter(
+            askable_positive_truth_count_by_group,
+            analysis.get("askable_positive_truth_count_by_group"),
+            allowed_keys=STANDARD_ANALYSIS_GROUPS,
+        )
+        _merge_counter(
+            revealed_positive_truth_count_by_group,
+            analysis.get("revealed_positive_truth_count_by_group"),
+            allowed_keys=STANDARD_ANALYSIS_GROUPS,
+        )
+
+        selected_sources = analysis.get("selected_action_source_count") or {}
+        if isinstance(selected_sources, dict):
+            for source, count in selected_sources.items():
+                normalized_source = str(source).strip() or "unknown"
+                selected_action_source_count[normalized_source] = (
+                    selected_action_source_count.get(normalized_source, 0) + int(count or 0)
+                )
+
+        askable_positive_by_group = analysis.get("askable_positive_truth_count_by_group") or {}
+        revealed_positive_by_group = analysis.get("revealed_positive_truth_count_by_group") or {}
+
+        if isinstance(askable_positive_by_group, dict) and isinstance(revealed_positive_by_group, dict):
+            for group in STANDARD_ANALYSIS_GROUPS:
+                askable_count = int(askable_positive_by_group.get(group, 0) or 0)
+                revealed_count = int(revealed_positive_by_group.get(group, 0) or 0)
+                if askable_count <= 0:
+                    continue
+                cases_with_askable_positive_truth_by_group[group] += 1
+                if revealed_count <= 0:
+                    cases_zero_revealed_positive_truth_by_group[group] += 1
+
+    return {
+        "case_analysis_populated_count": analysis_populated_count,
+        "case_count": case_count,
+        "question_count_total": question_count_total,
+        "average_question_count_total": round(question_count_total / case_count, 4) if case_count > 0 else 0.0,
+        "truth_hit_question_count_total": truth_hit_question_count_total,
+        "truth_hit_question_rate_total": (
+            round(truth_hit_question_count_total / float(question_count_total), 4)
+            if question_count_total > 0
+            else 0.0
+        ),
+        "question_count_by_group": _counter_payload(question_count_by_group, case_count=case_count),
+        "question_count_by_cost": _counter_payload(question_count_by_cost, case_count=case_count),
+        "question_truth_hit_by_group": {
+            group: {
+                "question_count": question_count_by_group[group],
+                "truth_hit_count": question_truth_hit_count_by_group[group],
+                "truth_hit_rate": (
+                    round(question_truth_hit_count_by_group[group] / float(question_count_by_group[group]), 4)
+                    if question_count_by_group[group] > 0
+                    else None
+                ),
+            }
+            for group in STANDARD_QUESTION_GROUPS
+        },
+        "revealed_positive_coverage_by_group": {
+            group: {
+                "askable_positive_truth_count": askable_positive_truth_count_by_group[group],
+                "revealed_positive_truth_count": revealed_positive_truth_count_by_group[group],
+                "coverage_rate": (
+                    round(
+                        revealed_positive_truth_count_by_group[group]
+                        / float(askable_positive_truth_count_by_group[group]),
+                        4,
+                    )
+                    if askable_positive_truth_count_by_group[group] > 0
+                    else None
+                ),
+                "cases_with_askable_positive_truth": cases_with_askable_positive_truth_by_group[group],
+                "cases_zero_revealed_positive_truth": cases_zero_revealed_positive_truth_by_group[group],
+            }
+            for group in STANDARD_ANALYSIS_GROUPS
+        },
+        "selected_action_source_count": dict(sorted(selected_action_source_count.items(), key=lambda item: item[0])),
+        "required_family_coverage": {
+            "required_family_group_count_total": required_family_group_count_total,
+            "required_family_groups_covered_on_opening_total": required_family_groups_covered_on_opening_total,
+            "required_family_groups_covered_after_replay_total": required_family_groups_covered_after_replay_total,
+            "required_family_coverage_gain_total": required_family_coverage_gain_total,
+            "average_required_family_coverage_gain": (
+                round(required_family_coverage_gain_total / case_count, 4) if case_count > 0 else 0.0
+            ),
+        },
+    }
+
+
 # 统计单个病例在回放中实际暴露了多少个槽位。
 def _count_revealed_slots(result: ReplayResult) -> int:
     revealed = {
@@ -192,6 +400,64 @@ def _count_revealed_slots(result: ReplayResult) -> int:
         if turn.revealed_slot_id is not None
     }
     return len(revealed)
+
+
+def _field_coverage_count(results: list[ReplayResult], field_name: str) -> dict[str, int]:
+    populated_count = sum(1 for item in results if len(str(getattr(item, field_name, "") or "").strip()) > 0)
+    return {
+        "populated_count": populated_count,
+        "missing_count": max(len(results) - populated_count, 0),
+    }
+
+
+def _filter_by_field(results: list[ReplayResult], field_name: str, expected_value: str) -> list[ReplayResult]:
+    return [
+        item
+        for item in results
+        if str(getattr(item, field_name, "") or "").strip() == expected_value
+    ]
+
+
+def _build_grouped_summaries(
+    results: list[ReplayResult],
+    *,
+    key_fn: Callable[[ReplayResult], str],
+) -> dict[str, dict]:
+    grouped: dict[str, list[ReplayResult]] = {}
+
+    for result in results:
+        key = key_fn(result)
+        grouped.setdefault(key, []).append(result)
+
+    return {
+        key: {
+            **benchmark_summary_to_payload(summarize_benchmark(items)),
+            "analysis_summary": build_replay_analysis_summary(items),
+        }
+        for key, items in sorted(grouped.items(), key=lambda item: item[0])
+    }
+
+
+def _empty_counter(keys: tuple[str, ...]) -> dict[str, int]:
+    return {key: 0 for key in keys}
+
+
+def _merge_counter(target: dict[str, int], source: object, *, allowed_keys: tuple[str, ...]) -> None:
+    if not isinstance(source, dict):
+        return
+
+    for key in allowed_keys:
+        target[key] += int(source.get(key, 0) or 0)
+
+
+def _counter_payload(counter: dict[str, int], *, case_count: int) -> dict[str, dict[str, float | int]]:
+    return {
+        key: {
+            "total": value,
+            "average_per_case": round(value / case_count, 4) if case_count > 0 else 0.0,
+        }
+        for key, value in counter.items()
+    }
 
 
 # 判断最终候选假设是否命中了病例的真实条件或阶段。
@@ -360,6 +626,10 @@ def _build_non_completed_case_record(result: ReplayResult) -> dict:
     return {
         "case_id": result.case_id,
         "case_title": result.case_title,
+        "case_type": result.case_type,
+        "case_qc_status": result.case_qc_status,
+        "benchmark_qc_status": result.benchmark_qc_status,
+        "case_qc_reasons": list(result.case_qc_reasons),
         "status": result.status,
         "category": category,
         "true_conditions": list(result.true_conditions),

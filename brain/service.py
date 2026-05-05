@@ -74,6 +74,15 @@ DEFINITION_RELATION_TYPES = {
 }
 PROVISIONAL_EVIDENCE_ROLE_TAGS = CONFIRMED_EVIDENCE_ROLE_TAGS | {"oxygenation"}
 
+# 根节点动作选择策略只服务 benchmark / ablation；
+# 默认仍走 MCTS，`greedy` 用于隔离 rollout 价值估计对真实下一问的影响。
+SUPPORTED_ROOT_ACTION_MODES = {"mcts", "greedy"}
+
+
+def _normalize_root_action_mode(value: object) -> str:
+    mode = str(value or "mcts").strip().lower()
+    return mode if mode in SUPPORTED_ROOT_ACTION_MODES else "mcts"
+
 
 @dataclass
 class BrainDependencies:
@@ -97,6 +106,7 @@ class BrainDependencies:
     llm_client: LlmClient | None = None
     repair_policy: "RepairPolicyConfig" = field(default_factory=lambda: RepairPolicyConfig())
     a3_routing_policy: "A3RoutingPolicyConfig" = field(default_factory=lambda: A3RoutingPolicyConfig())
+    search_policy: "SearchPolicyConfig" = field(default_factory=lambda: SearchPolicyConfig())
 
 
 @dataclass
@@ -121,6 +131,13 @@ class A3RoutingPolicyConfig:
     early_exam_context_turn_limit: int = 2
     early_exam_context_revealed_count_threshold: int = 2
     exam_context_rescue_high_cost_role_threshold: float = 0.45
+
+
+@dataclass
+class SearchPolicyConfig:
+    """控制根节点下一问的选择策略，便于切换 MCTS / Greedy 实验变体。"""
+
+    root_action_mode: str = "mcts"
 
 
 class ConsultationBrain:
@@ -2104,7 +2121,7 @@ class ConsultationBrain:
         # 但 search 还需要一个“下一问动作”。
         # 这里回到 root 层，从 root 的 child 里选出当前最值得真正发问的一条 action。
         # 同时排除已经问过的 target_node_id，避免重复追问同一节点。
-        selected_action = self.deps.mcts_engine.select_root_action(
+        selected_action = self._select_root_action_with_policy(
             tree,
             excluded_target_node_ids=state.asked_node_ids,
         )
@@ -2131,6 +2148,7 @@ class ConsultationBrain:
                 "rollout_branch_seed_counts": self._build_rollout_branch_seed_counts(trajectories),
                 "tree_node_count": len(tree.nodes),
                 "tree_refresh": dict(state.metadata.get("last_tree_refresh", {})),
+                "root_action_mode": _normalize_root_action_mode(self.deps.search_policy.root_action_mode),
             },
         )
 
@@ -2138,6 +2156,25 @@ class ConsultationBrain:
         # 后续 finalize()、前端 search_report、以及调试复盘都会读取这里。
         state.metadata["last_search_result"] = search_result
         return search_result
+
+    # 根据配置在 MCTS exploitation 与 Greedy prior 之间切换根动作选择策略。
+    def _select_root_action_with_policy(
+        self,
+        tree: SearchTree,
+        excluded_target_node_ids: Sequence[str] | None = None,
+    ) -> MctsAction | None:
+        root_action_mode = _normalize_root_action_mode(self.deps.search_policy.root_action_mode)
+
+        if root_action_mode == "greedy":
+            return self.deps.mcts_engine.select_root_action_greedy(
+                tree,
+                excluded_target_node_ids=excluded_target_node_ids,
+            )
+
+        return self.deps.mcts_engine.select_root_action(
+            tree,
+            excluded_target_node_ids=excluded_target_node_ids,
+        )
 
     # rollout 可能只产出 UNKNOWN/空答案组；此时用当前 A2 候选态补一组保守 answer score。
     def _needs_candidate_state_answer_fallback(self, scores: Sequence[FinalAnswerScore]) -> bool:
@@ -5165,6 +5202,7 @@ def build_default_brain(
 ) -> ConsultationBrain:
     config = _merge_brain_config(load_brain_config(), config_overrides)
     search_config = dict(config.get("search", {}))
+    search_policy_config = dict(config.get("search_policy", {}))
     kg_config = dict(config.get("kg", {}))
     path_eval_config = dict(config.get("path_evaluation", {}))
     llm_config = dict(config.get("llm", {}))
@@ -5333,6 +5371,11 @@ def build_default_brain(
             ),
             exam_context_rescue_high_cost_role_threshold=float(
                 a3_config.get("exam_context_rescue_high_cost_role_threshold", 0.45)
+            ),
+        ),
+        search_policy=SearchPolicyConfig(
+            root_action_mode=_normalize_root_action_mode(
+                search_policy_config.get("root_action_mode", "mcts")
             ),
         ),
     )

@@ -61,6 +61,11 @@
   - 它的职责是串联“系统提问 -> 病人作答 -> 状态更新 -> 下一问”的离线闭环。
   - 当前首轮输入不再直接依赖 `chief_complaint`，而是优先由 `patient_agent.open_case(case)` 基于骨架生成 opening text。
   - 已支持批量运行多个病例、输出回放结果，并在结果里记录实际首轮 opening text。
+  - 当前会在 turn 级额外落盘 asked/revealed 诊断字段，包括：
+    - `asked_action_group / asked_action_evidence_cost / asked_action_selected_source`
+    - `truth_hit`
+    - `revealed_slot_group / revealed_slot_name / revealed_slot_families`
+  - 当前单病例 `ReplayResult` 还会附带 `opening_revealed_slot_ids` 与 `analysis`，便于后处理时区分“opening 已覆盖多少”“后续又补出来多少”。
   - 当前耗时统计会先累计原始浮点耗时，再在落盘前统一 round，降低毫秒级病例里 `brain_turn_seconds_total` 被累计 round 放大的误导。
   - 若单病例在 `brain` 内部触发 `BrainDomainError` 或其他未预期运行时异常，当前都会把该病例记为 `status=failed`，同时把结构化 `error` 一并落盘，而不会伪装成正常完成。
 
@@ -68,6 +73,10 @@
   - 负责汇总自动对战结果。
   - 当前已支持统计平均轮次、完成率、假设命中率和红旗覆盖率等核心指标。
   - 当前会同时输出 `top1_final_answer_hit_count/rate` 和 `top3_hypothesis_hit_count/rate`：前者表示最终诊断答案严格命中，后者表示真实诊断进入最终候选前三。
+  - 当前还会在 `benchmark_summary.json` 中自动补充：
+    - `analysis_summary`
+    - `eligible_analysis_summary`
+  - 这些分析汇总会把问法分布、truth-hit、证据类型覆盖率、动作来源分布和 required family coverage gain 一起统计出来，便于判断低 `top1` 到底是“没问到”“问歪了”还是“问到了但排序没上来”。
 
 - [path_cache_builder.py](/Users/loki/Workspace/GraduationDesign/simulator/path_cache_builder.py)
   - 用于从大量回放结果中提取高价值路径，并生成在线问诊可直接检索的“离线最优路径缓存”。
@@ -91,6 +100,7 @@
 - `benchmark.py` 已区分“候选列表命中”和“最终答案命中”，会输出 `top1_final_answer_hit`、`top3_hypothesis_hit`、宽松/家族级 top 命中、accepted 准确率、wrong accepted 与 top 正确但被拒绝等指标
 - 当前图谱驱动病例 role-QC 正式输出已固定落盘到 `test_outputs/simulator_cases/graph_cases_20260502_role_qc/`；生成器会写入 `case_qc_score / case_qc_status / case_qc_reasons`，避免只按 family 数量判断病例质量
 - 当前新增 20 例 smoke 输入到 `test_outputs/simulator_cases/graph_cases_20260502_role_qc/smoke20/`；该批全部来自 `case_qc_status=eligible` 病例，类型分布为 `ordinary=9 / low_cost=1 / exam_driven=5 / competitive=5`
+- 当前新增 60 例 balanced smoke 输入到 `test_outputs/simulator_cases/graph_cases_20260502_role_qc/smoke60/`；该批按 `ordinary / low_cost / exam_driven / competitive` 四类病例各固定抽样 `15` 例，更适合做中等规模 smoke 回归
 - 当前已根据本机 Neo4j 导出症状证据族目录到 `test_outputs/evidence_family/disease_symptom_catalog_20260502/`，其中包含 disease-symptom 查看版 Markdown、症状节点分类 JSON 和每个疾病的 symptom-only 最低证据组建议
 - 当前已根据本机 Neo4j 导出全证据族目录到 `test_outputs/evidence_family/disease_evidence_catalog_20260502/`，其中包含 symptom / risk / detail / lab / imaging / pathogen 六类证据节点和每个疾病的 full-evidence 最低证据组建议
 - 当前已将 full-evidence 最低证据组和 evidence-role case QC 接入病例生成器，并重新生成病例集到 `test_outputs/simulator_cases/graph_cases_20260502_role_qc/`
@@ -125,8 +135,28 @@
   - 当前启动日志会直接写出 `llm_available=true/false`；若为 `false`，批量回放会在启动前直接失败，不再静默退回规则链路。
   - 当前会在每个病例完成后立即追加写入 `replay_results.jsonl`，并同步刷新 `benchmark_summary.json`、`non_completed_cases.json`、`status.json` 和 `run.log`。
   - 当前 `benchmark_summary.json` 会额外写入 `top1_final_answer_hit_count/rate` 与 `top3_hypothesis_hit_count/rate`，`non_completed_cases.json` 的病例记录也会带同名布尔字段，方便查看“没 completed 但 top1/top3 是否已经命中”。
+  - 当前 `benchmark_summary.json` 在全量病例完成后还会自动补充 cohort 指标：
+    - `analysis_summary`
+    - `eligible_summary`
+    - `eligible_analysis_summary`
+    - `case_qc_status_summaries`
+    - `benchmark_qc_status_summaries`
+    - `case_type_summaries`
+    - `metadata_field_coverage`
   - 当前 `non_completed_cases.json` 会只记录 `status != completed` 的异常诊断病例，并按 `failed::*`、`max_turn_reached::top_exact_correct_but_rejected`、`max_turn_reached::true_candidate_but_final_wrong`、`max_turn_reached::no_final_answer` 等类别分组，方便全量 benchmark 后优先复盘。
   - 当前 `replay_results.jsonl` / `status.json` / `benchmark_summary.json` / `non_completed_cases.json` / `run.log` 都已支持 `failed` 病例语义；失败病例会保留 `error.code / error.stage / error.prompt_name / error.message / error.attempts`。
+  - 当前 `replay_results.jsonl` 的每条病例结果也会补落：
+    - `case_type`
+    - `case_qc_status`
+    - `benchmark_qc_status`
+    - `case_qc_reasons`
+    - `opening_revealed_slot_ids`
+    - `analysis`
+  - 当前 `replay_results.jsonl` 的每轮 `turn` 还会补落：
+    - `asked_action_group / asked_action_question_type_hint / asked_action_evidence_cost`
+    - `asked_action_selected_source / asked_action_selected_source_priority_rank`
+    - `truth_hit`
+    - `revealed_slot_group / revealed_slot_name / revealed_slot_positive / revealed_slot_families`
   - 当前 batch runner 也补了一层单病例异常保护；即使某个 worker 内部抛出普通 Python 异常，也会尽量把该病例转成 `failed` 结果继续整批运行，而不是直接让整个 smoke 异常终止。
   - 当前对 `APIConnectionError / Connection error` 类单病例失败默认额外重试 1 次，可用 `--api-error-retries N` 调整；batch 外层会在整例重试前先做冷却退避，累计冷却时长会写入 `timing.batch_retry_cooldown_seconds_total`，失败病例 `error` 中也会带同名字段。
   - 当前默认支持断点续跑；如果输出目录里已有完成病例，会自动跳过这些病例，只继续未完成部分。若需要强制重跑，可使用 `--no-resume`。
@@ -163,6 +193,12 @@
   - 从完整图谱病例中抽取可回放 smoke 输入。
   - 默认只选择 `case_qc_status=eligible` 病例，优先按类型均衡；某一类型 eligible 数量不足时，用其他类型 eligible 病例补齐总数。
 
+- [build_smoke_case_subset.py](/Users/loki/Workspace/GraduationDesign/scripts/build_smoke_case_subset.py)
+  - 从完整图谱病例中按 `case_type` 做可复现均衡抽样。
+  - 当前可直接生成 `smoke60` 这类“四类病例各 15 例”的中等规模 smoke 子集，并输出：
+    - `cases.jsonl`
+    - `sample_summary.json`
+
 - [build_non_completed_smoke_set.py](/Users/loki/Workspace/GraduationDesign/scripts/build_non_completed_smoke_set.py)
   - 从全量 replay 的 `non_completed_cases.json` 中精确抽取未完成病例骨架，输出后续回归 smoke 用的 `cases.jsonl` / `cases.json` / `manifest.json` / `summary.md`。
   - 当前已将 `graph_cases_20260502_role_qc_full` 中 80 个未完成病例抽取到 `test_outputs/simulator_cases/graph_cases_20260502_role_qc/non_completed_smoke80/`，类别分布为 `no_final_answer=11 / top_exact_correct_but_rejected=25 / top_family_correct_but_rejected=3 / true_candidate_but_final_wrong=7 / true_candidate_missing=34`。
@@ -175,6 +211,7 @@
 更适合论文写作和方法复盘的详细说明见：
 
 - [virtual_patient_generation_scheme.md](/Users/loki/Workspace/GraduationDesign/docs/virtual_patient_generation_scheme.md)
+- [diagnosis_benchmark_experiment_design.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_benchmark_experiment_design.md)
 
 ## 后续重点建设方向
 

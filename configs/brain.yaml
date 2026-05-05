@@ -9,6 +9,10 @@ search:
   discount_factor: 1.0
   max_kg_triplets: 15
 
+search_policy:
+  # benchmark 默认仍走 MCTS；如需做 KG + Greedy 对照，可切到 greedy。
+  root_action_mode: mcts
+
 rollout_control:
   # 当前默认配置切到 batch2 + P4 + P5 + P7。
   # 也就是保留多分支 rollout / 防塌缩、动态权重、单答案封顶，

@@ -10,6 +10,332 @@
 - `phase2_execution_checklist.md` 更偏“路线设计与待办清单”
 - 本文更偏“已经发生过哪些阶段性变化、分别解决了什么问题”
 
+## 近期更新：2026-05-05 论文方法部分文稿修订（第 3 章 3.2 / 3.3 / 3.4）
+
+### 本次目标
+
+- 按论文写作口径收紧第 3 章方法部分表达，降低“工程说明”语气
+- 统一方法章节中的中英文术语，减少除专有名词外的中英文混杂
+- 补强多轮问诊主流程的形式化表达，并同步理顺相关图号
+
+### 本次改动
+
+- [面向 HIV_AIDS 场景的多轮问诊系统设计.docx](/Users/loki/Workspace/GraduationDesign/面向%20HIV_AIDS%20场景的多轮问诊系统设计.docx)
+  - 第 `3.2` 节：
+    - 强化“搜索专用知识图谱”围绕 `R1 / R2` 服务问诊搜索的任务导向表述
+    - 补写节点类型与关系类型的正文概括，降低对表格的单独依赖
+    - 将关系设计描述改写为中文学术表达，减少内部英文标签直接暴露
+    - 收紧“图谱入库与查询支持”段落，使其更突出对问诊方法的支撑作用
+  - 第 `3.3` 节：
+    - 将 `verify / repair`、`rollout`、`pending action` 等混杂术语改为中文表达
+    - 将决策输出从单一动作记号改写为“动作集合或诊断结果集合”的更严谨形式
+    - 补清接受条件的形式化约束，引入真实锚点、反证冲突与候选差值阈值
+    - 删除重复段落，并统一算法步骤中的中文术语
+  - 第 `3.4` 节：
+    - 将“图谱骨架 + 受约束病人代理”链路改写为更完整的论文方法表述
+    - 强化疾病级图谱审计、病例骨架生成、病人代理与自动回放之间的因果关系
+    - 将“可用大模型”相关描述改为“可选增强模块”口径，避免误解为强依赖
+  - 同步理顺图号引用：
+    - 搜索专用知识图谱构建流程改为 `图 3.2`
+    - 多轮问诊总体闭环改为 `图 3.3`
+    - 树搜索后的验证修复流程改为 `图 3.4`
+
+### 预期影响
+
+- 方法章节的任务边界、形式化表达和术语口径更接近毕业论文常见写法
+- 第 `3.2 / 3.3 / 3.4` 节之间的衔接更加一致，图号与方法链路更易对应
+- 后续答辩时，针对“为什么这样设计”“公式中的条件是什么意思”“为什么不用英文术语直写”等问题会更容易解释
+
+### 验证结果
+
+- 已完成：
+  - 重新提取并复查论文文档中第 `3.2 / 3.3 / 3.4` 节正文
+  - 检查方法部分是否仍残留 `verify / repair / rollout / benchmark / pending action` 等混杂术语
+- 结果：
+  - 相关段落已完成改写
+  - 方法部分目标术语已统一为中文口径
+
+## 近期更新：2026-05-05 replay 自动补全问法/真值命中分析字段，并新增 balanced `smoke60` 子集
+
+### 本次目标
+
+- 让 replay 结果不仅能看 `top1/top3`，还能进一步判断问题出在：
+  - 没问到关键证据
+  - 问法分布失衡
+  - 问了但没命中病例真值
+  - 已经问到真值但排序或 acceptance 仍没上来
+- 让 `benchmark_summary.json` 在整体汇总之外，再自动产出可直接做错误归因的分析指标
+- 新增一个四类病例均衡的中等规模 smoke 子集，便于后续做比 `smoke20` 更稳的回归测试
+
+### 本次改动
+
+- [simulator/replay_engine.py](/Users/loki/Workspace/GraduationDesign/simulator/replay_engine.py)
+  - 新增标准分析分组：
+    - `STANDARD_ANALYSIS_GROUPS`
+    - `STANDARD_QUESTION_GROUPS`
+    - `STANDARD_COST_BUCKETS`
+  - `ReplayTurn` 新增 turn 级诊断字段：
+    - `asked_action_*`
+    - `truth_hit`
+    - `revealed_slot_*`
+  - `ReplayResult` 新增：
+    - `opening_revealed_slot_ids`
+    - `analysis`
+  - `run_case()` 现在会在每轮回放后同步构建：
+    - 当前问法属于什么组
+    - 是否命中病例真值
+    - 实际揭示的槽位属于哪类证据
+  - 单病例 replay 结束后会自动产出 case-level `analysis`，用于后续 batch 汇总
+- [simulator/benchmark.py](/Users/loki/Workspace/GraduationDesign/simulator/benchmark.py)
+  - 新增 `build_replay_analysis_summary()`
+  - `build_benchmark_cohort_summary()` 现在会额外输出：
+    - `analysis_summary`
+    - `eligible_analysis_summary`
+  - 分析汇总当前会自动统计：
+    - `question_count_by_group`
+    - `question_count_by_cost`
+    - `question_truth_hit_by_group`
+    - `revealed_positive_coverage_by_group`
+    - `selected_action_source_count`
+    - `required_family_coverage`
+- [scripts/run_batch_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_batch_replay.py)
+  - `_payload_to_replay_result()` 已兼容恢复上述新字段，保证断点续跑和历史结果反序列化不丢字段
+- 新增 [scripts/build_smoke_case_subset.py](/Users/loki/Workspace/GraduationDesign/scripts/build_smoke_case_subset.py)
+  - 支持从全量病例中按 `case_type` 做可复现均衡抽样
+  - 当前已用于生成：
+    - [smoke60/cases.jsonl](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260502_role_qc/smoke60/cases.jsonl)
+    - [smoke60/sample_summary.json](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260502_role_qc/smoke60/sample_summary.json)
+  - 抽样口径为：
+    - `ordinary = 15`
+    - `low_cost = 15`
+    - `exam_driven = 15`
+    - `competitive = 15`
+- [tests/test_replay_engine.py](/Users/loki/Workspace/GraduationDesign/tests/test_replay_engine.py)
+- [tests/test_benchmark.py](/Users/loki/Workspace/GraduationDesign/tests/test_benchmark.py)
+- [tests/test_run_batch_replay.py](/Users/loki/Workspace/GraduationDesign/tests/test_run_batch_replay.py)
+- 新增 [tests/test_build_smoke_case_subset.py](/Users/loki/Workspace/GraduationDesign/tests/test_build_smoke_case_subset.py)
+  - 新增 replay 分析字段、benchmark 分析汇总和 balanced smoke 抽样回归测试
+- [docs/diagnosis_benchmark_experiment_design.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_benchmark_experiment_design.md)
+- [simulator/README.md](/Users/loki/Workspace/GraduationDesign/simulator/README.md)
+- [README.md](/Users/loki/Workspace/GraduationDesign/README.md)
+  - 同步补充新的 replay 分析字段、自动 cohort 分析汇总与 `smoke60` 用法说明
+
+### 预期影响
+
+- 后续不需要再只盯着 `top1_final_answer_hit` 这一层结果，可以直接判断：
+  - 某次算法改动有没有让系统多问到真实阳性
+  - 哪类证据明明病例里存在，却始终没有被揭示
+  - `low_cost` / `exam_driven` / `competitive` 是否出现了问法偏移
+- `smoke60` 可以作为 `smoke20` 和 `full227` 之间的中间层回归集：
+  - 比 `smoke20` 更均衡
+  - 比 `full227` 更便宜
+
+### 验证结果
+
+- 已执行：
+
+```bash
+conda run -n GraduationDesign python -m pytest tests/test_replay_engine.py tests/test_benchmark.py tests/test_run_batch_replay.py tests/test_build_smoke_case_subset.py -q
+```
+
+- 结果：
+  - `28 passed`
+
+## 近期更新：2026-05-05 支持 `KG + Greedy` 根动作选择开关，并同步 benchmark 文档口径
+
+### 本次目标
+
+- 把 `KG + Greedy` 从口头 benchmark 方案落成真正可切换的代码开关
+- 保持默认主链路仍为 MCTS，不影响当前 full-system 配置
+- 同步清理 benchmark 文档中已经完成的待办式描述
+
+### 本次改动
+
+- [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - 新增 `SearchPolicyConfig`
+  - `BrainDependencies` 新增 `search_policy`
+  - 默认构造现在会读取：
+    - `search_policy.root_action_mode`
+  - `run_reasoning_search()` 根动作选择改为经过策略分发：
+    - `mcts`：保持现有 `select_root_action()`
+    - `greedy`：切到贪心根动作选择
+  - `search_metadata` 新增：
+    - `root_action_mode`
+- [brain/mcts_engine.py](/Users/loki/Workspace/GraduationDesign/brain/mcts_engine.py)
+  - 抽出根节点可选 child 收集逻辑
+  - 新增 `select_root_action_greedy()`：
+    - 按 `prior_score`
+    - 再按 `visit_count`
+    - 再按 `node_id`
+    选择 root action
+- [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml)
+  - 新增：
+    - `search_policy.root_action_mode: mcts`
+- [tests/test_mcts_engine.py](/Users/loki/Workspace/GraduationDesign/tests/test_mcts_engine.py)
+- [tests/test_service_config.py](/Users/loki/Workspace/GraduationDesign/tests/test_service_config.py)
+  - 新增 greedy 根动作与配置映射回归测试
+- [docs/diagnosis_benchmark_experiment_design.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_benchmark_experiment_design.md)
+  - `KG + Greedy` 改为“当前直接可跑”
+  - 删除“还需补 `KG + Greedy` 开关”的待办式描述
+  - 同步更新 smoke / full benchmark 执行顺序
+- [README.md](/Users/loki/Workspace/GraduationDesign/README.md)
+- [brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
+  - 同步补充 `search_policy.root_action_mode` 入口说明
+
+### 预期影响
+
+- 当前 benchmark 已可以直接切换：
+  - `Full System`
+  - `KG + Greedy`
+- 后续如果要比较“树搜索是否必要”，不需要再手改 service 逻辑，只需切配置
+- replay 产物会直接带上 `search_metadata.root_action_mode`，便于离线确认本轮跑的是哪种策略
+
+### 验证结果
+
+- 已执行：
+
+```bash
+conda run -n GraduationDesign python -m pytest tests/test_mcts_engine.py tests/test_service_config.py -q
+```
+
+- 结果：
+  - `7 passed`
+
+## 近期更新：2026-05-05 落地诊断系统 benchmark 可执行实验设计文档
+
+### 本次目标
+
+- 把当前论文实验与内部消融的 benchmark 方案整理成一份可直接执行的设计文档
+- 明确哪些实验当前就能跑，哪些需要先补最小工程能力
+- 统一 benchmark 的病例集选择、指标口径、输出目录命名和执行顺序
+
+### 本次改动
+
+- 新增：
+  - [docs/diagnosis_benchmark_experiment_design.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_benchmark_experiment_design.md)
+    - 明确当前代码现实：
+      - 结构化 `stop rule` 已删除
+      - 当前 completed 由 verifier-only acceptance 控制
+      - `Opening-Only` 可直接通过 `--max-turns 0` 运行
+      - `KG + Greedy` 仍需补主链路开关
+      - `LLM + 文本 RAG` 不纳入本轮正式 benchmark
+    - 收敛出第一轮正式主表建议：
+      - `Full System`
+      - `Opening-Only`
+      - `KG + Greedy`
+      - `No-Repair`
+      - `No Scope-Aware Rerank`
+    - 补齐统一实验设置：
+      - `smoke20` 仅用于联调
+      - `eligible112` 用作正式主 benchmark 集
+      - `error_focus_smoke95` 只做错误回归验证
+    - 给出输出目录命名规范、命令模板和正式执行顺序
+    - 明确正式 benchmark 前建议补的最小工程能力：
+      - `run_batch_replay.py` 增加 variant / config override 能力
+      - `brain/service.py` 增加 `KG + Greedy` 根动作选择开关
+      - 新增矩阵驱动脚本统一调度多变体运行
+- 更新：
+  - [README.md](/Users/loki/Workspace/GraduationDesign/README.md)
+    - 新增 benchmark 实验设计文档入口
+  - [simulator/README.md](/Users/loki/Workspace/GraduationDesign/simulator/README.md)
+    - 在详细方案文档区新增 benchmark 设计入口
+  - [docs/diagnosis_system_todolist.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_system_todolist.md)
+    - 在 benchmark 体系待办段落补入新设计文档入口
+
+### 预期影响
+
+- 后续 benchmark 不再停留在口头方案，而是可以按统一矩阵直接执行
+- 论文实验章节可以更清楚地区分：
+  - 主表内部消融
+  - 小样本 focused ablation
+  - 错误集回归验证
+- 避免把当前仓库里尚不存在的 `LLM + 文本 RAG` 或 `No-Verifier` 实验提前写成正式必做项
+
+### 验证结果
+
+- 本次为文档与入口整理，不涉及代码逻辑改动
+- 未新增单元测试与 replay 运行
+
+## 近期更新：2026-05-05 batch replay 自动补全病例分层字段，并产出 overall / eligible / case-type cohort 指标
+
+### 本次目标
+
+- 让正式 benchmark 可以以 `full227` 作为主运行集，只跑一次 replay
+- 在回放结果中直接保留病例分层字段，避免后处理时再人工回连
+- 在 `benchmark_summary.json` 中自动输出 overall、`eligible` 与各病例类型的指标
+
+### 本次改动
+
+- [simulator/replay_engine.py](/Users/loki/Workspace/GraduationDesign/simulator/replay_engine.py)
+  - `ReplayResult` 新增字段：
+    - `case_type`
+    - `case_qc_status`
+    - `benchmark_qc_status`
+    - `case_qc_reasons`
+  - 新增 `extract_case_benchmark_fields()`，统一从病例元数据中提炼 replay 分层字段
+  - 正常单病例 replay 结果现在会直接带上这些 cohort 字段
+- [scripts/run_batch_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_batch_replay.py)
+  - `_build_unexpected_case_failure_result()` 也会写入病例分层字段，避免 failed 病例缺少 cohort 信息
+  - `_payload_to_replay_result()` / resume 逻辑已兼容新的 replay 字段
+  - 新增：
+    - `_enrich_replay_result_from_case()`
+    - `_enrich_replay_results_from_cases()`
+  - 历史输出目录断点续跑时，会根据当前 `cases.jsonl` 自动补齐旧结果里缺失的 cohort 字段
+  - `_build_summary_payload()` 现在会额外调用 cohort 汇总逻辑，把以下结构写入 `benchmark_summary.json`：
+    - `eligible_summary`
+    - `case_qc_status_summaries`
+    - `benchmark_qc_status_summaries`
+    - `case_type_summaries`
+    - `metadata_field_coverage`
+- [simulator/benchmark.py](/Users/loki/Workspace/GraduationDesign/simulator/benchmark.py)
+  - 新增：
+    - `benchmark_summary_to_payload()`
+    - `build_benchmark_cohort_summary()`
+  - 支持按：
+    - `case_qc_status`
+    - `benchmark_qc_status`
+    - `case_type`
+    自动分组生成 benchmark 指标
+  - `non_completed_cases.json` 的单病例记录也新增：
+    - `case_type`
+    - `case_qc_status`
+    - `benchmark_qc_status`
+    - `case_qc_reasons`
+- [docs/diagnosis_benchmark_experiment_design.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_benchmark_experiment_design.md)
+  - benchmark 口径改为：
+    - `full227` 为主运行集
+    - `eligible112` 为主分析子集
+  - 同步说明自动 cohort 汇总与 replay 补充字段
+  - 补充主表指标口径：
+    - `accepted_exact_accuracy` 不能单独解读
+    - 主表需要同时看 `completion_rate / accepted_final_answer_count / average_turns / red_flag_hit_rate`
+    - 读表时固定配对：
+      - `top1_final_answer_hit` vs `top3_hypothesis_hit`
+      - `accepted_exact_accuracy` vs `completion_rate / accepted_final_answer_count`
+- [README.md](/Users/loki/Workspace/GraduationDesign/README.md)
+- [simulator/README.md](/Users/loki/Workspace/GraduationDesign/simulator/README.md)
+  - 同步说明 replay 与 benchmark 汇总新增的 cohort 字段和自动子集指标
+- [tests/test_benchmark.py](/Users/loki/Workspace/GraduationDesign/tests/test_benchmark.py)
+- [tests/test_run_batch_replay.py](/Users/loki/Workspace/GraduationDesign/tests/test_run_batch_replay.py)
+  - 新增 cohort 汇总和 replay 字段保留回归测试
+
+### 预期影响
+
+- 后续 benchmark 可以直接跑全量，再从同一份输出里读取：
+  - overall
+  - `eligible`
+  - `ordinary / low_cost / exam_driven / competitive`
+  - `eligible / weak_anchor / not_benchmark_eligible`
+- 不再需要手工把 `replay_results.jsonl` 与原始病例文件 join 后才能算核心 cohort 指标
+
+### 验证结果
+
+- 计划执行：
+
+```bash
+conda run -n GraduationDesign python -m pytest tests/test_benchmark.py tests/test_run_batch_replay.py -q
+```
+
 ## 近期更新：2026-05-04 补第一批 replay 复盘，并落地第二批 P3 + P6（多候选反馈 + competition repair）
 
 ### 本次目标

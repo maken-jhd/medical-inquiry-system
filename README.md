@@ -15,7 +15,8 @@
 
 - 第一阶段：当前活跃版本已切换为服务候选诊断生成、关键证据检索与下一问构造的搜索专用图谱；旧版治疗、推荐、证据链图谱已移至 `knowledge_graph_bak/`
 - 第二阶段：已经进入“select -> expand -> simulate -> backpropagate 多次 rollout 可跑”的阶段，并已切换到 `LLM-first + 显式错误传播 + 集中 normalization` 的抽取 / 解释链路；当前 intake / pending action interpretation 统一使用 `mention_state + resolution` 语义，不再把自述症状表述成“医学 certainty”
-- 第二阶段：当前已完成前两批 `repair/exam rescue` 与 `multi-hypothesis feedback/competition repair`，第三批 `multi-branch rollout + final score rebalance + scope cluster rerank` 代码已落地，待 replay 验证；新的 replay 产物已可按 turn 落盘 `search_report / search_metadata`
+- 第二阶段：当前已完成前两批 `repair/exam rescue` 与 `multi-hypothesis feedback/competition repair`，第三批 `multi-branch rollout + final score rebalance + scope cluster rerank` 代码已落地，待 replay 验证；新的 replay 产物已可按 turn 落盘 `search_report / search_metadata`，并补充 asked/revealed 诊断字段与 case-level `analysis`
+- 第二阶段：当前 benchmark 已支持通过 `search_policy.root_action_mode = mcts | greedy` 切换 `Full System` 与 `KG + Greedy` 根动作选择策略，便于直接做树搜索消融
 - 前端演示：已支持中文 Streamlit 页面，可展示多轮问诊、A1/A2/A3、pending action 解释、候选诊断、下一问、搜索摘要与安全机制
 
 更详细的局部说明可分别查看：
@@ -25,6 +26,7 @@
 - 第二阶段问诊大脑：[brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
 - 第二阶段问诊大脑详细运行链路指南（当前按 `turn_interpreter -> A1 / A2 / A3 -> verifier-only acceptance -> repair` 口径说明，且已移除旧结构化 `stop rule`）：[brain_runtime_call_chain_guide.md](/Users/loki/Workspace/GraduationDesign/docs/brain_runtime_call_chain_guide.md)
 - Med-MCTS 论文实现与当前系统实现对照、启发参数来源与后续优化方向：[med_mcts_vs_current_system.md](/Users/loki/Workspace/GraduationDesign/docs/med_mcts_vs_current_system.md)
+- 诊断系统 benchmark 可执行实验设计：[diagnosis_benchmark_experiment_design.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_benchmark_experiment_design.md)
 - 虚拟病人与离线回放：[simulator/README.md](/Users/loki/Workspace/GraduationDesign/simulator/README.md)
 - 图谱驱动虚拟病人详细方案：[virtual_patient_generation_scheme.md](/Users/loki/Workspace/GraduationDesign/docs/virtual_patient_generation_scheme.md)
 - 前端演示界面：[frontend/README.md](/Users/loki/Workspace/GraduationDesign/frontend/README.md)
@@ -324,6 +326,7 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 - [scripts/export_disease_evidence_family_catalog.py](/Users/loki/Workspace/GraduationDesign/scripts/export_disease_evidence_family_catalog.py)：基于 Neo4j 导出全证据族 catalog 和疾病最低证据组
 - [scripts/generate_graph_virtual_patients.py](/Users/loki/Workspace/GraduationDesign/scripts/generate_graph_virtual_patients.py)：基于疾病审计结果生成图谱驱动病例骨架
 - [scripts/build_graph_case_smoke_set.py](/Users/loki/Workspace/GraduationDesign/scripts/build_graph_case_smoke_set.py)：从 role-QC eligible 病例中抽取 replay smoke 输入
+- [scripts/build_smoke_case_subset.py](/Users/loki/Workspace/GraduationDesign/scripts/build_smoke_case_subset.py)：从全量病例中按 `case_type` 做可复现均衡抽样，便于生成 `smoke60` 这类中等规模 smoke 集
 - [scripts/run_role_qc_smoke20_replay.sh](/Users/loki/Workspace/GraduationDesign/scripts/run_role_qc_smoke20_replay.sh)：运行最新 role-QC smoke20 replay 的一键脚本
 - [scripts/run_batch_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_batch_replay.py)：批量虚拟病人回放与评测入口
 
@@ -346,10 +349,11 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 - `run_batch_replay.py` 当前会像前端实时模式一样自动读取 `configs/frontend.yaml` 与 `configs/frontend.local.yaml`，把 Neo4j / LLM / brain 配置桥接到当前 CLI 进程环境
 - `run_batch_replay.py` 做模型对比时，如果命令行里显式设置了 `OPENAI_MODEL`，会优先使用该环境变量；这便于在不改动本地私密配置的前提下切换 `qwen3-max / qwen3.5-flash / qwen3.5-plus`
 - `run_batch_replay.py` 当前启动时会直接记录 `llm_available=true/false`；如果为 `false`，批量回放会尽早失败，不再退回旧规则链路
-- `run_batch_replay.py` 当前会在每个病例完成后立即追加写入 `replay_results.jsonl`、`run.log`，并刷新 `benchmark_summary.json` 与 `status.json`；评测摘要会同时给出 `top1_final_answer_hit` 口径和 `top3_hypothesis_hit` 口径，便于区分“最终答案已对”和“候选前三已召回”
+- `run_batch_replay.py` 当前会在每个病例完成后立即追加写入 `replay_results.jsonl`、`run.log`，并刷新 `benchmark_summary.json` 与 `status.json`；评测摘要会同时给出 `top1_final_answer_hit` 口径和 `top3_hypothesis_hit` 口径，便于区分“最终答案已对”和“候选前三已召回”，并在整批完成后自动补充 `eligible`、按 `case_qc_status`、按 `case_type` 的 cohort 指标
+- `run_batch_replay.py` 当前还会把 replay 诊断分析一起写进输出：`benchmark_summary.json` 会补 `analysis_summary / eligible_analysis_summary`，`replay_results.jsonl` 的每轮 turn 会补 `asked_action_group / asked_action_evidence_cost / asked_action_selected_source / truth_hit / revealed_slot_group` 等字段，便于判断问题到底出在“没问到”“问歪了”还是“问到了但排序没上来”
 - `run_batch_replay.py` 当前已支持单病例 `failed` 语义：若 `brain` 抛出 LLM 领域错误，该病例会带 `error.code / error.stage / error.message / error.attempts` 落盘，其他病例继续运行；遇到 `APIConnectionError / Connection error` 时，batch 外层会在整例重试前先做一次冷却退避，并把累计冷却时长写入 `timing.batch_retry_cooldown_seconds_total`
 - `run_batch_replay.py` 默认支持断点续跑：若输出目录里已经有 `replay_results.jsonl`，会自动跳过已完成病例；如需强制重跑，可加 `--no-resume`
-- `run_batch_replay.py` 当前会记录病例级耗时信息：每个病例的 opening、初始 brain、逐轮 patient/brain、finalize 和总耗时会写入 `replay_results.jsonl`，并在 `benchmark_summary.json` / `status.json` 中聚合 `timing_summary`；运行日志对亚秒级耗时会保留更高精度，避免全部显示成 `0.00`
+- `run_batch_replay.py` 当前会记录病例级耗时信息：每个病例的 opening、初始 brain、逐轮 patient/brain、finalize 和总耗时会写入 `replay_results.jsonl`，并在 `benchmark_summary.json` / `status.json` 中聚合 `timing_summary`；同一份 `replay_results.jsonl` 还会补落 `case_type / case_qc_status / benchmark_qc_status / case_qc_reasons`，便于全量跑完后直接切 `eligible` 和各病例类型子集；运行日志对亚秒级耗时会保留更高精度，避免全部显示成 `0.00`
 - `simulator/replay_engine.py` 当前会先累计原始浮点耗时，再在落盘前统一 round；这能减少毫秒级病例里 `brain_turn_seconds_total` 被逐轮 round 放大的误导
 - `run_batch_replay.py` 当前在 `Ctrl+C` / `SIGTERM` 中断时会先写入 `status.json` / `run.log`，再强制退出进程，避免 `ThreadPoolExecutor` 的并发 worker 持续占用大量内存
 - `run_batch_replay.py` 当前输出的 `final_report.metadata` 已做轻量化处理，不再携带原始 `search_tree` 和 `last_search_result` 运行态对象，以降低批量回放的内存占用
@@ -373,6 +377,8 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 - [summary.md](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260502_role_qc/summary.md)
 - [smoke20/cases.jsonl](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260502_role_qc/smoke20/cases.jsonl)
 - [smoke20/summary.md](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260502_role_qc/smoke20/summary.md)
+- [smoke60/cases.jsonl](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260502_role_qc/smoke60/cases.jsonl)
+- [smoke60/sample_summary.json](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260502_role_qc/smoke60/sample_summary.json)
 
 当前这轮共生成：
 
@@ -399,6 +405,13 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 - `low_cost = 1`
 - `exam_driven = 5`
 - `competitive = 5`
+
+当前 `smoke60` 则从 `full227` 中按四类病例固定随机种子均衡抽样，各 `15` 例，共 `60` 例：
+
+- `ordinary = 15`
+- `low_cost = 15`
+- `exam_driven = 15`
+- `competitive = 15`
 
 当前抽样检查仍可使用固定随机种子重新抽取四类病例，各 `5` 条，共 `20` 条，便于在规则修复后快速复核：
 
