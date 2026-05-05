@@ -153,6 +153,7 @@
   - 当前第三批改造已把 `scope cluster rerank` 前移到 A2 observed-anchor rerank：`exact_scope / family_scope / generic` 会通过 `scope_cluster_bonus` 更早影响候选顺位，不再主要依赖 acceptance guard 兜底。
   - 当前在证据揭示不足或 top 候选只靠背景支持时，会启用 low-cost explorer，从 top3 候选的 R2 中主动选择患者可直接回答、非背景且有区分度的问题。
   - 当前 `search_report` / `final_reasoning_report` 会额外输出 `search_metadata`，可直接复盘 `selected_action_source`、early exam rescue 与 repair-explorer 仲裁结果。
+  - 当前新增两层轻量防空转保护：同一句问法不会再连续两轮原样重复；高成本检查若刚收到“没做过/阴性”反馈，会对同一家族问法做短期冷却。
   - 当前第二批改造已把真实证据反馈、`exam_context` 反馈与 rollout 模拟反馈统一切到多 `hypothesis` fan-out 更新，并把 turn 级反馈摘要写入 `search_metadata.turn_evidence_feedback`。
   - 当前第三批改造已把 `rollout_trajectory_count / answer_group_count / single_answer_group / rollout_branch_seed_counts` 写入 `search_metadata`，便于离线观察是否仍存在单答案塌缩。
   - 当前 `missing_key_support` 在“当前答案零真实锚点 / 连续缺支持 / verifier 推荐高成本补缺但备选已有更强 observed anchor”时，会升级为 competition repair，而不是继续围绕当前错答案自修补。
@@ -161,6 +162,7 @@
   - 当前 verifier / repair 的主控制原因已收敛到 `missing_required_anchor / anchored_alternative_exists / hard_negative_key_evidence`；`strong_unresolved_alternative_candidates` 等细粒度原因继续保存在 metadata 中供复盘和消融使用。
   - 当前 verifier 上下文会携带累计真实会话证据 `observed_session_evidence`，避免把 rollout 模拟路径里的阳性检查当作患者已经确认的事实。
   - 当前会把检查、病原、影像、数值型 detail 的“没做过 / 没听说 / 没注意 / 不记得”统一后处理为 `unclear`；只有“阴性 / 未检出 / 未见异常 / 医生排除”等结果性否定才写成 `absent`。
+  - 当前若高成本检查连续两轮都只收到“没做过 / 没结果”类反馈，会优先退回低成本、定义性更强的证据问题，而不是继续围绕检查模板空转。
   - 当 rollout 没有形成具体最终答案、或只形成 `UNKNOWN` 答案组时，当前会从 A2 候选态生成保守 `FinalAnswerScore`，避免 top hypothesis 已存在但 `best_answer=None`。
   - 当 search/repair 仍没有下一问时，cold-start fallback 会先尝试扩展当前候选下仍可直接回答的低成本 R2 证据；只有没有低成本证据时，才退回全局冷启动问题，并降权 HIV/CD4/年龄等抽象背景探针。
 

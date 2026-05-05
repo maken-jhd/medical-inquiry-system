@@ -12,6 +12,65 @@
 
 ## 近期更新：2026-05-05 论文方法部分文稿修订（第 3 章 3.2 / 3.3 / 3.4）
 
+## 近期更新：2026-05-05 回退到 benchmark 基线，并补三项低风险防空转修复
+
+### 本次目标
+
+- 在不继续扩大算法改动面的前提下，回退到上一版 `smoke60` 基线
+- 只修 replay 中最确定、最浪费 turn 的三类问题：
+  - 连续两轮原样重复同一句问法
+  - 高成本检查收到“没做过 / 阴性”后仍追同一家族模板
+  - 连续检查落空后没有及时退回低成本定义性证据
+
+### 本次改动
+
+- [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - 新增问句指纹记录：
+    - 每轮真正发出去的问句会记录 `last_question_fingerprint`
+    - 若下一轮候选动作渲染出的问句与上一轮完全相同，则直接判为不可问
+  - 新增高成本检查负反馈冷却：
+    - 对 `collect_general_exam_context / collect_exam_context`
+    - 以及 `needs_lab_test / needs_imaging / needs_pathogen_test`
+    - 若患者回答为“没做过 / 不清楚 / 阴性”类反馈，会写入短期 family cooldown
+    - 冷却 key 会按 `target`、`exam_kind` 与 `HIV 相关检查 / 胸部 CT / 眼科检查 / GI 检查` 等模板族聚类
+  - 新增连续检查落空后的低成本定义性回退：
+    - 若高成本检查连续两轮都只得到 `no_result` 反馈
+    - 后续优先启用 low-cost explorer
+    - 且若存在定义性低成本证据，会优先回退到这类动作，而不是继续围绕检查模板打转
+  - `filtered_repeated_action_reason` 现在会显式区分：
+    - `same_question_as_previous_turn`
+    - `negative_feedback_cooldown`
+    - `target_already_asked`
+    - `exam_context_resolved`
+- [tests/test_service_low_cost_explorer_priority.py](/Users/loki/Workspace/GraduationDesign/tests/test_service_low_cost_explorer_priority.py)
+  - 新增 3 个回归测试：
+    - 连续相同问句拦截
+    - HIV 高成本检查负反馈冷却
+    - 连续检查落空后的低成本定义性回退
+- [brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
+  - 补充 service 层两条新约束：
+    - 同句连续拦截
+    - 高成本检查负反馈后的 family cooldown 与低成本定义性回退
+
+### 预期影响
+
+- `smoke60` 中连续重复问句、HIV 相关检查连问、胸部 CT 模板空转应减少
+- 8 轮预算会更少浪费在“患者已经明确说没做过/没结果”的检查链上
+- 这一轮更像“压 turn 浪费、保 baseline”，不是继续扩大全链路算法改造
+
+### 验证结果
+
+- 已完成定向测试：
+  - `conda run -n GraduationDesign python -m pytest tests/test_service_low_cost_explorer_priority.py -q`
+  - `conda run -n GraduationDesign python -m pytest tests/test_action_builder.py -q`
+  - `conda run -n GraduationDesign python -m pytest tests/test_exam_context_flow.py -q`
+  - `conda run -n GraduationDesign python -m pytest tests/test_replay_engine.py -q`
+- 结果：
+  - `7 passed`
+  - `13 passed`
+  - `7 passed`
+  - `5 passed`
+
 ### 本次目标
 
 - 按论文写作口径收紧第 3 章方法部分表达，降低“工程说明”语气
@@ -5053,3 +5112,131 @@ python -m py_compile brain/simulation_engine.py brain/trajectory_evaluator.py br
 - 后续查看运行链路时，不再把 `A4` 和旧 stop-rule 误认为仍在主流程内
 - 更容易对齐当前代码中的 `repair / early exam rescue / low-cost explorer / verifier-only acceptance`
 - 为答辩、论文描述和后续参数实验提供一致的流程叙述基线
+
+## 五十四、2026-05-05：统一绪论术语口径并补强研究现状过渡
+
+### 本次目标
+
+- 修正绪论中除 `MCTS` 外的中英文混杂术语
+- 收紧研究现状综述段落与本文工作的过渡关系
+- 将工程化表述改写为更适合论文正文的表达
+
+### 本次更新
+
+- 更新：
+  - [绪论.docx](/Users/loki/Workspace/GraduationDesign/绪论.docx)
+
+### 具体改动
+
+- 将 `LLMs` 改为“大语言模型”
+- 将 `1.2.4` 小节标题统一为“基于 MCTS 的测试时搜索医疗推理研究现状”
+- 将 `verify、repair` 改为“验证、修复”
+- 将 `medical-inquiry-system` 改写为“智能问诊原型系统”
+- 补强 `1.2.1` 与 `1.2.4` 小节结尾的综合评述，使研究空缺与本文切入点衔接更清晰
+
+### 结果影响
+
+- 绪论术语口径与正文方法章节更一致
+- 研究现状部分由“文献罗列”进一步收束为“问题归纳 + 本文切入”
+- `1.3` 中“本文主要工作”的学术表达更自然
+
+## 五十五、2026-05-05：清理论文正文重复段落并复查近邻重复
+
+### 本次目标
+
+- 删除第 `3.4.3` 节中残留的旧版病人代理定义段落
+- 复查主论文文档中是否还存在明显的近邻重复段落
+
+### 本次更新
+
+- 更新：
+  - [面向 HIV_AIDS 场景的多轮问诊系统设计.docx](/Users/loki/Workspace/GraduationDesign/面向%20HIV_AIDS%20场景的多轮问诊系统设计.docx)
+
+### 具体改动
+
+- 删除 `3.4.3 病人代理构建` 开头旧版定义段落，保留“大语言模型驱动的受约束病人代理”版本
+- 对主论文文档执行近邻高相似度段落扫描，重点检查相邻 8 段内的重复定义与重复说明
+
+### 结果影响
+
+- `3.4.3` 小节开头不再重复定义同一概念
+- 当前主论文文档未再发现同级别的明显近邻重复段落
+
+## 五十六、2026-05-05：整理第 3.2 节关系类型表格样式
+
+### 本次目标
+
+- 清理第 `3.2` 节关系类型表格中重复列带来的视觉冗余
+- 将关系名改为“中文主名 + 英文原名小写”的论文展示形式
+
+### 本次更新
+
+- 更新：
+  - [面向 HIV_AIDS 场景的多轮问诊系统设计.docx](/Users/loki/Workspace/GraduationDesign/面向%20HIV_AIDS%20场景的多轮问诊系统设计.docx)
+
+### 具体改动
+
+- 删除关系类型表格中与首列重复的第 `5` 列
+- 将首列关系名统一改写为：
+  - `诊断依据（diagnosed_by）`
+  - `实验室发现（has_lab_finding）`
+  - `影像学发现（has_imaging_finding）`
+  - `病原体证据（has_pathogen）`
+  - `症状表现（manifests_as）`
+  - `细节追问（requires_detail）`
+  - `风险因素（risk_factor_for）`
+  - `适用人群（applies_to）`
+  - `并发关系（complicated_by）`
+
+### 结果影响
+
+- 表格由 `5` 列精简为 `4` 列
+- 关系类型展示更符合论文正文阅读习惯，也避免了中英文列重复造成的冗余
+
+## 五十七、2026-05-05：调整“相关技术与理论基础”文稿口径与衔接
+
+### 本次目标
+
+- 收紧第 2 章理论基础文稿中的中英文术语使用
+- 加强 MCTS 基础原理与后续问诊系统设计之间的过渡
+- 降低第 2 章与第 3 章方法设计之间的内容重叠
+
+### 本次更新
+
+- 更新：
+  - [相关技术与理论基础.docx](/Users/loki/Workspace/GraduationDesign/相关技术与理论基础.docx)
+
+### 具体改动
+
+- 将 `Selection / Expansion / Simulation / Backpropagation` 统一改为“选择 / 扩展 / 模拟 / 回传”
+- 将 `benchmark / CoT / RAG` 调整为“中文 + 括号英文”的写法
+- 收紧 `2.1.3` 中关于测试时推理的表述，避免与 `2.4` 的 MCTS 展开重复
+- 调整 `2.2.2`，保留实体、关系、属性的基本概念说明，并将具体本体设计留到第 `3` 章展开
+- 在 `2.4.1` 结尾补入“树节点对应局部问诊状态、边对应候选问诊动作”的过渡句
+- 将 `2.4.2` 中关于相关方法优势的表述改为更稳妥的学术口吻
+
+### 结果影响
+
+- 第 2 章术语口径与正文方法章节更一致
+- 理论基础与方法设计之间的边界更清晰
+- MCTS 理论部分与后文问诊系统建模的衔接更自然
+
+### 补充修订：2026-05-05 清理“相关技术与理论基础”重复段并恢复小节标题
+
+### 本次更新
+
+- 更新：
+  - [相关技术与理论基础.docx](/Users/loki/Workspace/GraduationDesign/相关技术与理论基础.docx)
+
+### 具体改动
+
+- 删除 `2.1.3` 中“除提示工程和结构化抽取外……”的突兀过渡段，避免与后文测试时推理展开重复
+- 删除 `2.2.2` 中重复出现的“知识图谱的核心组成包括实体、关系和属性”段落
+- 删除 `2.4.1` 中保留英文步骤名的旧版本段落，仅保留“选择 / 扩展 / 模拟 / 回传”的中文版本
+- 删除 `2.4.2` 中旧的较强结论表述，仅保留“相关医学基准测试（benchmark）”“思维链（CoT）”“检索增强生成（RAG）”版本
+- 恢复 `2.2.3 图数据库 Neo4j 与图检索方法`、`2.4.2 Med-MCTS 及相关方法在医疗推理中的应用`、`2.5 本章小结` 三个小节标题
+
+### 验证结果
+
+- 逐段复查后，未再发现相邻重复段落
+- 第 `2` 章的小节结构已经恢复完整，章节衔接正常

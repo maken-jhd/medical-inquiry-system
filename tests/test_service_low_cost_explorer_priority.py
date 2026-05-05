@@ -160,6 +160,74 @@ def _exam_driven_rows() -> list[dict]:
     ]
 
 
+def _metabolic_low_cost_rows() -> list[dict]:
+    return [
+        {
+            "node_id": "bmi_range",
+            "label": "RiskFactor",
+            "name": "28.0<=BMI<32.5kg/m²",
+            "relation_type": "RISK_FACTOR_FOR",
+            "question_type_hint": "risk",
+            "acquisition_mode": "direct_ask",
+            "evidence_cost": "low",
+            "priority": 2.4,
+            "contradiction_priority": 0.4,
+            "node_weight": 1.0,
+            "similarity_confidence": 1.0,
+        },
+        {
+            "node_id": "ldl_high",
+            "label": "ClinicalAttribute",
+            "name": "低密度脂蛋白胆固醇升高",
+            "relation_type": "REQUIRES_DETAIL",
+            "question_type_hint": "detail",
+            "acquisition_mode": "history_known",
+            "evidence_cost": "low",
+            "priority": 2.1,
+            "contradiction_priority": 0.8,
+            "node_weight": 1.0,
+            "similarity_confidence": 1.0,
+        },
+    ]
+
+
+def _high_cost_hiv_lab_action(node_id: str = "lab_hiv_ab") -> MctsAction:
+    return MctsAction(
+        action_id=f"verify::hiv::{node_id}",
+        action_type="verify_evidence",
+        target_node_id=node_id,
+        target_node_label="LabFinding",
+        target_node_name="HIV抗体阳性",
+        hypothesis_id="hiv",
+        prior_score=2.6,
+        metadata={
+            "question_text": "如果做过 HIV 相关抽血检查，比如 HIV 抗体、抗原、核酸或病毒载量，结果有没有提示阳性、检出，或者医生有没有明确提到 HIV？",
+            "question_type_hint": "lab",
+            "acquisition_mode": "needs_lab_test",
+            "evidence_cost": "high",
+            "relation_type": "DIAGNOSED_BY",
+        },
+    )
+
+
+def _high_cost_imaging_action() -> MctsAction:
+    return MctsAction(
+        action_id="verify::pcp::ct",
+        action_type="verify_evidence",
+        target_node_id="ct_ground_glass",
+        target_node_label="ImagingFinding",
+        target_node_name="胸部CT磨玻璃影",
+        hypothesis_id="pcp",
+        prior_score=2.8,
+        metadata={
+            "question_type_hint": "imaging",
+            "acquisition_mode": "needs_imaging",
+            "evidence_cost": "high",
+            "relation_type": "HAS_IMAGING_FINDING",
+        },
+    )
+
+
 # repair 动作仍可问时，不允许 low-cost explorer 抢走这一轮。
 def test_service_protects_askable_repair_action_from_low_cost_explorer() -> None:
     tracker = StateTracker()
@@ -296,3 +364,68 @@ def test_service_early_exam_context_rescue_prefers_specific_exam_after_general_w
     assert action.action_type == "collect_exam_context"
     assert action.target_node_id == "__exam_context__::lab"
     assert action.metadata["selected_by_early_exam_context_rescue"] is True
+
+
+# 即使 target_node_id 不同，只要连续两轮会问出完全相同的句子，也应被拦住。
+def test_service_blocks_same_question_text_even_when_target_differs() -> None:
+    tracker = StateTracker()
+    state = tracker.create_session("s_repeat_guard")
+    brain = _build_brain(tracker, {})
+
+    previous_action = _high_cost_hiv_lab_action("lab_hiv_prev")
+    state.metadata["last_question_fingerprint"] = brain._action_question_fingerprint(previous_action)
+
+    assert brain._selected_action_is_askable("s_repeat_guard", _high_cost_hiv_lab_action("lab_hiv_next")) is False
+    assert (
+        brain._selected_action_block_reason("s_repeat_guard", _high_cost_hiv_lab_action("lab_hiv_next"))
+        == "same_question_as_previous_turn"
+    )
+
+
+# 高成本 HIV 检查如果刚收到“没做过”反馈，应短期冷却同一家族问法，避免连续追问。
+def test_service_negative_feedback_cooldown_blocks_same_hiv_test_family() -> None:
+    tracker = StateTracker()
+    state = tracker.create_session("s_hiv_cooldown")
+    state.turn_index = 2
+    brain = _build_brain(tracker, {})
+
+    brain._record_negative_feedback_cooldown(
+        "s_hiv_cooldown",
+        _high_cost_hiv_lab_action("lab_hiv_prev"),
+        turn_index=2,
+        patient_text="没做过这项检查。",
+    )
+
+    assert brain._selected_action_is_askable("s_hiv_cooldown", _high_cost_hiv_lab_action("lab_hiv_next")) is False
+    assert (
+        brain._selected_action_block_reason("s_hiv_cooldown", _high_cost_hiv_lab_action("lab_hiv_next"))
+        == "negative_feedback_cooldown"
+    )
+
+
+# 连续高成本检查落空后，应强制退回低成本定义性证据，而不是继续问 BMI 这类背景项。
+def test_service_forces_low_cost_definition_fallback_after_repeated_exam_no_result() -> None:
+    tracker = StateTracker()
+    state = tracker.create_session("s_low_cost_definition_fallback")
+    state.candidate_hypotheses = [
+        HypothesisScore(
+            node_id="dyslipidemia",
+            label="Disease",
+            name="血脂异常",
+            score=1.0,
+        )
+    ]
+    state.metadata["recent_high_cost_no_result_streak"] = 2
+    brain = _build_brain(tracker, {"dyslipidemia": _metabolic_low_cost_rows()})
+    search_result = SearchResult()
+
+    action = brain._choose_low_cost_explorer_action(
+        "s_low_cost_definition_fallback",
+        search_result,
+        _high_cost_imaging_action(),
+    )
+
+    assert action is not None
+    assert action.target_node_id == "ldl_high"
+    assert action.metadata["selected_by_low_cost_explorer"] is True
+    assert search_result.metadata["selected_action_source_reason"] == "recent_exam_no_result_streak"

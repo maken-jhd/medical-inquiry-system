@@ -74,6 +74,14 @@ DEFINITION_RELATION_TYPES = {
 }
 PROVISIONAL_EVIDENCE_ROLE_TAGS = CONFIRMED_EVIDENCE_ROLE_TAGS | {"oxygenation"}
 
+# 这组小阈值只服务最后一轮 smoke60 的“防空转”修复：
+# - no_result 回答先冷却 2 轮，避免连续追同一家族检查
+# - 显式阴性结果只冷却 1 轮，保留后续继续分支收束的空间
+# - 连续 2 次高成本检查落空后，优先退回低成本定义性证据
+NO_RESULT_FEEDBACK_COOLDOWN_TURNS = 2
+EXPLICIT_NEGATIVE_FEEDBACK_COOLDOWN_TURNS = 1
+HIGH_COST_NO_RESULT_FALLBACK_STREAK = 2
+
 # 根节点动作选择策略只服务 benchmark / ablation；
 # 默认仍走 MCTS，`greedy` 用于隔离 rollout 价值估计对真实下一问的影响。
 SUPPORTED_ROOT_ACTION_MODES = {"mcts", "greedy"}
@@ -655,6 +663,17 @@ class ConsultationBrain:
         self._apply_hypothesis_feedback(session_id, pending_action, evidence_state)
         self._mark_a2_refresh_if_strong_evidence_state(session_id, evidence_state, pending_action)
         self._record_action_reward(session_id, pending_action, pending_action_result)
+        self._record_negative_feedback_cooldown(
+            session_id,
+            pending_action,
+            turn_index=turn_index,
+            patient_text=patient_text,
+        )
+        self._reset_high_cost_no_result_streak_if_needed(
+            session_id,
+            pending_action,
+            patient_text=patient_text,
+        )
         tracker.get_session(session_id).metadata["last_answered_action"] = pending_action
         tracker.clear_pending_action(session_id)
         updated_state = tracker.get_session(session_id)
@@ -753,6 +772,17 @@ class ConsultationBrain:
         # exam_context 也会构造一个轻量 pending_action_result，便于统一复盘“这一轮发生了什么”。
         pending_action_result = self._build_pending_action_result_from_exam_context(pending_action, exam_result)
         tracker.get_session(session_id).metadata["last_exam_context_result"] = asdict(exam_result)
+        self._record_negative_feedback_cooldown(
+            session_id,
+            pending_action,
+            turn_index=turn_index,
+            patient_text=patient_text,
+        )
+        self._reset_high_cost_no_result_streak_if_needed(
+            session_id,
+            pending_action,
+            patient_text=patient_text,
+        )
         tracker.get_session(session_id).metadata["last_answered_action"] = pending_action
         tracker.clear_pending_action(session_id)
         route_after_pending_action = RouteDecision(
@@ -1564,33 +1594,47 @@ class ConsultationBrain:
             return selected_action
 
         search_result.metadata["filtered_repeated_action"] = asdict(selected_action)
-        search_result.metadata["filtered_repeated_action_reason"] = "target_already_asked_or_exam_context_resolved"
+        search_result.metadata["filtered_repeated_action_reason"] = self._selected_action_block_reason(
+            session_id,
+            selected_action,
+        )
         return None
 
     # 统一判断一个动作当前是否还能问：general exam context 不允许重复，普通节点也不重复问。
     def _selected_action_is_askable(self, session_id: str, action: MctsAction | None) -> bool:
+        return len(self._selected_action_block_reason(session_id, action)) == 0
+
+    # 把“为什么当前动作不能再问”统一成可观测原因，便于做冷却与重复问句防护。
+    def _selected_action_block_reason(self, session_id: str, action: MctsAction | None) -> str:
         if action is None:
-            return True
+            return ""
 
         state = self.deps.state_tracker.get_session(session_id)
         target_node_id = str(action.target_node_id or "")
         followup_mode = str(action.metadata.get("exam_followup_mode") or "")
 
         if target_node_id == "__exam_context__::general" and target_node_id in state.asked_node_ids:
-            return False
+            return "general_exam_context_already_asked"
 
         if target_node_id in state.asked_node_ids:
-            return False
+            return "target_already_asked"
+
+        question_fingerprint = self._action_question_fingerprint(action)
+        if len(question_fingerprint) > 0 and question_fingerprint == str(state.metadata.get("last_question_fingerprint") or ""):
+            return "same_question_as_previous_turn"
+
+        if self._action_hits_feedback_cooldown(state, action):
+            return "negative_feedback_cooldown"
 
         if action.action_type == "collect_general_exam_context":
-            return self._exam_context_availability_for_action(state, "general") == "unknown"
+            return "" if self._exam_context_availability_for_action(state, "general") == "unknown" else "general_exam_context_resolved"
 
         if action.action_type == "collect_exam_context" and followup_mode != "specific_result":
             exam_kind = str(action.metadata.get("exam_kind") or "").strip()
             if exam_kind in {"general", "lab", "imaging", "pathogen"}:
-                return self._exam_context_availability_for_action(state, exam_kind) == "unknown"
+                return "" if self._exam_context_availability_for_action(state, exam_kind) == "unknown" else "exam_context_resolved"
 
-        return True
+        return ""
 
     def _exam_context_availability_for_action(self, state: SessionState, exam_kind: str) -> str:
         context = state.exam_context.get(exam_kind)
@@ -1599,6 +1643,161 @@ class ConsultationBrain:
             return "unknown"
 
         return context.availability
+
+    # 将动作最终渲染成稳定问句文本，用于重复问句拦截与 family cooldown 聚类。
+    def _action_question_text(self, action: MctsAction | None) -> str:
+        if action is None:
+            return ""
+
+        question_text = str(action.metadata.get("question_text") or "").strip()
+        if len(question_text) > 0:
+            return question_text
+
+        return str(self.deps.action_builder.render_question_text(action) or "").strip()
+
+    # 用轻量归一化后的问句指纹识别“同一句又问了一遍”的情况。
+    def _action_question_fingerprint(self, action: MctsAction | None) -> str:
+        return self._normalize_match_text(self._action_question_text(action))
+
+    # 记录本轮真正发出去的问句，下一轮可据此阻止完全相同的模板继续空转。
+    def _record_asked_question(self, session_id: str, action: MctsAction | None, turn_index: int) -> None:
+        if action is None:
+            return
+
+        question_text = self._action_question_text(action)
+        fingerprint = self._normalize_match_text(question_text)
+        if len(fingerprint) == 0:
+            return
+
+        state = self.deps.state_tracker.get_session(session_id)
+        history = state.metadata.get("asked_question_history", [])
+        if not isinstance(history, list):
+            history = []
+        history.append(
+            {
+                "turn_index": turn_index,
+                "action_id": action.action_id,
+                "target_node_id": action.target_node_id,
+                "question_text": question_text,
+                "question_fingerprint": fingerprint,
+            }
+        )
+        state.metadata["asked_question_history"] = history[-12:]
+        state.metadata["last_question_text"] = question_text
+        state.metadata["last_question_fingerprint"] = fingerprint
+
+    # 判断当前动作是否属于“检查没做/结果未给出后不该立即重问”的高成本链路。
+    def _is_high_cost_or_exam_action(self, action: MctsAction | None) -> bool:
+        if action is None:
+            return False
+
+        if action.action_type in {"collect_general_exam_context", "collect_exam_context"}:
+            return True
+
+        acquisition_mode = str(action.metadata.get("acquisition_mode") or "").strip()
+        evidence_cost = str(action.metadata.get("evidence_cost") or "").strip()
+        return acquisition_mode in {"needs_lab_test", "needs_imaging", "needs_pathogen_test"} or evidence_cost == "high"
+
+    # 将动作映射到几个稳定的冷却 key，避免 HIV / 胸部 CT 这类模板在不同节点之间来回重复。
+    def _action_feedback_cooldown_keys(self, action: MctsAction | None) -> list[str]:
+        if action is None:
+            return []
+
+        keys = [f"target::{str(action.target_node_id or '').strip()}"]
+        exam_kind = str(action.metadata.get("exam_kind") or "").strip()
+        if len(exam_kind) > 0:
+            keys.append(f"exam_kind::{exam_kind}")
+
+        combined_text = self._normalize_match_text(
+            " ".join(
+                [
+                    self._action_question_text(action),
+                    str(action.target_node_name or ""),
+                    str(action.target_node_label or ""),
+                    str(action.metadata.get("question_type_hint") or ""),
+                ]
+            )
+        )
+        cluster_rules = {
+            "cluster::hiv_related_test": ("hiv", "艾滋", "cd4", "病毒载量", "抗原", "抗体"),
+            "cluster::chest_imaging": ("胸部ct", "胸片", "磨玻璃", "双肺", "支气管", "痰液", "balf"),
+            "cluster::ophthalmic_exam": ("眼底", "眼科", "视网膜", "玻璃体", "房水"),
+            "cluster::gi_exam": ("胃镜", "肠镜", "食管", "腹部", "消化道", "吞咽"),
+        }
+        for key, markers in cluster_rules.items():
+            if any(marker in combined_text for marker in markers):
+                keys.append(key)
+
+        return [item for item in keys if len(item) > 0]
+
+    # 把“没做过/阴性”这类反馈转成短期冷却，避免 search/repair 继续围着同一家族检查打转。
+    def _record_negative_feedback_cooldown(
+        self,
+        session_id: str,
+        action: MctsAction | None,
+        *,
+        turn_index: int,
+        patient_text: str,
+    ) -> None:
+        if not self._is_high_cost_or_exam_action(action):
+            return
+
+        no_result_feedback = self._patient_text_expresses_no_result(patient_text)
+        explicit_negative_feedback = self._patient_text_expresses_explicit_negative_result(patient_text)
+        if not no_result_feedback and not explicit_negative_feedback:
+            return
+
+        state = self.deps.state_tracker.get_session(session_id)
+        cooldown_turns = (
+            NO_RESULT_FEEDBACK_COOLDOWN_TURNS
+            if no_result_feedback
+            else EXPLICIT_NEGATIVE_FEEDBACK_COOLDOWN_TURNS
+        )
+        next_available_turn = turn_index + cooldown_turns
+        cooldowns = state.metadata.get("action_feedback_cooldowns", {})
+        if not isinstance(cooldowns, dict):
+            cooldowns = {}
+
+        for key in self._action_feedback_cooldown_keys(action):
+            cooldowns[key] = max(int(cooldowns.get(key, 0) or 0), next_available_turn)
+
+        state.metadata["action_feedback_cooldowns"] = cooldowns
+
+        if no_result_feedback:
+            streak = int(state.metadata.get("recent_high_cost_no_result_streak", 0) or 0) + 1
+            state.metadata["recent_high_cost_no_result_streak"] = streak
+        else:
+            state.metadata["recent_high_cost_no_result_streak"] = 0
+
+    # 只要本轮高成本检查给出了实际结果，就清空“连续检查落空”计数，避免 explorer 长时间被强制接管。
+    def _reset_high_cost_no_result_streak_if_needed(
+        self,
+        session_id: str,
+        action: MctsAction | None,
+        *,
+        patient_text: str,
+    ) -> None:
+        if not self._is_high_cost_or_exam_action(action):
+            return
+
+        if self._patient_text_expresses_no_result(patient_text):
+            return
+
+        self.deps.state_tracker.get_session(session_id).metadata["recent_high_cost_no_result_streak"] = 0
+
+    # 若动作命中了仍在冷却窗口内的 family key，则当前轮不再允许继续追这条检查链。
+    def _action_hits_feedback_cooldown(self, state: SessionState, action: MctsAction | None) -> bool:
+        cooldowns = state.metadata.get("action_feedback_cooldowns", {})
+        if not isinstance(cooldowns, dict):
+            return False
+
+        current_turn = int(state.turn_index)
+        for key in self._action_feedback_cooldown_keys(action):
+            next_available_turn = int(cooldowns.get(key, 0) or 0)
+            if current_turn < next_available_turn:
+                return True
+
+        return False
 
     # 统一记录当前最终动作来自哪条分流链路，便于 replay 统计 repair / rescue / explorer 的覆盖关系。
     def _record_selected_action_source(
@@ -2599,6 +2798,10 @@ class ConsultationBrain:
 
         selected_action = self._filter_selected_action_for_repeat(session_id, selected_action, search_result)
         if selected_action is None and not accept_decision.should_stop and not stop_decision.should_stop:
+            # 若原动作因为重复模板或负反馈冷却被拦截，优先尝试退回低成本定义性证据，而不是直接冷启动。
+            selected_action = self._choose_low_cost_explorer_action(session_id, search_result, None)
+
+        if selected_action is None and not accept_decision.should_stop and not stop_decision.should_stop:
             selected_action = self._choose_cold_start_probe_action(session_id)
             if selected_action is not None and self._selected_action_is_askable(session_id, selected_action):
                 search_result.selected_action = selected_action
@@ -2691,6 +2894,7 @@ class ConsultationBrain:
                     **dict(selected_action.metadata),
                     "question_text": str(selected_action.metadata.get("question_text") or a3_result.question_text),
                 }
+            self._record_asked_question(session_id, selected_action, turn_index)
             # pending_action 是多轮闭环的关键：下一轮系统要靠它判断患者这句话在回答什么。
             # 同时还要记录“已经问过这个节点”，避免后续 R2/search 再次把同一问题当作高优先级动作选出来。
             tracker.mark_question_asked(session_id, selected_action.target_node_id)
@@ -4839,8 +5043,13 @@ class ConsultationBrain:
         selected_action: MctsAction | None,
     ) -> MctsAction | None:
         state = self.deps.state_tracker.get_session(session_id)
+        force_definition_fallback = self._should_force_low_cost_definition_fallback(
+            state,
+            search_result,
+            selected_action,
+        )
 
-        if not self._should_use_low_cost_explorer(state, selected_action):
+        if not force_definition_fallback and not self._should_use_low_cost_explorer(state, selected_action):
             return selected_action
 
         candidates: list[MctsAction] = []
@@ -4861,6 +5070,11 @@ class ConsultationBrain:
         if len(candidates) == 0:
             return selected_action
 
+        if force_definition_fallback:
+            definition_candidates = [item for item in candidates if self._is_definition_like_low_cost_action(item)]
+            if len(definition_candidates) > 0:
+                candidates = definition_candidates
+
         recent_evidence_tags = self._get_recent_evidence_tags(state)
         ranked_actions = sorted(
             candidates,
@@ -4875,6 +5089,7 @@ class ConsultationBrain:
         current_score = (
             self._score_low_cost_explorer_action(selected_action, recent_evidence_tags=recent_evidence_tags)
             if self._is_low_cost_observable_action(selected_action)
+            and self._selected_action_is_askable(session_id, selected_action)
             else -1.0
         )
 
@@ -4891,9 +5106,53 @@ class ConsultationBrain:
             search_result,
             "low_cost_explorer_action",
             priority_rank=5,
-            reason="insufficient_revealed_observable_evidence",
+            reason=(
+                "recent_exam_no_result_streak"
+                if force_definition_fallback
+                else "insufficient_revealed_observable_evidence"
+            ),
         )
         return best_action
+
+    # 连续两轮高成本检查“没做/没结果”后，主动强制退回低成本定义性证据，避免继续耗在检查模板上。
+    def _should_force_low_cost_definition_fallback(
+        self,
+        state: SessionState,
+        search_result: SearchResult,
+        selected_action: MctsAction | None,
+    ) -> bool:
+        streak = int(state.metadata.get("recent_high_cost_no_result_streak", 0) or 0)
+        if streak < HIGH_COST_NO_RESULT_FALLBACK_STREAK:
+            return False
+
+        candidate = selected_action
+        if candidate is None:
+            filtered_action = search_result.metadata.get("filtered_repeated_action")
+            if isinstance(filtered_action, dict):
+                candidate = MctsAction(**filtered_action)
+
+        return self._is_high_cost_or_exam_action(candidate)
+
+    # 定义性低成本证据优先服务“检查链路连续落空后的回退”。
+    def _is_definition_like_low_cost_action(self, action: MctsAction | None) -> bool:
+        if not self._is_low_cost_observable_action(action):
+            return False
+
+        if action is None:
+            return False
+
+        relation_type = str(action.metadata.get("relation_type") or "").strip()
+        question_type_hint = str(action.metadata.get("question_type_hint") or "").strip()
+        if relation_type in DEFINITION_RELATION_TYPES:
+            return True
+
+        if question_type_hint == "detail" and action.target_node_label in {"ClinicalAttribute", "LabFinding"}:
+            return True
+
+        return (
+            float(action.metadata.get("low_cost_discriminative_bonus", 0.0) or 0.0) > 0.0
+            and action.target_node_label == "ClinicalAttribute"
+        )
 
     def _should_use_low_cost_explorer(self, state: SessionState, selected_action: MctsAction | None) -> bool:
         if len(state.candidate_hypotheses) == 0:
