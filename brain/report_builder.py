@@ -79,6 +79,7 @@ class ReportBuilder:
             "best_answer_name": search_result.best_answer_name,
             "trajectory_count": len(search_result.trajectories),
             "final_answer_scores": [asdict(item) for item in search_result.final_answer_scores],
+            "search_metadata": dict(search_result.metadata),
         }
 
     # 构造最终诊断推理报告，包含最佳轨迹和备选答案评分。
@@ -122,6 +123,7 @@ class ReportBuilder:
                 "alternative_trajectories": [
                     asdict(item) for item in search_result.trajectories if best_trajectory is None or item.trajectory_id != best_trajectory.trajectory_id
                 ][:3],
+                "search_metadata": dict(search_result.metadata),
             }
         )
         return final_report

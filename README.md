@@ -15,6 +15,7 @@
 
 - 第一阶段：当前活跃版本已切换为服务候选诊断生成、关键证据检索与下一问构造的搜索专用图谱；旧版治疗、推荐、证据链图谱已移至 `knowledge_graph_bak/`
 - 第二阶段：已经进入“select -> expand -> simulate -> backpropagate 多次 rollout 可跑”的阶段，并已切换到 `LLM-first + 显式错误传播 + 集中 normalization` 的抽取 / 解释链路；当前 intake / pending action interpretation 统一使用 `mention_state + resolution` 语义，不再把自述症状表述成“医学 certainty”
+- 第二阶段：当前已完成前两批 `repair/exam rescue` 与 `multi-hypothesis feedback/competition repair`，第三批 `multi-branch rollout + final score rebalance + scope cluster rerank` 代码已落地，待 replay 验证；新的 replay 产物已可按 turn 落盘 `search_report / search_metadata`
 - 前端演示：已支持中文 Streamlit 页面，可展示多轮问诊、A1/A2/A3、pending action 解释、候选诊断、下一问、搜索摘要与安全机制
 
 更详细的局部说明可分别查看：
@@ -488,6 +489,7 @@ streamlit run frontend/app.py --server.port 8514
 - [tests/test_graph_case_generator.py](/Users/loki/Workspace/GraduationDesign/tests/test_graph_case_generator.py)
 - [tests/test_benchmark.py](/Users/loki/Workspace/GraduationDesign/tests/test_benchmark.py)
 - [phase2_execution_checklist.md](/Users/loki/Workspace/GraduationDesign/docs/phase2_execution_checklist.md)：第二阶段与虚拟病人开发清单
+- [diagnosis_algorithm_batch_execution_checklist.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_algorithm_batch_execution_checklist.md)：按三批节奏推进当前诊断算法的可执行开发清单，重点围绕 `top3_hypothesis_hit / top1_final_answer_hit`
 - [diagnosis_system_todolist.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_system_todolist.md)：当前诊断系统待完善点与后续迭代顺序
 - [med_mcts_vs_current_system.md](/Users/loki/Workspace/GraduationDesign/docs/med_mcts_vs_current_system.md)：整理论文实现与当前动态问诊实现的差异、启发式参数来源及后续优化方向
 - [phase2_changelog.md](/Users/loki/Workspace/GraduationDesign/docs/phase2_changelog.md)：第二阶段实现历程、问题改进与论文写作素材整理
@@ -510,6 +512,8 @@ streamlit run frontend/app.py --server.port 8514
 
 补充说明：
 
+- 当前第一批诊断算法改造已把 `repair.protect_repair_action_from_low_cost_explorer`、`repair.allow_low_cost_explorer_after_repair_if_unaskable_only`、`a3.enable_early_exam_context_rescue` 等开关真正接入默认构造逻辑。
+- 这意味着 `configs/brain.yaml` 里的 repair / exam-context 仲裁参数现在会直接影响 `process_turn()` 的下一问选择，而不只是停留在文档约定。
 - 全局 README 主要说明整体结构与阶段划分
 - [knowledge_graph/README.md](/Users/loki/Workspace/GraduationDesign/knowledge_graph/README.md) 说明当前搜索专用知识图谱处理链
 - [knowledge_graph_bak/README.md](/Users/loki/Workspace/GraduationDesign/knowledge_graph_bak/README.md) 说明已废弃的旧版全量指南图谱备份
@@ -519,6 +523,7 @@ streamlit run frontend/app.py --server.port 8514
 - [tests/README.md](/Users/loki/Workspace/GraduationDesign/tests/README.md) 说明第二阶段测试组织方式与当前覆盖范围
 - [med_mcts_vs_current_system.md](/Users/loki/Workspace/GraduationDesign/docs/med_mcts_vs_current_system.md) 记录论文实现与当前系统实现的关键差异，并整理启发式参数的来源与下一步优化方向
 - [phase2_changelog.md](/Users/loki/Workspace/GraduationDesign/docs/phase2_changelog.md) 重点记录第二阶段各轮改进分别解决了什么问题，适合作为论文写作材料
+- [diagnosis_algorithm_batch_execution_checklist.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_algorithm_batch_execution_checklist.md) 适合当前这轮诊断算法改造时直接按批次执行、验收和回放
 - [diagnosis_system_todolist.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_system_todolist.md) 记录当前诊断系统仍待完善的点，适合作为后续实现顺序与回归目标清单
 
 ## 当前环境

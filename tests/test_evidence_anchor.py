@@ -648,3 +648,70 @@ def test_blood_count_family_tag_does_not_force_definition_anchor() -> None:
 
     assert ranked[0].metadata["anchor_tier"] != "definition_anchor"
     assert ranked[0].metadata["definition_anchor_evidence"] == []
+
+
+# 真实证据已经给出更具体的部位作用域时，exact/family scope 候选应压过同病原 generic disease。
+def test_scope_cluster_bonus_prefers_specific_scope_candidate_over_generic_peer() -> None:
+    state = SessionState(session_id="anchor_scope_cluster")
+    state.evidence_states["cmv"] = EvidenceState(
+        node_id="cmv",
+        polarity="present",
+        existence="exist",
+        resolution="clear",
+        metadata={"target_node_name": "巨细胞病毒", "target_node_label": "Pathogen"},
+    )
+    state.evidence_states["cmv_retinitis"] = EvidenceState(
+        node_id="cmv_retinitis",
+        polarity="present",
+        existence="exist",
+        resolution="clear",
+        metadata={"target_node_name": "巨细胞病毒(CMV)视网膜炎", "target_node_label": "Disease"},
+    )
+    hypotheses = [
+        HypothesisScore(
+            node_id="cmv_generic",
+            label="Disease",
+            name="巨细胞病毒感染",
+            score=1.4,
+            metadata={
+                "evidence_payloads": [
+                    {
+                        "node_id": "cmv",
+                        "name": "巨细胞病毒",
+                        "label": "Pathogen",
+                        "relation_type": "HAS_PATHOGEN",
+                    }
+                ]
+            },
+        ),
+        HypothesisScore(
+            node_id="cmv_retinitis",
+            label="Disease",
+            name="巨细胞病毒(CMV)视网膜炎",
+            score=1.1,
+            metadata={
+                "evidence_payloads": [
+                    {
+                        "node_id": "cmv_retinitis",
+                        "name": "巨细胞病毒(CMV)视网膜炎",
+                        "label": "Disease",
+                        "relation_type": "SELF_DISEASE_MATCH",
+                    },
+                    {
+                        "node_id": "cmv",
+                        "name": "巨细胞病毒",
+                        "label": "Pathogen",
+                        "relation_type": "HAS_PATHOGEN",
+                    },
+                ]
+            },
+        ),
+    ]
+
+    ranked, _ = EvidenceAnchorAnalyzer().rerank_hypotheses(state, hypotheses)
+    by_id = {item.node_id: item for item in ranked}
+
+    assert ranked[0].node_id == "cmv_retinitis"
+    assert by_id["cmv_retinitis"].metadata["scope_cluster_level"] == "exact"
+    assert by_id["cmv_retinitis"].metadata["scope_cluster_bonus"] > 0.0
+    assert by_id["cmv_generic"].metadata["generic_scope_penalty"] > 0.0

@@ -36,6 +36,12 @@ class FakeBrain:
                 "pending_action": {
                     "target_node_id": "发热",
                 },
+                "search_report": {
+                    "turn_index": 1,
+                    "search_metadata": {
+                        "selected_action_source": "default_search_action",
+                    },
+                },
                 "final_report": None,
             }
 
@@ -43,6 +49,12 @@ class FakeBrain:
         return {
             "next_question": None,
             "pending_action": None,
+            "search_report": {
+                "turn_index": 2,
+                "search_metadata": {
+                    "repair_mode": "none",
+                },
+            },
             "final_report": {
                 "session_id": session_id,
                 "summary": "测试完成",
@@ -77,6 +89,9 @@ def test_replay_engine_runs_case_to_completion() -> None:
     assert len(result.turns) == 1
     assert result.turns[0].question_node_id == "发热"
     assert result.turns[0].answer_text == "有。"
+    assert result.initial_output["search_report"]["search_metadata"]["selected_action_source"] == "default_search_action"
+    assert result.turns[0].search_report["turn_index"] == 2
+    assert result.turns[0].search_metadata["repair_mode"] == "none"
     assert result.turns[0].patient_answer_seconds >= 0.0
     assert result.turns[0].brain_turn_seconds >= 0.0
     assert result.timing["opening_seconds"] >= 0.0

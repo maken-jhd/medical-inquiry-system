@@ -37,6 +37,9 @@ class HypothesisManagerConfig:
     verifier_trajectory_penalty: float = 0.08
     verifier_repeated_missing_support_penalty: float = 0.08
     verifier_observed_anchor_alt_bonus: float = 0.18
+    enable_multi_hypothesis_feedback: bool = True
+    use_scope_weighted_feedback: bool = True
+    max_related_hypotheses_per_evidence: int = 5
 
 
 class HypothesisManager:
@@ -106,6 +109,11 @@ class HypothesisManager:
                 label=item.label,
                 name=item.name,
                 score=item.score,
+                evidence_node_ids=[
+                    str(node_id)
+                    for node_id in item.metadata.get("evidence_node_ids", [])
+                    if len(str(node_id).strip()) > 0
+                ],
                 metadata=dict(item.metadata),
             )
             for item in candidates
@@ -127,15 +135,35 @@ class HypothesisManager:
         hypotheses: Iterable[HypothesisScore],
         evidence_state: EvidenceState,
         related_hypothesis_ids: Optional[Iterable[str]] = None,
+        feedback_weights: Optional[dict[str, float]] = None,
     ) -> List[HypothesisScore]:
-        target_ids = set(related_hypothesis_ids or [])
+        hypothesis_list = [self._clone_hypothesis(item) for item in hypotheses]
+        target_ids = {
+            str(item).strip()
+            for item in (related_hypothesis_ids or [])
+            if len(str(item).strip()) > 0
+        }
+        resolved_weights = dict(feedback_weights or {})
+
+        if len(resolved_weights) == 0:
+            resolved_weights = self.resolve_evidence_feedback_weights(
+                hypothesis_list,
+                evidence_state,
+                related_hypothesis_ids=target_ids,
+            )
+
+        if len(resolved_weights) == 0 and len(target_ids) == 0 and not self.config.enable_multi_hypothesis_feedback:
+            resolved_weights = {item.node_id: 1.0 for item in hypothesis_list}
+
         updated: List[HypothesisScore] = []
+        delta = self._score_delta_from_evidence(evidence_state)
 
-        for hypothesis in hypotheses:
+        for hypothesis in hypothesis_list:
             score = hypothesis.score
+            weight = float(resolved_weights.get(hypothesis.node_id, 0.0) or 0.0)
 
-            if len(target_ids) == 0 or hypothesis.node_id in target_ids:
-                score += self._score_delta_from_evidence(evidence_state)
+            if weight > 0.0:
+                score += delta * weight
 
             updated.append(
                 HypothesisScore(
@@ -144,11 +172,72 @@ class HypothesisManager:
                     name=hypothesis.name,
                     score=max(score, 0.0),
                     evidence_node_ids=list(hypothesis.evidence_node_ids),
-                    metadata=dict(hypothesis.metadata),
+                    metadata={
+                        **dict(hypothesis.metadata),
+                        "last_evidence_feedback_weight": round(weight, 4),
+                        "last_evidence_feedback_node_id": evidence_state.node_id,
+                        "last_evidence_feedback_polarity": evidence_state.effective_polarity(),
+                    },
                 )
             )
 
         return sorted(updated, key=lambda item: (-item.score, item.name))
+
+    # 将一条真实/模拟证据映射到所有相关 hypothesis，而不是只更新当前动作所属的单个候选。
+    def resolve_evidence_feedback_weights(
+        self,
+        hypotheses: Iterable[HypothesisScore],
+        evidence_state: EvidenceState,
+        related_hypothesis_ids: Optional[Iterable[str]] = None,
+    ) -> dict[str, float]:
+        hypothesis_list = [self._clone_hypothesis(item) for item in hypotheses]
+        focus_ids = {
+            str(item).strip()
+            for item in (related_hypothesis_ids or [])
+            if len(str(item).strip()) > 0
+        }
+
+        if len(hypothesis_list) == 0:
+            return {}
+
+        if not self.config.enable_multi_hypothesis_feedback:
+            if len(focus_ids) > 0:
+                return {item.node_id: 1.0 for item in hypothesis_list if item.node_id in focus_ids}
+            return {item.node_id: 1.0 for item in hypothesis_list}
+
+        scored: list[tuple[float, HypothesisScore]] = []
+
+        for hypothesis in hypothesis_list:
+            weight = self._feedback_weight_for_hypothesis(
+                hypothesis,
+                evidence_state,
+                focus_ids=focus_ids,
+            )
+
+            if weight <= 0.0:
+                continue
+
+            scored.append((weight, hypothesis))
+
+        if len(scored) == 0:
+            if len(focus_ids) > 0:
+                return {item.node_id: 1.0 for item in hypothesis_list if item.node_id in focus_ids}
+
+            if len(hypothesis_list) == 1:
+                return {hypothesis_list[0].node_id: 1.0}
+
+            return {}
+
+        max_related = max(int(self.config.max_related_hypotheses_per_evidence), 1)
+        ranked = sorted(
+            scored,
+            key=lambda item: (-item[0], item[1].name),
+        )[:max_related]
+        return {
+            item.node_id: round(weight, 4)
+            for weight, item in ranked
+            if weight > 0.0
+        }
 
     # 根据 verifier 的拒停理由对主备选假设做一次显式重排。
     def apply_verifier_repair(
@@ -257,6 +346,138 @@ class HypothesisManager:
         phenotype_score = float(metadata.get("phenotype_support_score", 0.0) or 0.0)
         bonus = exact_score * 0.22 + family_score * 0.14 + phenotype_score * 0.04
         return min(bonus, self.config.verifier_observed_anchor_alt_bonus)
+
+    # 估算某条证据与单个 hypothesis 的相关性，并把 scope/anchor 强度折成反馈权重。
+    def _feedback_weight_for_hypothesis(
+        self,
+        hypothesis: HypothesisScore,
+        evidence_state: EvidenceState,
+        *,
+        focus_ids: set[str],
+    ) -> float:
+        metadata = dict(hypothesis.metadata)
+        normalized_targets = self._feedback_target_names(evidence_state)
+        related_node_ids = self._normalize_metadata_string_list(metadata.get("evidence_node_ids", [])) | set(
+            self._normalize_match_text(str(item))
+            for item in hypothesis.evidence_node_ids
+            if len(str(item).strip()) > 0
+        )
+        related_names = self._hypothesis_evidence_name_set(metadata)
+        relation_types = self._normalize_metadata_string_list(metadata.get("relation_types", []))
+        evidence_relation_type = self._normalize_match_text(str(evidence_state.metadata.get("relation_type") or ""))
+        scope_weight = self._feedback_scope_weight(metadata)
+        focused = hypothesis.node_id in focus_ids
+
+        if self._normalize_match_text(evidence_state.node_id) in related_node_ids:
+            return min(1.0, 0.78 + scope_weight * 0.24 + (0.04 if focused else 0.0))
+
+        if self._has_feedback_name_overlap(normalized_targets, related_names):
+            return min(0.95, 0.58 + scope_weight * 0.28 + (0.04 if focused else 0.0))
+
+        if focused and len(evidence_relation_type) > 0 and evidence_relation_type in relation_types:
+            return min(0.82, 0.48 + scope_weight * 0.22)
+
+        if focused:
+            return min(0.68, 0.40 + scope_weight * 0.18)
+
+        if len(evidence_relation_type) > 0 and evidence_relation_type in relation_types and scope_weight >= 0.55:
+            return min(0.52, 0.18 + scope_weight * 0.32)
+
+        return 0.0
+
+    # 把 observed anchor / family anchor / phenotype support 统一折算成证据反馈权重。
+    def _feedback_scope_weight(self, metadata: dict) -> float:
+        if not self.config.use_scope_weighted_feedback:
+            return 1.0
+
+        anchor_tier = str(metadata.get("anchor_tier") or "")
+        exact_score = float(metadata.get("exact_scope_anchor_score", 0.0) or 0.0)
+        family_score = float(metadata.get("family_scope_anchor_score", 0.0) or 0.0)
+        phenotype_score = float(metadata.get("phenotype_support_score", 0.0) or 0.0)
+        observed_anchor_score = float(metadata.get("observed_anchor_score", 0.0) or 0.0)
+
+        if anchor_tier in {"strong_anchor", "definition_anchor"} or exact_score >= 0.55:
+            return 1.0
+
+        if anchor_tier == "family_anchor" or family_score >= 0.35:
+            return 0.78
+
+        if anchor_tier == "phenotype_supported" or phenotype_score > 0.0:
+            return 0.55
+
+        if anchor_tier == "background_supported" or observed_anchor_score > 0.0:
+            return 0.32
+
+        return 0.18
+
+    # 将 evidence_state 中的 node name / normalized name 统一转成可比对的字符串集合。
+    def _feedback_target_names(self, evidence_state: EvidenceState) -> set[str]:
+        names = {
+            self._normalize_match_text(str(item))
+            for item in (
+                evidence_state.metadata.get("target_node_name"),
+                evidence_state.metadata.get("normalized_name"),
+                evidence_state.node_id,
+            )
+            if len(str(item).strip()) > 0
+        }
+        return {item for item in names if len(item) > 0}
+
+    # 从 hypothesis metadata 中抽出所有可用于比对的候选证据名称。
+    def _hypothesis_evidence_name_set(self, metadata: dict) -> set[str]:
+        names = self._normalize_metadata_string_list(metadata.get("evidence_names", []))
+
+        for payload in metadata.get("evidence_payloads", []):
+            if not isinstance(payload, dict):
+                continue
+
+            for key in ("name", "display_name"):
+                text = str(payload.get(key) or "").strip()
+                if len(text) == 0:
+                    continue
+                names.add(self._normalize_match_text(text))
+
+        return {item for item in names if len(item) > 0}
+
+    # 允许“完全相等”和“较稳定的包含关系”两种匹配，避免一个别名变化就断开反馈。
+    def _has_feedback_name_overlap(self, left: set[str], right: set[str]) -> bool:
+        for left_item in left:
+            for right_item in right:
+                if left_item == right_item:
+                    return True
+
+                if min(len(left_item), len(right_item)) >= 4 and (
+                    left_item in right_item or right_item in left_item
+                ):
+                    return True
+
+        return False
+
+    # 将 metadata 里的名称/关系列表轻量标准化，供 feedback 与 repair 复用。
+    def _normalize_metadata_string_list(self, values: object) -> set[str]:
+        if not isinstance(values, list):
+            return set()
+
+        return {
+            self._normalize_match_text(str(item))
+            for item in values
+            if len(str(item).strip()) > 0
+        }
+
+    def _normalize_match_text(self, text: str) -> str:
+        return (
+            text.strip()
+            .lower()
+            .replace(" ", "")
+            .replace("（", "(")
+            .replace("）", ")")
+            .replace("，", ",")
+            .replace("。", "")
+            .replace("、", "")
+            .replace("-", "")
+            .replace("_", "")
+            .replace("/", "")
+        )
 
     # 根据证据存在性和回答清晰度计算对假设分数的调整值。
     def _score_delta_from_evidence(self, evidence_state: EvidenceState) -> float:

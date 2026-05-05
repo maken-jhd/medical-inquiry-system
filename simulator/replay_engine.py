@@ -26,6 +26,8 @@ class ReplayTurn:
     turn_index: int
     revealed_slot_id: Optional[str] = None
     stage: str = "A3"
+    search_report: dict = field(default_factory=dict)
+    search_metadata: dict = field(default_factory=dict)
     patient_answer_seconds: float = 0.0
     brain_turn_seconds: float = 0.0
     total_seconds: float = 0.0
@@ -135,6 +137,8 @@ class ReplayEngine:
                         answer_text=reply.answer_text,
                         turn_index=turn_index,
                         revealed_slot_id=reply.revealed_slot_id,
+                        search_report=self._extract_turn_search_report(current_output),
+                        search_metadata=self._extract_turn_search_metadata(current_output),
                         patient_answer_seconds=round(patient_answer_seconds, 4),
                         brain_turn_seconds=round(brain_turn_seconds, 4),
                         total_seconds=round(turn_total_seconds, 4),
@@ -212,6 +216,15 @@ class ReplayEngine:
             "attempts": 1,
             "error_type": type(exc).__name__,
         }
+
+    def _extract_turn_search_report(self, output_payload: dict) -> dict:
+        search_report = output_payload.get("search_report")
+        return dict(search_report) if isinstance(search_report, dict) else {}
+
+    def _extract_turn_search_metadata(self, output_payload: dict) -> dict:
+        search_report = self._extract_turn_search_report(output_payload)
+        search_metadata = search_report.get("search_metadata")
+        return dict(search_metadata) if isinstance(search_metadata, dict) else {}
 
 
 # 将批量回放结果写入 JSONL，便于后续复盘分析。

@@ -519,6 +519,8 @@ def _payload_to_replay_result(payload: dict[str, Any]) -> ReplayResult:
             turn_index=int(item.get("turn_index", 0)),
             revealed_slot_id=item.get("revealed_slot_id"),
             stage=str(item.get("stage", "A3")),
+            search_report=dict(item.get("search_report", {})),
+            search_metadata=dict(item.get("search_metadata", {})),
             patient_answer_seconds=float(item.get("patient_answer_seconds", 0.0) or 0.0),
             brain_turn_seconds=float(item.get("brain_turn_seconds", 0.0) or 0.0),
             total_seconds=float(item.get("total_seconds", 0.0) or 0.0),

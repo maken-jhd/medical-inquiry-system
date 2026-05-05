@@ -12,7 +12,7 @@ import yaml
 from .action_builder import ActionBuilder, ActionBuilderConfig
 from .entity_linker import EntityLinker, EntityLinkerConfig
 from .acceptance_controller import VerifierAcceptanceController
-from .evidence_anchor import EvidenceAnchorAnalyzer
+from .evidence_anchor import EvidenceAnchorAnalyzer, EvidenceAnchorConfig
 from .evidence_parser import EvidenceParser, EvidenceParserConfig
 from .errors import LlmEmptyExtractionError, LlmUnavailableError
 from .hypothesis_manager import HypothesisManager, HypothesisManagerConfig
@@ -96,6 +96,7 @@ class BrainDependencies:
     evidence_anchor_analyzer: EvidenceAnchorAnalyzer | None = None
     llm_client: LlmClient | None = None
     repair_policy: "RepairPolicyConfig" = field(default_factory=lambda: RepairPolicyConfig())
+    a3_routing_policy: "A3RoutingPolicyConfig" = field(default_factory=lambda: A3RoutingPolicyConfig())
 
 
 @dataclass
@@ -105,6 +106,21 @@ class RepairPolicyConfig:
     enable_verifier_hypothesis_reshuffle: bool = True
     enable_best_repair_action: bool = True
     enable_tree_reroot: bool = True
+    protect_repair_action_from_low_cost_explorer: bool = True
+    allow_low_cost_explorer_after_repair_if_unaskable_only: bool = True
+    enable_missing_key_support_competition_escalation: bool = True
+    missing_key_support_retry_threshold: int = 2
+    zero_anchor_current_answer_force_competition: bool = True
+
+
+@dataclass
+class A3RoutingPolicyConfig:
+    """控制 A3 追问阶段的问法纠偏与检查入口救援策略。"""
+
+    enable_early_exam_context_rescue: bool = True
+    early_exam_context_turn_limit: int = 2
+    early_exam_context_revealed_count_threshold: int = 2
+    exam_context_rescue_high_cost_role_threshold: float = 0.45
 
 
 class ConsultationBrain:
@@ -1003,11 +1019,19 @@ class ConsultationBrain:
                 },
             )
             self.deps.state_tracker.set_evidence_state(session_id, evidence_state)
-            related_ids = [pending_action.hypothesis_id] if pending_action.hypothesis_id is not None else None
+            feedback_weights = self._resolve_evidence_feedback_weights(state, pending_action, evidence_state)
             state.candidate_hypotheses = self.deps.hypothesis_manager.apply_evidence_feedback(
                 state.candidate_hypotheses,
                 evidence_state,
-                related_ids,
+                self._feedback_focus_ids(pending_action),
+                feedback_weights=feedback_weights,
+            )
+            self._record_turn_evidence_feedback(
+                state,
+                pending_action,
+                evidence_state,
+                feedback_weights,
+                source_stage="PENDING_ACTION_EXAM_CONTEXT",
             )
 
     # 通用 exam-result 链接不绑定某个 R2 候选，但仍写入 evidence_states 供后续检索与复盘消费。
@@ -1019,6 +1043,8 @@ class ConsultationBrain:
         updates: list[SlotUpdate],
         turn_index: int,
     ) -> None:
+        state = self.deps.state_tracker.get_session(session_id)
+
         for update in updates:
             existence = "unknown"
             resolution = "unknown"
@@ -1052,6 +1078,20 @@ class ConsultationBrain:
                 },
             )
             self.deps.state_tracker.set_evidence_state(session_id, evidence_state)
+            feedback_weights = self._resolve_evidence_feedback_weights(state, pending_action, evidence_state)
+            state.candidate_hypotheses = self.deps.hypothesis_manager.apply_evidence_feedback(
+                state.candidate_hypotheses,
+                evidence_state,
+                self._feedback_focus_ids(pending_action),
+                feedback_weights=feedback_weights,
+            )
+            self._record_turn_evidence_feedback(
+                state,
+                pending_action,
+                evidence_state,
+                feedback_weights,
+                source_stage="PENDING_ACTION_EXAM_CONTEXT_GENERIC_LINK",
+            )
 
     # 生成 follow-up 前做防循环判定，避免同一个检查入口被泛化追问多轮。
     def _should_use_exam_context_followup_action(
@@ -1543,6 +1583,44 @@ class ConsultationBrain:
 
         return context.availability
 
+    # 统一记录当前最终动作来自哪条分流链路，便于 replay 统计 repair / rescue / explorer 的覆盖关系。
+    def _record_selected_action_source(
+        self,
+        search_result: SearchResult,
+        source: str,
+        *,
+        priority_rank: int,
+        reason: str = "",
+    ) -> None:
+        search_result.metadata["selected_action_source"] = source
+        search_result.metadata["selected_action_source_priority_rank"] = priority_rank
+
+        if len(reason.strip()) > 0:
+            search_result.metadata["selected_action_source_reason"] = reason
+        else:
+            search_result.metadata.pop("selected_action_source_reason", None)
+
+    # 在最终把动作登记为 pending_action 前，把动作来源一并挂到 metadata，方便后续复盘。
+    def _attach_selected_action_source_metadata(
+        self,
+        action: MctsAction | None,
+        search_result: SearchResult,
+    ) -> MctsAction | None:
+        if action is None:
+            return None
+
+        metadata = dict(action.metadata)
+        for key in (
+            "selected_action_source",
+            "selected_action_source_priority_rank",
+            "selected_action_source_reason",
+        ):
+            if key in search_result.metadata:
+                metadata[key] = search_result.metadata[key]
+
+        action.metadata = metadata
+        return action
+
     # 运行 R1 + A2，生成主假设和备选假设并写回当前会话状态。
     def _run_a2(
         self,
@@ -1940,7 +2018,10 @@ class ConsultationBrain:
                 # rollout_from_tree_node 会模拟：
                 # A3 动作 -> 假想回答分支 -> route -> 下一步动作 ...
                 # 直到达到 max_depth、路径停止，或没有后续动作。
-                trajectory = self.deps.simulation_engine.rollout_from_tree_node(
+                #
+                # 第三批起，同一个 child action 会保留正向 + 一个非正向分支 seed，
+                # 避免所有 rollout 都复制同一条最乐观路径。
+                child_trajectories = self.deps.simulation_engine.rollout_trajectories_from_tree_node(
                     child,
                     rollout_context["state"],
                     patient_context,
@@ -1952,37 +2033,47 @@ class ConsultationBrain:
                     current_hypothesis=rollout_context["current_hypothesis"],
                     competing_hypotheses=rollout_context["alternatives"],
                 )
+                if len(child_trajectories) == 0:
+                    continue
 
-                # rollout 内部会临时把更新后的分支状态塞在 metadata["_rollout_state"] 里返回；
-                # 这里取出来后再裁剪成轻量 snapshot，作为 child 的“继续向下扩展起点”缓存起来。
-                rollout_state = trajectory.metadata.pop("_rollout_state", None)
-                if isinstance(rollout_state, SessionState):
-                    child.metadata["rollout_state"] = tracker.build_rollout_session_snapshot(rollout_state)
+                best_child_trajectory = sorted(
+                    child_trajectories,
+                    key=lambda item: (-item.score, item.trajectory_id),
+                )[0]
+                all_child_terminal = True
+                child_branch_seeds: list[str] = []
+
+                for trajectory in child_trajectories:
+                    rollout_state = trajectory.metadata.pop("_rollout_state", None)
+                    if (
+                        trajectory.trajectory_id == best_child_trajectory.trajectory_id
+                        and isinstance(rollout_state, SessionState)
+                    ):
+                        child.metadata["rollout_state"] = tracker.build_rollout_session_snapshot(rollout_state)
+
+                    child_branch_seeds.append(str(trajectory.metadata.get("branch_seed") or ""))
+                    if not bool(trajectory.metadata.get("path_terminal", False)):
+                        all_child_terminal = False
+
+                    trajectories.append(trajectory)
+                    tracker.save_trajectory(session_id, trajectory)
+                    self.deps.mcts_engine.backpropagate(tree, child.node_id, trajectory.score)
 
                 # 下面这些 metadata 是后续 reroot、repair、调试和 search_report 解释最常用的几个摘要字段。
-                child.metadata["rollout_depth"] = trajectory.metadata.get("rollout_depth", 0)
-                child.metadata["last_stage"] = trajectory.metadata.get("last_stage")
-                child.metadata["final_answer_id"] = trajectory.final_answer_id
-                child.metadata["final_answer_name"] = trajectory.final_answer_name
+                child.metadata["rollout_depth"] = best_child_trajectory.metadata.get("rollout_depth", 0)
+                child.metadata["last_stage"] = best_child_trajectory.metadata.get("last_stage")
+                child.metadata["final_answer_id"] = best_child_trajectory.final_answer_id
+                child.metadata["final_answer_name"] = best_child_trajectory.final_answer_name
+                child.metadata["rollout_trajectory_count"] = len(child_trajectories)
+                child.metadata["rollout_branch_seeds"] = child_branch_seeds
 
-                if bool(trajectory.metadata.get("path_terminal", False)):
-                    # 如果 rollout 已经在这条 child 路径上走到 STOP，
-                    # 就把 child 直接视作 terminal，后续不用再从它继续展开。
+                if all_child_terminal:
+                    # 只有该 child 下保留的所有 rollout 分支都已经停止，才把 child 视作 terminal，
+                    # 避免因为其中一条乐观路径 stop 就过早冻结这条动作分支。
                     tree.mark_terminal(
                         child.node_id,
-                        {"terminal_reason": "rollout_stop", "final_answer_id": trajectory.final_answer_id},
+                        {"terminal_reason": "rollout_stop", "final_answer_id": best_child_trajectory.final_answer_id},
                     )
-
-                # trajectory 会同时写到：
-                # - 本轮局部列表 `trajectories`
-                # - session 的长期轨迹缓存 `state.trajectories`
-                # 前者服务当前 search 聚合，后者服务最终报告与 replay 复盘。
-                trajectories.append(trajectory)
-                tracker.save_trajectory(session_id, trajectory)
-
-                # backpropagate 会把这条轨迹得分沿 child -> parent -> root 逐层回传，
-                # 让后续 select_leaf / select_root_action 感知到这条路径的历史价值。
-                self.deps.mcts_engine.backpropagate(tree, child.node_id, trajectory.score)
 
         # rollout 全部完成后，下一步不再看“单条轨迹”，而是按最终答案把轨迹分组。
         grouped = self.deps.trajectory_evaluator.group_by_answer(trajectories)
@@ -2034,6 +2125,10 @@ class ConsultationBrain:
             metadata={
                 "rollouts_requested": self.deps.mcts_engine.config.num_rollouts,
                 "rollouts_executed": rollout_executed,
+                "rollout_trajectory_count": len(trajectories),
+                "answer_group_count": len(grouped),
+                "single_answer_group": len(grouped) == 1,
+                "rollout_branch_seed_counts": self._build_rollout_branch_seed_counts(trajectories),
                 "tree_node_count": len(tree.nodes),
                 "tree_refresh": dict(state.metadata.get("last_tree_refresh", {})),
             },
@@ -2057,6 +2152,18 @@ class ConsultationBrain:
                 return False
 
         return True
+
+    # 汇总 rollout 首分支分布，便于离线观察第三批是否真的避免了单分支塌缩。
+    def _build_rollout_branch_seed_counts(self, trajectories: Sequence[ReasoningTrajectory]) -> dict[str, int]:
+        counts: dict[str, int] = {}
+
+        for trajectory in trajectories:
+            branch_seed = str(trajectory.metadata.get("branch_seed") or "")
+            if len(branch_seed) == 0:
+                continue
+            counts[branch_seed] = counts.get(branch_seed, 0) + 1
+
+        return counts
 
     # verifier 判断是否可以停止时需要看到累计会话证据，而不是只看当前 turn 的患者回复。
     def _build_verifier_patient_context(self, session_id: str, latest_context: PatientContext) -> PatientContext:
@@ -2179,6 +2286,7 @@ class ConsultationBrain:
         # 单轮入口先推进轮次，再统一执行一次 turn_interpreter。
         # 之后所有分支都只消费这一份 mentions 结果，避免重复解释同一回答。
         turn_index = tracker.increment_turn(session_id)
+        tracker.get_session(session_id).metadata["current_turn_evidence_feedback"] = []
         pending_action = tracker.get_pending_action(session_id)
         known_feature_names = self._collect_known_feature_names(session_id)
         try:
@@ -2291,6 +2399,12 @@ class ConsultationBrain:
             search_result.selected_action = selected_action
             search_result.root_best_action = selected_action
             search_result.metadata["fallback_reason"] = "exam_context_needs_followup"
+            self._record_selected_action_source(
+                search_result,
+                "exam_context_followup_action",
+                priority_rank=2,
+                reason="pending_exam_result_followup",
+            )
         elif self._should_stop_after_repeated_chief_complaint(
             session_id,
             patient_context,
@@ -2306,10 +2420,22 @@ class ConsultationBrain:
             search_result.selected_action = selected_action
             search_result.root_best_action = selected_action
             search_result.metadata["fallback_reason"] = "no_clinical_information_in_patient_text"
+            self._record_selected_action_source(
+                search_result,
+                "chief_complaint_intake_action",
+                priority_rank=1,
+                reason="no_clinical_information_in_patient_text",
+            )
         elif effective_stage == "FALLBACK":
             # fail_count 或 route 已要求降级时，不再依赖 hypothesis/search，
             # 直接用全局冷启动问题做一轮兜底探测。
             selected_action = self._choose_cold_start_probe_action(session_id)
+            self._record_selected_action_source(
+                search_result,
+                "cold_start_action",
+                priority_rank=6,
+                reason="router_requested_fallback",
+            )
         else:
             # 常规主路径：需要时刷新 A2；若已有候选诊断，则进入 A3 的局部树搜索。
             should_run_a2 = self._should_refresh_a2(
@@ -2366,15 +2492,48 @@ class ConsultationBrain:
             if bool(self.deps.repair_policy.enable_best_repair_action):
                 selected_action = self._choose_repair_action(session_id, search_result, repair_context)
                 search_result.repair_selected_action = selected_action
+                if selected_action is not None:
+                    self._record_selected_action_source(
+                        search_result,
+                        "repair_selected_action",
+                        priority_rank=1,
+                        reason=str(repair_context.get("reject_reason", "")),
+                    )
             else:
                 # ablation 关闭 repair action 时，仍退回 search 原本给出的 root action。
                 selected_action = default_search_action
         elif default_search_action is not None:
             # verifier 没有拦截时，沿用 search 默认动作即可。
             selected_action = default_search_action
+            self._record_selected_action_source(
+                search_result,
+                "default_search_action",
+                priority_rank=4,
+                reason="verifier_not_blocking",
+            )
 
         if not accept_decision.should_stop:
-            selected_action = self._choose_low_cost_explorer_action(session_id, search_result, selected_action)
+            selected_action = self._maybe_choose_early_exam_context_rescue_action(
+                session_id,
+                search_result,
+                selected_action,
+                repair_context=repair_context,
+                turn_index=turn_index,
+            )
+
+        if not accept_decision.should_stop:
+            skip_low_cost_explorer, skip_reason = self._should_skip_low_cost_explorer_after_repair(
+                session_id,
+                search_result,
+                selected_action,
+            )
+            if skip_low_cost_explorer:
+                search_result.metadata["low_cost_explorer_skipped_reason"] = skip_reason
+                search_result.metadata["repair_action_override_guarded"] = True
+            else:
+                if len(skip_reason) > 0:
+                    search_result.metadata["low_cost_explorer_after_repair_reason"] = skip_reason
+                selected_action = self._choose_low_cost_explorer_action(session_id, search_result, selected_action)
 
         # 若 search 没选出动作，再尝试阶段性停止；仍不能停时，最后退回冷启动探针问题。
         if selected_action is None and not accept_decision.should_stop:
@@ -2394,6 +2553,12 @@ class ConsultationBrain:
                 search_result.selected_action = selected_action
                 search_result.root_best_action = selected_action
                 search_result.metadata["fallback_reason"] = "no_a2_a3_action_available"
+                self._record_selected_action_source(
+                    search_result,
+                    "cold_start_action",
+                    priority_rank=6,
+                    reason="no_a2_a3_action_available",
+                )
 
         selected_action = self._filter_selected_action_for_repeat(session_id, selected_action, search_result)
         if selected_action is None and not accept_decision.should_stop and not stop_decision.should_stop:
@@ -2402,8 +2567,17 @@ class ConsultationBrain:
                 search_result.selected_action = selected_action
                 search_result.root_best_action = selected_action
                 search_result.metadata["fallback_reason"] = "repeat_action_filtered_to_cold_start"
+                self._record_selected_action_source(
+                    search_result,
+                    "cold_start_action",
+                    priority_rank=6,
+                    reason="repeat_action_filtered_to_cold_start",
+                )
             else:
                 selected_action = None
+
+        selected_action = self._attach_selected_action_source_metadata(selected_action, search_result)
+        self._attach_turn_feedback_observations(session_id, search_result)
 
         if self._has_search_signal(search_result):
             # 这里把 repair 前后的动作、reroot 情况和 reject reason 整理成便于前端/复盘读取的观测结构。
@@ -2716,13 +2890,99 @@ class ConsultationBrain:
         if len(state.candidate_hypotheses) == 0:
             return
 
-        related_ids = [action.hypothesis_id] if action.hypothesis_id is not None else None
+        feedback_weights = self._resolve_evidence_feedback_weights(state, action, evidence_state)
         updated = self.deps.hypothesis_manager.apply_evidence_feedback(
             state.candidate_hypotheses,
             evidence_state,
-            related_ids,
+            self._feedback_focus_ids(action),
+            feedback_weights=feedback_weights,
         )
         self.deps.state_tracker.set_candidate_hypotheses(session_id, updated)
+        self._record_turn_evidence_feedback(
+            state,
+            action,
+            evidence_state,
+            feedback_weights,
+            source_stage=str(evidence_state.metadata.get("source_stage") or "TURN_INTERPRETER"),
+        )
+
+    # 把 evidence_state 关联到所有可能受影响的 hypothesis，并把 fan-out 结果写进调试观测字段。
+    def _resolve_evidence_feedback_weights(
+        self,
+        state: SessionState,
+        action: MctsAction,
+        evidence_state: EvidenceState,
+    ) -> dict[str, float]:
+        feedback_weights = self.deps.hypothesis_manager.resolve_evidence_feedback_weights(
+            state.candidate_hypotheses,
+            evidence_state,
+            related_hypothesis_ids=self._feedback_focus_ids(action),
+        )
+        evidence_state.metadata["related_hypothesis_feedback_weights"] = dict(feedback_weights)
+        evidence_state.metadata["related_hypothesis_ids"] = list(feedback_weights.keys())
+        return feedback_weights
+
+    def _feedback_focus_ids(self, action: MctsAction) -> list[str] | None:
+        if action.hypothesis_id is None or len(str(action.hypothesis_id).strip()) == 0:
+            return None
+
+        return [str(action.hypothesis_id)]
+
+    # 将每次证据 fan-out 的命中情况记入当前 turn，便于后续离线统计 multi-hypothesis feedback 指标。
+    def _record_turn_evidence_feedback(
+        self,
+        state: SessionState,
+        action: MctsAction,
+        evidence_state: EvidenceState,
+        feedback_weights: dict[str, float],
+        *,
+        source_stage: str,
+    ) -> None:
+        entries = state.metadata.get("current_turn_evidence_feedback", [])
+
+        if not isinstance(entries, list):
+            entries = []
+
+        entry = {
+            "action_id": action.action_id,
+            "action_type": action.action_type,
+            "source_stage": source_stage,
+            "source_hypothesis_id": action.hypothesis_id,
+            "evidence_node_id": evidence_state.node_id,
+            "evidence_name": str(
+                evidence_state.metadata.get("target_node_name")
+                or evidence_state.metadata.get("normalized_name")
+                or evidence_state.node_id
+            ),
+            "polarity": evidence_state.effective_polarity(),
+            "resolution": evidence_state.resolution,
+            "related_hypothesis_ids": list(feedback_weights.keys()),
+            "related_hypothesis_weights": dict(feedback_weights),
+            "related_hypothesis_count": len(feedback_weights),
+            "multi_hypothesis_hit": len(feedback_weights) > 1,
+        }
+        entries.append(entry)
+        state.metadata["current_turn_evidence_feedback"] = entries[-24:]
+        state.metadata["last_evidence_feedback_summary"] = entry
+
+    # 将当前 turn 的反馈日志挂到 search_metadata，便于 replay 产物直接离线统计内部观测指标。
+    def _attach_turn_feedback_observations(
+        self,
+        session_id: str,
+        search_result: SearchResult,
+    ) -> None:
+        state = self.deps.state_tracker.get_session(session_id)
+        entries = state.metadata.get("current_turn_evidence_feedback", [])
+
+        if not isinstance(entries, list) or len(entries) == 0:
+            return
+
+        total_count = len(entries)
+        multi_count = sum(1 for item in entries if bool(item.get("multi_hypothesis_hit", False)))
+        search_result.metadata["turn_evidence_feedback"] = [dict(item) for item in entries]
+        search_result.metadata["multi_hypothesis_feedback_total_count"] = total_count
+        search_result.metadata["multi_hypothesis_feedback_hit_count"] = multi_count
+        search_result.metadata["multi_hypothesis_feedback_hit_rate"] = round(multi_count / float(total_count), 4)
 
     # 从当前槽位状态中收集已知特征名称，辅助 A1 进行更保守的抽取。
     def _collect_known_feature_names(self, session_id: str) -> list[str]:
@@ -2981,7 +3241,7 @@ class ConsultationBrain:
         if reject_reason in {"missing_key_support", "hard_negative_key_evidence"} and len(recommended_next_evidence) == 0:
             recommended_next_evidence = self._normalize_string_list(metadata.get("verifier_missing_evidence", []))[:3]
 
-        return {
+        repair_context = {
             "reject_reason": reject_reason,
             "path_control_reason": path_control_reason or reject_reason,
             "recommended_next_evidence": recommended_next_evidence,
@@ -2998,6 +3258,228 @@ class ConsultationBrain:
             "current_answer_id": best_answer_score.answer_id,
             "current_answer_name": best_answer_score.answer_name,
         }
+        repair_context["current_answer_repair_feedback_count"] = self._predict_repair_feedback_count(
+            state,
+            current_answer_id=str(best_answer_score.answer_id or ""),
+            reject_reason=reject_reason,
+        )
+        repair_context = self._maybe_escalate_missing_key_support_to_competition(
+            state,
+            repair_context,
+        )
+        return repair_context
+
+    # 在正式持久化前先预测本轮计数，便于判断“连续两轮 missing_key_support”是否应该升级 repair 模式。
+    def _predict_repair_feedback_count(
+        self,
+        state: SessionState,
+        *,
+        current_answer_id: str,
+        reject_reason: str,
+    ) -> int:
+        tracked_reasons = {
+            "missing_key_support",
+            "missing_required_anchor",
+            "insufficient_evidence_family_coverage",
+            "trajectory_insufficient",
+        }
+
+        if len(current_answer_id) == 0 or reject_reason not in tracked_reasons:
+            return 0
+
+        existing = state.metadata.get("repair_feedback_counts", {})
+        if not isinstance(existing, dict):
+            return 1
+
+        by_reason = existing.get(current_answer_id, {})
+        if not isinstance(by_reason, dict):
+            return 1
+
+        return int(by_reason.get(reject_reason, 0) or 0) + 1
+
+    # 当当前答案连续缺支持且几乎没有真实 anchor 时，把 repair 从“自我补证”升级为“竞争诊断 repair”。
+    def _maybe_escalate_missing_key_support_to_competition(
+        self,
+        state: SessionState,
+        repair_context: dict,
+    ) -> dict:
+        policy = self.deps.repair_policy
+        reject_reason = str(repair_context.get("reject_reason") or "")
+
+        if reject_reason != "missing_key_support":
+            return repair_context
+
+        if not bool(policy.enable_missing_key_support_competition_escalation):
+            return repair_context
+
+        current_answer_id = str(repair_context.get("current_answer_id") or "")
+        current_hypothesis = self._find_hypothesis_by_id(state.candidate_hypotheses, current_answer_id)
+        if current_hypothesis is None:
+            return repair_context
+
+        alternative_candidates = self._build_missing_support_competition_candidates(
+            state,
+            current_hypothesis=current_hypothesis,
+            repair_context=repair_context,
+        )
+        if len(alternative_candidates) == 0:
+            return repair_context
+
+        current_observed_anchor = float(current_hypothesis.metadata.get("observed_anchor_score", 0.0) or 0.0)
+        current_exact_anchor = float(current_hypothesis.metadata.get("exact_scope_anchor_score", 0.0) or 0.0)
+        stronger_anchor_exists = any(
+            float(item.get("observed_anchor_score", 0.0) or 0.0) > current_observed_anchor + 0.05
+            or float(item.get("exact_scope_anchor_score", 0.0) or 0.0) > current_exact_anchor + 0.05
+            for item in alternative_candidates
+        )
+        feedback_count = int(repair_context.get("current_answer_repair_feedback_count", 0) or 0)
+        escalation_reasons: list[str] = []
+
+        if (
+            bool(policy.zero_anchor_current_answer_force_competition)
+            and current_observed_anchor <= 0.0
+            and stronger_anchor_exists
+        ):
+            escalation_reasons.append("current_answer_zero_observed_anchor")
+
+        if feedback_count >= int(policy.missing_key_support_retry_threshold):
+            escalation_reasons.append("repeated_missing_key_support")
+
+        if self._repair_recommended_evidence_looks_high_cost(repair_context) and stronger_anchor_exists:
+            escalation_reasons.append("high_cost_gap_with_stronger_alternative_anchor")
+
+        if len(escalation_reasons) == 0:
+            return repair_context
+
+        target_candidate = self._select_best_competition_repair_candidate(alternative_candidates)
+        if target_candidate is None:
+            return repair_context
+
+        escalated = dict(repair_context)
+        escalated.update(
+            {
+                "force_competition_repair": True,
+                "repair_escalated_to_competition": True,
+                "repair_escalation_source": "missing_key_support",
+                "repair_escalation_reasons": escalation_reasons,
+                "repair_target_hypothesis_id": str(target_candidate.get("answer_id") or ""),
+                "repair_target_hypothesis_name": str(target_candidate.get("answer_name") or ""),
+                "alternative_candidates": alternative_candidates,
+                "repair_stage": "A2",
+            }
+        )
+        return escalated
+
+    # 把 verifier alternatives、anchor stronger alternatives 和当前排序里的强锚点备选合成 competition repair 候选池。
+    def _build_missing_support_competition_candidates(
+        self,
+        state: SessionState,
+        *,
+        current_hypothesis: HypothesisScore,
+        repair_context: dict,
+    ) -> list[dict]:
+        candidates = self._normalize_alternative_candidates(repair_context.get("alternative_candidates", []))
+        candidates.extend(
+            self._normalize_alternative_candidates(repair_context.get("anchor_stronger_alternative_candidates", []))
+        )
+        current_observed_anchor = float(current_hypothesis.metadata.get("observed_anchor_score", 0.0) or 0.0)
+        current_exact_anchor = float(current_hypothesis.metadata.get("exact_scope_anchor_score", 0.0) or 0.0)
+
+        for hypothesis in sorted(state.candidate_hypotheses, key=lambda item: (-item.score, item.name)):
+            if hypothesis.node_id == current_hypothesis.node_id:
+                continue
+
+            observed_anchor_score = float(hypothesis.metadata.get("observed_anchor_score", 0.0) or 0.0)
+            exact_scope_anchor_score = float(hypothesis.metadata.get("exact_scope_anchor_score", 0.0) or 0.0)
+            family_scope_anchor_score = float(hypothesis.metadata.get("family_scope_anchor_score", 0.0) or 0.0)
+            anchor_tier = str(hypothesis.metadata.get("anchor_tier") or "")
+
+            if not (
+                observed_anchor_score > current_observed_anchor + 0.05
+                or exact_scope_anchor_score > current_exact_anchor + 0.05
+                or (anchor_tier in {"strong_anchor", "definition_anchor", "family_anchor"} and observed_anchor_score > 0.0)
+            ):
+                continue
+
+            candidates.append(
+                {
+                    "answer_id": hypothesis.node_id,
+                    "answer_name": hypothesis.name,
+                    "reason": "当前备选诊断已具备更强 observed anchor，适合进入 competition repair。",
+                    "observed_anchor_score": observed_anchor_score,
+                    "exact_scope_anchor_score": exact_scope_anchor_score,
+                    "family_scope_anchor_score": family_scope_anchor_score,
+                    "anchor_tier": anchor_tier,
+                }
+            )
+
+        merged: list[dict] = []
+        seen_keys: set[str] = set()
+
+        for item in candidates:
+            answer_id = str(item.get("answer_id") or "").strip()
+            answer_name = str(item.get("answer_name") or "").strip()
+            key = answer_id or self._normalize_match_text(answer_name)
+
+            if len(key) == 0 or key in seen_keys:
+                continue
+
+            if answer_id == current_hypothesis.node_id:
+                continue
+
+            merged.append(item)
+            seen_keys.add(key)
+
+        return sorted(
+            merged,
+            key=lambda item: (
+                -float(item.get("exact_scope_anchor_score", 0.0) or 0.0),
+                -float(item.get("observed_anchor_score", 0.0) or 0.0),
+                -float(item.get("family_scope_anchor_score", 0.0) or 0.0),
+                str(item.get("answer_name") or ""),
+            ),
+        )[:3]
+
+    def _select_best_competition_repair_candidate(self, candidates: list[dict]) -> dict | None:
+        if len(candidates) == 0:
+            return None
+
+        ranked = sorted(
+            candidates,
+            key=lambda item: (
+                -float(item.get("exact_scope_anchor_score", 0.0) or 0.0),
+                -float(item.get("observed_anchor_score", 0.0) or 0.0),
+                -float(item.get("family_scope_anchor_score", 0.0) or 0.0),
+                str(item.get("answer_name") or ""),
+            ),
+        )
+        return ranked[0]
+
+    # verifier 推荐如果主要是检查/报告/病原学结果，就把它视作“高成本补缺”，便于触发 competition repair。
+    def _repair_recommended_evidence_looks_high_cost(self, repair_context: dict) -> bool:
+        recommended = self._normalize_string_list(repair_context.get("recommended_next_evidence", []))
+        high_cost_markers = (
+            "检查",
+            "结果",
+            "报告",
+            "化验",
+            "检测",
+            "ct",
+            "mri",
+            "影像",
+            "核酸",
+            "pcr",
+            "培养",
+            "病原",
+            "cd4",
+            "病毒载量",
+            "葡聚糖",
+        )
+
+        return any(
+            any(marker in self._normalize_match_text(item) for marker in high_cost_markers)
+            for item in recommended
+        )
 
     # 将 verifier 拒停结果显式写回 hypothesis 排序与会话元数据。
     def _apply_verifier_repair_strategy(self, session_id: str, repair_context: dict) -> None:
@@ -3179,6 +3661,13 @@ class ConsultationBrain:
         if len(state.candidate_hypotheses) == 0:
             return None
 
+        explicit_target_id = str(repair_context.get("repair_target_hypothesis_id") or "").strip()
+        if len(explicit_target_id) > 0:
+            explicit_target = self._find_hypothesis_by_id(state.candidate_hypotheses, explicit_target_id)
+
+            if explicit_target is not None:
+                return explicit_target
+
         if str(repair_context.get("reject_reason") or "") == "hard_negative_key_evidence":
             current_answer_id = str(repair_context.get("current_answer_id") or "")
             current_answer = self._find_hypothesis_by_id(state.candidate_hypotheses, current_answer_id)
@@ -3204,6 +3693,7 @@ class ConsultationBrain:
         repair_context: dict,
     ) -> list[HypothesisScore]:
         reject_reason = str(repair_context.get("reject_reason", "missing_key_support"))
+        force_competition_repair = bool(repair_context.get("force_competition_repair", False))
         ranked = sorted(state.candidate_hypotheses, key=lambda item: (-item.score, item.name))
         selected: list[HypothesisScore] = [current_hypothesis]
 
@@ -3222,10 +3712,16 @@ class ConsultationBrain:
 
             return selected[:3]
 
-        if not self._is_alternative_repair_reason(reject_reason):
+        if not force_competition_repair and not self._is_alternative_repair_reason(reject_reason):
             return selected
 
         alternative_candidates = self._normalize_alternative_candidates(repair_context.get("alternative_candidates", []))
+        current_answer_id = str(repair_context.get("current_answer_id") or "")
+
+        if force_competition_repair and len(current_answer_id) > 0 and current_answer_id != current_hypothesis.node_id:
+            current_answer = self._find_hypothesis_by_id(state.candidate_hypotheses, current_answer_id)
+            if current_answer is not None:
+                selected.append(current_answer)
 
         for hypothesis in ranked:
             if hypothesis.node_id == current_hypothesis.node_id:
@@ -3278,6 +3774,7 @@ class ConsultationBrain:
         recent_evidence_tags: list[str],
     ) -> float:
         reject_reason = str(repair_context.get("reject_reason", "missing_key_support"))
+        force_competition_repair = bool(repair_context.get("force_competition_repair", False))
 
         # repair score 只做通用补缺：优先问能形成疾病特异锚点或定义锚点的动作，
         # 同时保留区分度、新颖度、推荐证据命中和成本偏置。
@@ -3371,7 +3868,7 @@ class ConsultationBrain:
                 - patient_burden * 0.15
             )
 
-        if self._is_alternative_repair_reason(reject_reason):
+        if force_competition_repair or self._is_alternative_repair_reason(reject_reason):
             current_answer_id = str(repair_context.get("current_answer_id") or "")
             alternative_hypothesis_bonus = 1.05 if len(current_answer_id) > 0 and action.hypothesis_id != current_answer_id else 0.0
             competition_role_bonus = 1.25 if action_role in {"disease_specific_anchor", "definition_anchor"} else 0.0
@@ -3763,6 +4260,7 @@ class ConsultationBrain:
             }
 
         reject_reason = str(current_context.get("reject_reason", "")).strip()
+        force_competition_repair = bool(current_context.get("force_competition_repair", False))
         repair_mode = {
             "missing_key_support": "repair_supporting_evidence",
             "missing_required_anchor": "repair_supporting_evidence",
@@ -3773,6 +4271,9 @@ class ConsultationBrain:
             "hard_negative_key_evidence": "repair_hard_negative_resolution",
             "trajectory_insufficient": "repair_path_diversification",
         }.get(reject_reason, "repair_generic")
+
+        if force_competition_repair:
+            repair_mode = "repair_hypothesis_competition"
 
         return {
             **current_context,
@@ -3945,6 +4446,354 @@ class ConsultationBrain:
             },
         )
 
+    # 为指定 hypothesis 统一构造一批当前仍可问的 A3 动作，供 repair / rescue / explorer 复用。
+    def _build_verification_actions_for_hypothesis(
+        self,
+        state: SessionState,
+        hypothesis: HypothesisScore,
+        *,
+        top_k: int = 12,
+        ranked_hypotheses: list[HypothesisScore] | None = None,
+    ) -> list[MctsAction]:
+        if not hasattr(self.deps.retriever, "retrieve_r2_expected_evidence"):
+            return []
+
+        try:
+            rows = self.deps.retriever.retrieve_r2_expected_evidence(hypothesis, state, top_k=top_k)
+        except TypeError:
+            rows = self.deps.retriever.retrieve_r2_expected_evidence(hypothesis, state)
+        except Exception:
+            return []
+
+        ranked = ranked_hypotheses or sorted(state.candidate_hypotheses, key=lambda item: (-item.score, item.name))[:3]
+        expand_limit = int(
+            getattr(
+                getattr(self.deps.hypothesis_manager, "config", object()),
+                "expand_top_k_hypotheses",
+                3,
+            )
+            or 3
+        )
+        alternatives = [item for item in ranked if item.node_id != hypothesis.node_id][:expand_limit]
+        return self.deps.action_builder.build_verification_actions(
+            rows,
+            hypothesis_id=hypothesis.node_id,
+            topic_id=hypothesis.label,
+            competing_hypotheses=alternatives,
+            current_hypothesis=hypothesis,
+            session_state=state,
+        )
+
+    # 将 exam_context 动作里的候选 payload 还原成“伪动作”，便于复用统一的证据角色判断逻辑。
+    def _payload_to_action(
+        self,
+        payload: dict,
+        *,
+        hypothesis_id: str | None = None,
+    ) -> MctsAction:
+        node_id = str(payload.get("node_id") or "")
+        return MctsAction(
+            action_id=f"payload::{hypothesis_id or 'unknown'}::{node_id}",
+            action_type="verify_evidence",
+            target_node_id=node_id,
+            target_node_label=str(payload.get("label") or "Unknown"),
+            target_node_name=str(payload.get("name") or node_id),
+            hypothesis_id=hypothesis_id,
+            prior_score=float(payload.get("priority", 0.0) or 0.0),
+            metadata={
+                "relation_type": payload.get("relation_type"),
+                "question_type_hint": payload.get("question_type_hint"),
+                "acquisition_mode": payload.get("acquisition_mode"),
+                "evidence_cost": payload.get("evidence_cost"),
+                "recommended_match_score": float(payload.get("recommended_match_score", 0.0) or 0.0),
+                "verifier_recommended_match_score": float(
+                    payload.get("verifier_recommended_match_score", 0.0) or 0.0
+                ),
+                "hypothesis_recommended_match_score": float(
+                    payload.get("hypothesis_recommended_match_score", 0.0) or 0.0
+                ),
+                "joint_recommended_match_score": float(
+                    payload.get("joint_recommended_match_score", 0.0) or 0.0
+                ),
+                "recommended_evidence_bonus": float(payload.get("recommended_evidence_bonus", 0.0) or 0.0),
+                "discriminative_gain": float(payload.get("discriminative_gain", 0.0) or 0.0),
+                "novelty_score": float(payload.get("novelty_score", 0.0) or 0.0),
+                "evidence_tags": [f"type:{payload.get('exam_kind', '')}"] if payload.get("exam_kind") else [],
+            },
+        )
+
+    # 估算“当前 top hypothesis 的关键证据是否主要依赖检查结果”，用于前几轮的 exam-first rescue。
+    def _estimate_exam_driven_signal_from_actions(
+        self,
+        actions: Sequence[MctsAction],
+    ) -> tuple[float, dict]:
+        total_units = 0
+        exam_units = 0
+        exam_role_counts = {"lab": 0, "imaging": 0, "pathogen": 0}
+
+        for action in actions:
+            if action.action_type in {"collect_general_exam_context", "collect_exam_context"}:
+                payloads = action.metadata.get("exam_candidate_evidence", [])
+
+                if not isinstance(payloads, list):
+                    continue
+
+                for payload in payloads:
+                    if not isinstance(payload, dict):
+                        continue
+
+                    role = self._evidence_role_for_action(
+                        self._payload_to_action(payload, hypothesis_id=action.hypothesis_id)
+                    )
+                    if role not in {"disease_specific_anchor", "definition_anchor", "phenotype_support"}:
+                        continue
+
+                    total_units += 1
+                    exam_units += 1
+                    exam_kind = str(payload.get("exam_kind") or "").strip()
+                    if exam_kind in exam_role_counts:
+                        exam_role_counts[exam_kind] += 1
+                continue
+
+            role = self._evidence_role_for_action(action)
+            if role not in {"disease_specific_anchor", "definition_anchor", "phenotype_support"}:
+                continue
+
+            total_units += 1
+
+        if total_units == 0:
+            return 0.0, exam_role_counts
+
+        return exam_units / float(total_units), exam_role_counts
+
+    # 判断 verifier repair 推荐的缺口是否明显偏向“检查结果/报告”而非低成本泛症状。
+    def _repair_context_prefers_exam_evidence(
+        self,
+        repair_context: dict | None,
+        exam_actions: Sequence[MctsAction],
+    ) -> bool:
+        if not isinstance(repair_context, dict):
+            return False
+
+        recommended = self._normalize_string_list(repair_context.get("recommended_next_evidence", []))
+        normalized_exam_markers = (
+            "检查",
+            "结果",
+            "报告",
+            "化验",
+            "检测",
+            "ct",
+            "mri",
+            "影像",
+            "核酸",
+            "pcr",
+            "培养",
+            "病原",
+            "cd4",
+            "病毒载量",
+            "葡聚糖",
+        )
+
+        if any(
+            any(marker in self._normalize_match_text(item) for marker in normalized_exam_markers)
+            for item in recommended
+        ):
+            return True
+
+        return any(
+            max(
+                float(action.metadata.get("recommended_match_score", 0.0) or 0.0),
+                float(action.metadata.get("verifier_recommended_match_score", 0.0) or 0.0),
+                float(action.metadata.get("joint_recommended_match_score", 0.0) or 0.0),
+            )
+            >= 0.55
+            for action in exam_actions
+        )
+
+    # 根据当前状态判断是否需要在前几轮把诊断链路拉回 exam-context 入口。
+    def _should_trigger_early_exam_context_rescue(
+        self,
+        state: SessionState,
+        *,
+        turn_index: int,
+        top_hypothesis: HypothesisScore,
+        exam_driven_ratio: float,
+        repair_context: dict | None,
+        exam_actions: Sequence[MctsAction],
+    ) -> tuple[bool, str]:
+        config = self.deps.a3_routing_policy
+        repair_prefers_exam = self._repair_context_prefers_exam_evidence(repair_context, exam_actions)
+
+        if repair_prefers_exam:
+            return True, "repair_recommended_exam_evidence"
+
+        if turn_index > int(config.early_exam_context_turn_limit):
+            return False, "turn_limit_exceeded"
+
+        revealed_count = self._observed_present_clear_count(state)
+        if revealed_count >= int(config.early_exam_context_revealed_count_threshold):
+            return False, "enough_revealed_evidence"
+
+        anchor_tier = str(top_hypothesis.metadata.get("anchor_tier") or "")
+        if anchor_tier not in {"background_supported", "phenotype_supported", "speculative", ""}:
+            return False, "anchor_tier_already_specific"
+
+        if exam_driven_ratio < float(config.exam_context_rescue_high_cost_role_threshold):
+            return False, "exam_driven_ratio_below_threshold"
+
+        return True, "early_exam_context_exam_driven_case"
+
+    # 决定 early exam rescue 是否应该覆盖当前已选动作。
+    def _should_override_with_early_exam_context(
+        self,
+        selected_action: MctsAction | None,
+        *,
+        repair_prefers_exam: bool,
+    ) -> bool:
+        if selected_action is None:
+            return True
+
+        if selected_action.action_type in {"collect_general_exam_context", "collect_exam_context"}:
+            return False
+
+        if bool(selected_action.metadata.get("exam_context_followup", False)):
+            return False
+
+        if repair_prefers_exam:
+            return True
+
+        if selected_action.action_type in {"probe_feature", "collect_chief_complaint"}:
+            return True
+
+        if self._is_low_cost_observable_action(selected_action):
+            return True
+
+        action_role = self._evidence_role_for_action(selected_action)
+        return action_role in {"background_context", "phenotype_support", "risk_or_comorbidity"}
+
+    # 在前几轮证据揭示不足、且候选明显 exam-driven 时，主动把下一问切到检查入口。
+    def _maybe_choose_early_exam_context_rescue_action(
+        self,
+        session_id: str,
+        search_result: SearchResult,
+        selected_action: MctsAction | None,
+        *,
+        repair_context: dict | None,
+        turn_index: int,
+    ) -> MctsAction | None:
+        state = self.deps.state_tracker.get_session(session_id)
+        config = self.deps.a3_routing_policy
+
+        if not bool(config.enable_early_exam_context_rescue) or len(state.candidate_hypotheses) == 0:
+            return selected_action
+
+        ranked_hypotheses = sorted(state.candidate_hypotheses, key=lambda item: (-item.score, item.name))
+        current_hypothesis = ranked_hypotheses[0]
+
+        if isinstance(repair_context, dict) and len(repair_context) > 0:
+            repair_target = self._select_current_repair_hypothesis(state, repair_context)
+            if repair_target is not None:
+                current_hypothesis = repair_target
+
+        actions = self._build_verification_actions_for_hypothesis(
+            state,
+            current_hypothesis,
+            ranked_hypotheses=ranked_hypotheses[:3],
+        )
+        exam_actions = [
+            action
+            for action in actions
+            if action.action_type in {"collect_general_exam_context", "collect_exam_context"}
+            and self._selected_action_is_askable(session_id, action)
+        ]
+
+        if len(exam_actions) == 0:
+            return selected_action
+
+        exam_driven_ratio, exam_role_counts = self._estimate_exam_driven_signal_from_actions(actions)
+        should_trigger, reason = self._should_trigger_early_exam_context_rescue(
+            state,
+            turn_index=turn_index,
+            top_hypothesis=current_hypothesis,
+            exam_driven_ratio=exam_driven_ratio,
+            repair_context=repair_context,
+            exam_actions=exam_actions,
+        )
+
+        if not should_trigger:
+            return selected_action
+
+        repair_prefers_exam = self._repair_context_prefers_exam_evidence(repair_context, exam_actions)
+        if not self._should_override_with_early_exam_context(
+            selected_action,
+            repair_prefers_exam=repair_prefers_exam,
+        ):
+            search_result.metadata["early_exam_context_rescue_blocked_reason"] = "current_selected_action_already_specific_enough"
+            return selected_action
+
+        ranked_actions = sorted(
+            exam_actions,
+            key=lambda action: (
+                -(
+                    float(action.prior_score)
+                    + float(action.metadata.get("recommended_match_score", 0.0) or 0.0) * 2.8
+                    + float(action.metadata.get("verifier_recommended_match_score", 0.0) or 0.0) * 2.4
+                    + float(action.metadata.get("joint_recommended_match_score", 0.0) or 0.0) * 1.8
+                    + float(action.metadata.get("discriminative_gain", 0.0) or 0.0) * 0.9
+                    + float(action.metadata.get("answerability_score", 0.0) or 0.0) * 0.6
+                ),
+                action.target_node_name,
+            ),
+        )
+        best_action = ranked_actions[0]
+        best_action.metadata = {
+            **dict(best_action.metadata),
+            "selected_by_early_exam_context_rescue": True,
+            "early_exam_context_rescue_reason": reason,
+            "early_exam_context_rescue_exam_driven_ratio": round(exam_driven_ratio, 4),
+            "early_exam_context_rescue_role_counts": dict(exam_role_counts),
+        }
+        search_result.metadata["early_exam_context_rescue"] = {
+            "triggered": True,
+            "reason": reason,
+            "exam_driven_ratio": round(exam_driven_ratio, 4),
+            "role_counts": dict(exam_role_counts),
+            "from_hypothesis_id": current_hypothesis.node_id,
+            "from_hypothesis_name": current_hypothesis.name,
+            "selected_action": asdict(best_action),
+        }
+        self._record_selected_action_source(
+            search_result,
+            "early_exam_context_rescue",
+            priority_rank=3,
+            reason=reason,
+        )
+        return best_action
+
+    # repair action 仍可问时，不让 low-cost explorer 抢走这一轮；只有 repair 不可问时才允许 explorer 接管。
+    def _should_skip_low_cost_explorer_after_repair(
+        self,
+        session_id: str,
+        search_result: SearchResult,
+        selected_action: MctsAction | None,
+    ) -> tuple[bool, str]:
+        policy = self.deps.repair_policy
+        repair_action = search_result.repair_selected_action
+
+        if not bool(policy.protect_repair_action_from_low_cost_explorer) or repair_action is None:
+            return False, ""
+
+        if selected_action is None or selected_action.action_id != repair_action.action_id:
+            return False, ""
+
+        if self._selected_action_is_askable(session_id, repair_action):
+            return True, "repair_action_protected"
+
+        if bool(policy.allow_low_cost_explorer_after_repair_if_unaskable_only):
+            return False, "repair_action_unaskable"
+
+        return True, "repair_action_protection_without_unaskable_exception"
+
     # 在证据揭示不足时，主动从 top3 候选里找低成本且有区分度的问题。
     def _choose_low_cost_explorer_action(
         self,
@@ -3961,21 +4810,10 @@ class ConsultationBrain:
         ranked_hypotheses = sorted(state.candidate_hypotheses, key=lambda item: (-item.score, item.name))[:3]
 
         for hypothesis in ranked_hypotheses:
-            try:
-                rows = self.deps.retriever.retrieve_r2_expected_evidence(hypothesis, state, top_k=12)
-            except TypeError:
-                rows = self.deps.retriever.retrieve_r2_expected_evidence(hypothesis, state)
-            except Exception:
-                continue
-
-            alternatives = [item for item in ranked_hypotheses if item.node_id != hypothesis.node_id]
-            for action in self.deps.action_builder.build_verification_actions(
-                rows,
-                hypothesis_id=hypothesis.node_id,
-                topic_id=hypothesis.label,
-                competing_hypotheses=alternatives,
-                current_hypothesis=hypothesis,
-                session_state=state,
+            for action in self._build_verification_actions_for_hypothesis(
+                state,
+                hypothesis,
+                ranked_hypotheses=ranked_hypotheses,
             ):
                 if not self._is_low_cost_observable_action(action):
                     continue
@@ -4012,6 +4850,12 @@ class ConsultationBrain:
             "low_cost_explorer_score": round(best_score, 4),
         }
         search_result.metadata["low_cost_explorer_selected_action"] = asdict(best_action)
+        self._record_selected_action_source(
+            search_result,
+            "low_cost_explorer_action",
+            priority_rank=5,
+            reason="insufficient_revealed_observable_evidence",
+        )
         return best_action
 
     def _should_use_low_cost_explorer(self, state: SessionState, selected_action: MctsAction | None) -> bool:
@@ -4326,6 +5170,9 @@ def build_default_brain(
     llm_config = dict(config.get("llm", {}))
     a1_config = dict(config.get("a1", {}))
     a2_config = dict(config.get("a2", {}))
+    a3_config = dict(config.get("a3", {}))
+    rollout_config = dict(config.get("rollout_control", {}))
+    candidate_feedback_config = dict(config.get("candidate_feedback", {}))
     fallback_config = dict(config.get("fallback", {}))
     repair_config = dict(config.get("repair", {}))
     configured_retry_count = int(llm_config.get("structured_retry_count", 1))
@@ -4373,6 +5220,15 @@ def build_default_brain(
             llm_client,
             HypothesisManagerConfig(
                 expand_top_k_hypotheses=int(a2_config.get("expand_top_k_hypotheses", 3)),
+                enable_multi_hypothesis_feedback=bool(
+                    candidate_feedback_config.get("enable_multi_hypothesis_feedback", True)
+                ),
+                use_scope_weighted_feedback=bool(
+                    candidate_feedback_config.get("use_scope_weighted_feedback", True)
+                ),
+                max_related_hypotheses_per_evidence=int(
+                    candidate_feedback_config.get("max_related_hypotheses_per_evidence", 5)
+                ),
             ),
         ),
         action_builder=ActionBuilder(ActionBuilderConfig()),
@@ -4395,6 +5251,9 @@ def build_default_brain(
             SimulationConfig(
                 rollout_max_depth=int(search_config.get("max_depth", 6)),
                 rollout_discount=float(search_config.get("discount_factor", 0.9)),
+                enable_multi_branch_rollout=bool(rollout_config.get("enable_multi_branch_rollout", True)),
+                branch_budget_per_action=int(rollout_config.get("branch_budget_per_action", 2)),
+                enable_anti_collapse_penalty=bool(rollout_config.get("enable_anti_collapse_penalty", True)),
             )
         ),
         trajectory_evaluator=TrajectoryEvaluator(
@@ -4421,8 +5280,25 @@ def build_default_brain(
                 observed_final_scope_mismatch_block_threshold=float(
                     path_eval_config.get("observed_final_scope_mismatch_block_threshold", 0.28)
                 ),
+                enable_dynamic_group_weights=bool(path_eval_config.get("enable_dynamic_group_weights", True)),
+                enable_single_answer_group_cap=bool(
+                    path_eval_config.get("enable_single_answer_group_cap", True)
+                ),
+                low_anchor_single_group_score_cap=float(
+                    path_eval_config.get("low_anchor_single_group_score_cap", 0.62)
+                ),
+                enable_scope_penalty_in_final_score=bool(
+                    path_eval_config.get("enable_scope_penalty_in_final_score", True)
+                ),
             ),
             llm_client=llm_client,
+        ),
+        evidence_anchor_analyzer=EvidenceAnchorAnalyzer(
+            EvidenceAnchorConfig(
+                enable_scope_cluster_rerank=bool(a2_config.get("enable_scope_cluster_rerank", True)),
+                scope_cluster_exact_bonus=float(a2_config.get("scope_cluster_exact_bonus", 0.35)),
+                scope_cluster_generic_penalty=float(a2_config.get("scope_cluster_generic_penalty", 0.28)),
+            )
         ),
         llm_client=llm_client,
         repair_policy=RepairPolicyConfig(
@@ -4431,6 +5307,33 @@ def build_default_brain(
             ),
             enable_best_repair_action=bool(repair_config.get("enable_best_repair_action", True)),
             enable_tree_reroot=bool(repair_config.get("enable_tree_reroot", True)),
+            protect_repair_action_from_low_cost_explorer=bool(
+                repair_config.get("protect_repair_action_from_low_cost_explorer", True)
+            ),
+            allow_low_cost_explorer_after_repair_if_unaskable_only=bool(
+                repair_config.get("allow_low_cost_explorer_after_repair_if_unaskable_only", True)
+            ),
+            enable_missing_key_support_competition_escalation=bool(
+                repair_config.get("enable_missing_key_support_competition_escalation", True)
+            ),
+            missing_key_support_retry_threshold=int(
+                repair_config.get("missing_key_support_retry_threshold", 2)
+            ),
+            zero_anchor_current_answer_force_competition=bool(
+                repair_config.get("zero_anchor_current_answer_force_competition", True)
+            ),
+        ),
+        a3_routing_policy=A3RoutingPolicyConfig(
+            enable_early_exam_context_rescue=bool(
+                a3_config.get("enable_early_exam_context_rescue", True)
+            ),
+            early_exam_context_turn_limit=int(a3_config.get("early_exam_context_turn_limit", 2)),
+            early_exam_context_revealed_count_threshold=int(
+                a3_config.get("early_exam_context_revealed_count_threshold", 2)
+            ),
+            exam_context_rescue_high_cost_role_threshold=float(
+                a3_config.get("exam_context_rescue_high_cost_role_threshold", 0.45)
+            ),
         ),
     )
     return ConsultationBrain(deps)

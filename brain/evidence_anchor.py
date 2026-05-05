@@ -89,6 +89,9 @@ class EvidenceAnchorConfig:
     negative_anchor_penalty: float = 1.45
     background_attractor_penalty: float = 0.82
     scope_mismatch_penalty: float = 0.92
+    enable_scope_cluster_rerank: bool = True
+    scope_cluster_exact_bonus: float = 0.35
+    scope_cluster_generic_penalty: float = 0.28
     present_clear_confidence: float = 1.0
     present_hedged_confidence: float = 0.55
     absent_clear_confidence: float = 1.0
@@ -165,6 +168,7 @@ class EvidenceAnchorAnalyzer:
             enriched,
             key=lambda item: (
                 -self._anchor_tier_priority(str(item.metadata.get("anchor_tier") or "")),
+                -float(item.metadata.get("scope_cluster_bonus", 0.0)),
                 -float(item.metadata.get("exact_scope_anchor_score", 0.0)),
                 -float(item.metadata.get("family_scope_anchor_score", 0.0)),
                 -float(item.metadata.get("role_specificity_score", 0.0)),
@@ -447,6 +451,49 @@ class EvidenceAnchorAnalyzer:
             "generic_scope_penalty": round(generic_scope_penalty, 4),
             "scope_requirement_missing_score": round(scope_requirement_missing_score, 4),
             "scope_mismatch_reasons": list(scope_mismatch_reasons),
+        }
+
+    # 将 exact/family/generic 作用域再压成一个 cluster 奖惩，供 A2 和 final score 更早读取。
+    def _build_scope_cluster_adjustment(
+        self,
+        *,
+        exact_scope_total: float,
+        family_score: float,
+        provisional_total: float,
+        scope_profile: dict,
+    ) -> dict:
+        if not self.config.enable_scope_cluster_rerank:
+            return {"scope_cluster_level": "disabled", "scope_cluster_bonus": 0.0}
+
+        observed_scope_facets = set(str(item) for item in scope_profile.get("observed_scope_facets", []))
+        missing_scope_facets = list(scope_profile.get("missing_scope_facets", []))
+        generic_scope_penalty = float(scope_profile.get("generic_scope_penalty", 0.0) or 0.0)
+        scope_requirement_missing_score = float(scope_profile.get("scope_requirement_missing_score", 0.0) or 0.0)
+        has_specific_observed_scope = len(self._critical_scope_tokens(observed_scope_facets)) > 0
+        bonus = 0.0
+        level = "neutral"
+
+        if exact_scope_total > 0.0 and len(missing_scope_facets) == 0 and (has_specific_observed_scope or len(observed_scope_facets) > 0):
+            level = "exact"
+            bonus += self.config.scope_cluster_exact_bonus
+        elif family_score > 0.0 and len(observed_scope_facets) > 0:
+            level = "family"
+            bonus += self.config.scope_cluster_exact_bonus * 0.45
+        elif provisional_total > 0.0 and len(observed_scope_facets) > 0:
+            level = "provisional"
+            bonus += self.config.scope_cluster_exact_bonus * 0.2
+
+        if generic_scope_penalty > 0.0:
+            if level == "neutral":
+                level = "generic"
+            bonus -= self.config.scope_cluster_generic_penalty * min(generic_scope_penalty / 0.38, 1.0)
+
+        if scope_requirement_missing_score > 0.0:
+            bonus -= min(scope_requirement_missing_score * 0.35, self.config.scope_cluster_generic_penalty)
+
+        return {
+            "scope_cluster_level": level,
+            "scope_cluster_bonus": round(bonus, 4),
         }
 
     # 把疾病名和证据名里的部位、病程、病原精度等信息压成通用 scope token。
@@ -785,6 +832,12 @@ class EvidenceAnchorAnalyzer:
             has_observed_anchor=(exact_scope_total + family_score + provisional_score + phenotype_score) > 0.0,
         )
         scope_mismatch_score += float(scope_profile["scope_requirement_missing_score"])
+        scope_cluster = self._build_scope_cluster_adjustment(
+            exact_scope_total=exact_scope_total,
+            family_score=family_score,
+            provisional_total=provisional_total,
+            scope_profile=scope_profile,
+        )
 
         return {
             "observed_anchor_score": round(exact_scope_total + family_score + provisional_total, 4),
@@ -801,6 +854,8 @@ class EvidenceAnchorAnalyzer:
             "scope_specificity_score": round(float(scope_profile["scope_specificity_score"]), 4),
             "generic_scope_penalty": round(float(scope_profile["generic_scope_penalty"]), 4),
             "scope_requirement_missing_score": round(float(scope_profile["scope_requirement_missing_score"]), 4),
+            "scope_cluster_level": str(scope_cluster["scope_cluster_level"]),
+            "scope_cluster_bonus": round(float(scope_cluster["scope_cluster_bonus"]), 4),
             "candidate_scope_facets": scope_profile["candidate_scope_facets"],
             "observed_scope_facets": scope_profile["observed_scope_facets"],
             "missing_scope_facets": scope_profile["missing_scope_facets"],
@@ -844,6 +899,7 @@ class EvidenceAnchorAnalyzer:
             + float(summary.get("phenotype_support_score", 0.0)) * 0.35
             + float(summary.get("background_support_score", 0.0)) * self.config.background_support_bonus
             + float(summary.get("scope_specificity_score", 0.0)) * 0.42
+            + float(summary.get("scope_cluster_bonus", 0.0))
             - float(summary.get("anchor_negative_score", 0.0)) * self.config.negative_anchor_penalty
             - float(summary.get("background_attractor_score", 0.0)) * self.config.background_attractor_penalty
             - float(summary.get("scope_mismatch_score", 0.0)) * self.config.scope_mismatch_penalty
@@ -891,6 +947,8 @@ class EvidenceAnchorAnalyzer:
                     "scope_specificity_score": float(summary.get("scope_specificity_score", 0.0)),
                     "generic_scope_penalty": float(summary.get("generic_scope_penalty", 0.0)),
                     "scope_requirement_missing_score": float(summary.get("scope_requirement_missing_score", 0.0)),
+                    "scope_cluster_level": str(summary.get("scope_cluster_level") or "neutral"),
+                    "scope_cluster_bonus": float(summary.get("scope_cluster_bonus", 0.0)),
                     "candidate_scope_facets": summary.get("candidate_scope_facets", []),
                     "observed_scope_facets": summary.get("observed_scope_facets", []),
                     "missing_scope_facets": summary.get("missing_scope_facets", []),

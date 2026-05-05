@@ -325,6 +325,15 @@ def test_payload_to_replay_result_preserves_turn_timing_fields() -> None:
                 "turn_index": 1,
                 "revealed_slot_id": "slot1",
                 "stage": "A3",
+                "search_report": {
+                    "turn_index": 2,
+                    "search_metadata": {
+                        "selected_action_source": "repair_selected_action",
+                    },
+                },
+                "search_metadata": {
+                    "selected_action_source": "repair_selected_action",
+                },
                 "patient_answer_seconds": 1.23,
                 "brain_turn_seconds": 4.56,
                 "total_seconds": 5.79,
@@ -339,6 +348,8 @@ def test_payload_to_replay_result_preserves_turn_timing_fields() -> None:
     assert result.turns[0].patient_answer_seconds == 1.23
     assert result.turns[0].brain_turn_seconds == 4.56
     assert result.turns[0].total_seconds == 5.79
+    assert result.turns[0].search_report["turn_index"] == 2
+    assert result.turns[0].search_metadata["selected_action_source"] == "repair_selected_action"
 
 
 # 验证主流程会跳过已完成病例，并把新结果直接追加写入输出目录。

@@ -172,3 +172,71 @@ def test_hypothesis_manager_scores_unclear_and_absent_by_polarity() -> None:
 
     assert unclear_updated[0].score < hypotheses[0].score
     assert absent_updated[0].score < unclear_updated[0].score
+
+
+# 验证真实证据会同时反馈到多个共享该证据的候选，而不是只更新当前 hypothesis。
+def test_hypothesis_manager_fans_out_feedback_to_multiple_related_hypotheses() -> None:
+    manager = HypothesisManager()
+    hypotheses = [
+        HypothesisScore(
+            node_id="generic_pneumonia",
+            label="Disease",
+            name="原发性肺部感染",
+            score=1.0,
+            metadata={
+                "relation_types": ["HAS_LAB_FINDING"],
+                "evidence_node_ids": ["lab_bdg"],
+                "anchor_tier": "background_supported",
+                "observed_anchor_score": 0.0,
+            },
+        ),
+        HypothesisScore(
+            node_id="pcp",
+            label="Disease",
+            name="肺孢子菌肺炎 (PCP)",
+            score=0.88,
+            metadata={
+                "relation_types": ["HAS_LAB_FINDING"],
+                "evidence_node_ids": ["lab_bdg"],
+                "anchor_tier": "strong_anchor",
+                "observed_anchor_score": 0.72,
+                "exact_scope_anchor_score": 0.68,
+            },
+        ),
+        HypothesisScore(
+            node_id="obesity",
+            label="Disease",
+            name="肥胖",
+            score=0.76,
+            metadata={
+                "relation_types": ["REQUIRES_DETAIL"],
+                "evidence_node_ids": ["bmi_high"],
+            },
+        ),
+    ]
+    evidence_state = EvidenceState(
+        node_id="lab_bdg",
+        polarity="present",
+        existence="exist",
+        resolution="clear",
+        metadata={"relation_type": "HAS_LAB_FINDING", "target_node_name": "β-D 葡聚糖升高"},
+    )
+
+    feedback_weights = manager.resolve_evidence_feedback_weights(
+        hypotheses,
+        evidence_state,
+        related_hypothesis_ids=["generic_pneumonia"],
+    )
+    updated = manager.apply_evidence_feedback(
+        hypotheses,
+        evidence_state,
+        ["generic_pneumonia"],
+        feedback_weights=feedback_weights,
+    )
+    by_id = {item.node_id: item for item in updated}
+
+    assert set(feedback_weights) == {"generic_pneumonia", "pcp"}
+    assert feedback_weights["pcp"] > feedback_weights["generic_pneumonia"]
+    assert by_id["generic_pneumonia"].score > 1.0
+    assert by_id["pcp"].score > 0.88
+    assert by_id["obesity"].score == 0.76

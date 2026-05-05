@@ -10,6 +10,256 @@
 - `phase2_execution_checklist.md` 更偏“路线设计与待办清单”
 - 本文更偏“已经发生过哪些阶段性变化、分别解决了什么问题”
 
+## 近期更新：2026-05-04 补第一批 replay 复盘，并落地第二批 P3 + P6（多候选反馈 + competition repair）
+
+### 本次目标
+
+- 把第一批 `error_focus_smoke95` replay 的真实结果补回执行清单
+- 补齐 replay turn 级 `search_report / search_metadata` 落盘，解除内部观测指标无法离线统计的问题
+- 按执行清单严格落地第二批：
+  - `P3`：证据反馈不再只作用当前 hypothesis
+  - `P6`：`missing_key_support` 升级为 competition repair
+
+### 本次改动
+
+- [docs/diagnosis_algorithm_batch_execution_checklist.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_algorithm_batch_execution_checklist.md)
+  - 补入第一批实际 replay 结果：
+    - `top3_hypothesis_hit: 24 -> 37`
+    - `top1_final_answer_hit: 10 -> 12`
+    - `average_revealed_slots: 0.79 -> 1.42`
+    - `completed: 7 -> 21`
+    - `failed::llm_stage_failed: 29 -> 0`
+  - 同步记录当前新瓶颈：
+    - `true_candidate_missing: 28 -> 30`
+    - `true_candidate_but_final_wrong: 19 -> 29`
+    - `wrong_accepted_count: 4 -> 15`
+  - 增补内部观测说明：
+    - 历史 replay turn 未真正落 `search_report / search_metadata`
+    - 本轮已补落盘，后续 replay 可以离线统计内部指标
+- [simulator/replay_engine.py](/Users/loki/Workspace/GraduationDesign/simulator/replay_engine.py)
+  - `ReplayTurn` 新增：
+    - `search_report`
+    - `search_metadata`
+  - 每轮患者回答后的 brain 输出现在会按 turn 落盘 `search_report/search_metadata`
+- [scripts/run_batch_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_batch_replay.py)
+  - `_payload_to_replay_result()` 同步恢复新的 turn 级回放字段
+- [brain/hypothesis_manager.py](/Users/loki/Workspace/GraduationDesign/brain/hypothesis_manager.py)
+  - `HypothesisManagerConfig` 新增第二批开关：
+    - `enable_multi_hypothesis_feedback`
+    - `use_scope_weighted_feedback`
+    - `max_related_hypotheses_per_evidence`
+  - `build_hypothesis_scores()` 会保留 `evidence_node_ids`
+  - `apply_evidence_feedback()` 新增 `feedback_weights` 支持
+  - 新增多候选 fan-out 权重解析逻辑：
+    - 结合 `evidence_node_ids / evidence_names / relation_types`
+    - 再结合 `observed_anchor_score / exact_scope_anchor_score / family_scope_anchor_score / anchor_tier`
+- [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - 新增 turn 级 evidence feedback 观测：
+    - `turn_evidence_feedback`
+    - `multi_hypothesis_feedback_hit_count`
+    - `multi_hypothesis_feedback_hit_rate`
+  - 真实 pending-action 反馈、exam-context 反馈、generic exam link 反馈统一切到多候选 fan-out 更新
+  - `RepairPolicyConfig` 新增第二批开关：
+    - `enable_missing_key_support_competition_escalation`
+    - `missing_key_support_retry_threshold`
+    - `zero_anchor_current_answer_force_competition`
+  - `missing_key_support` 新增升级逻辑：
+    - 当前答案 `observed_anchor_score = 0`
+    - 或同一答案连续达到 `missing_key_support_retry_threshold`
+    - 或 verifier 推荐证据明显偏高成本，且备选已有更强真实锚点
+    - 满足条件时切到 `force_competition_repair`
+- [brain/simulation_engine.py](/Users/loki/Workspace/GraduationDesign/brain/simulation_engine.py)
+  - rollout 内部模拟证据反馈也复用多候选 fan-out 逻辑
+- [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml)
+  - 新增 `candidate_feedback:` 默认配置
+  - 新增第二批 repair escalation 默认配置
+- [tests/test_hypothesis_manager.py](/Users/loki/Workspace/GraduationDesign/tests/test_hypothesis_manager.py)
+- [tests/test_simulation_engine.py](/Users/loki/Workspace/GraduationDesign/tests/test_simulation_engine.py)
+- [tests/test_service_repair_flow.py](/Users/loki/Workspace/GraduationDesign/tests/test_service_repair_flow.py)
+- [tests/test_replay_engine.py](/Users/loki/Workspace/GraduationDesign/tests/test_replay_engine.py)
+- [tests/test_run_batch_replay.py](/Users/loki/Workspace/GraduationDesign/tests/test_run_batch_replay.py)
+- [tests/test_service_config.py](/Users/loki/Workspace/GraduationDesign/tests/test_service_config.py)
+  - 补齐第二批 fan-out、competition repair、replay 落盘与配置映射回归测试
+- [README.md](/Users/loki/Workspace/GraduationDesign/README.md)
+- [brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
+  - 同步说明第二批改造与 replay 元数据能力
+
+### 预期影响
+
+- 优先改善：
+  - `true_candidate_missing`
+  - `top3_hypothesis_hit`
+- 次要改善：
+  - 一部分 `true_candidate_but_final_wrong`
+- 同时让后续 replay 可以直接离线统计：
+  - `early_exam_context_trigger_rate`
+  - `repair_action_override_rate`
+  - `multi_hypothesis_feedback_hit_rate`
+
+### 验证结果
+
+- 已执行：
+
+```bash
+conda run -n GraduationDesign python -m pytest tests/test_hypothesis_manager.py tests/test_simulation_engine.py tests/test_service_repair_flow.py tests/test_replay_engine.py tests/test_run_batch_replay.py tests/test_service_config.py -q
+conda run -n GraduationDesign python -m pytest -q
+```
+
+- 结果：
+  - `50 passed`
+  - `233 passed`
+
+## 近期更新：2026-05-04 落地第一批 P1 + P2（repair 保护 + early exam-context rescue）
+
+### 本次目标
+
+- 落地诊断算法三批清单中的第一批改动
+- 修正 `repair_selected_action` 会被 low-cost explorer 抢走的问题
+- 在前几轮且候选明显 exam-driven 时，优先把下一问拉回 `exam_context`
+
+### 本次改动
+
+- [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - 新增 `RepairPolicyConfig` 开关：
+    - `protect_repair_action_from_low_cost_explorer`
+    - `allow_low_cost_explorer_after_repair_if_unaskable_only`
+  - 新增 `A3RoutingPolicyConfig`：
+    - `enable_early_exam_context_rescue`
+    - `early_exam_context_turn_limit`
+    - `early_exam_context_revealed_count_threshold`
+    - `exam_context_rescue_high_cost_role_threshold`
+  - `process_turn()` 中增加动作来源记录：
+    - `selected_action_source`
+    - `selected_action_source_priority_rank`
+    - `selected_action_source_reason`
+  - verifier repair 后，若 repair 动作仍可问，则跳过 low-cost explorer，不再允许 explorer 覆盖
+  - 新增 early exam rescue：
+    - 前 2 轮、真实揭示证据少、top hypothesis 仍停留在 `background_supported / phenotype_supported / speculative`
+    - 且候选动作明显以 `lab / imaging / pathogen` 高价值证据为主时
+    - 优先选择 `collect_general_exam_context`
+    - `general` 已问过后，优先选择 `collect_exam_context`
+- [brain/action_builder.py](/Users/loki/Workspace/GraduationDesign/brain/action_builder.py)
+  - 为 exam-context 动作新增 metadata：
+    - `exam_context_entry_kind`
+    - `exam_context_priority_reason`
+    - `exam_context_rescue_candidate`
+- [brain/report_builder.py](/Users/loki/Workspace/GraduationDesign/brain/report_builder.py)
+  - `build_search_report()` 与 `build_final_reasoning_report()` 新增 `search_metadata`
+- [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml)
+  - 新增第一批相关默认开关
+- [tests/test_service_low_cost_explorer_priority.py](/Users/loki/Workspace/GraduationDesign/tests/test_service_low_cost_explorer_priority.py)
+  - 新增第一批仲裁与 rescue 单测
+- [tests/test_action_builder.py](/Users/loki/Workspace/GraduationDesign/tests/test_action_builder.py)
+- [tests/test_service_config.py](/Users/loki/Workspace/GraduationDesign/tests/test_service_config.py)
+  - 补充第一批 metadata / 配置覆盖测试
+- [README.md](/Users/loki/Workspace/GraduationDesign/README.md)
+- [brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
+  - 同步说明第一批新增开关与动作仲裁行为
+
+### 预期影响
+
+- 优先改善：
+  - `top3_hypothesis_hit`
+  - `average_revealed_slots`
+- 直接减少：
+  - repair 推荐高价值检查证据却被 low-cost explorer 抢走的情况
+  - exam-driven 病例前几轮一直围绕泛症状打转的情况
+
+### 验证结果
+
+- 已执行：
+
+```bash
+conda run -n GraduationDesign python -m pytest tests/test_service_low_cost_explorer_priority.py tests/test_service_repair_flow.py tests/test_exam_context_flow.py tests/test_action_builder.py -q
+conda run -n GraduationDesign python -m pytest tests/test_service_stop_flow.py tests/test_report_builder.py tests/test_service_config.py -q
+conda run -n GraduationDesign python -m pytest -q
+```
+
+- 结果：
+  - `37 passed`
+  - `16 passed`
+  - `228 passed`
+
+### 补充修复：2026-05-04 修正 batch replay 启动期 `a3_config` NameError
+
+- 触发背景：
+  - 第一批改动后，重新运行 `error_focus_smoke95` 时，95 个病例全部在 `turn_count=0` 直接失败
+  - `run.log` / `non_completed_cases.json` 统一报错：
+    - `error_code=unexpected_runtime_error`
+    - `error_stage=batch_runner`
+    - `message=NameError: name 'a3_config' is not defined`
+- 根因：
+  - [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py) 的 `build_default_brain()` 末尾已经开始读取 `a3.enable_early_exam_context_rescue` 等新配置
+  - 但函数开头漏了 `a3_config = dict(config.get("a3", {}))`
+  - 导致每个 worker 在构造默认 brain 时就直接抛 `NameError`，病例还没真正进入 opening / turn1
+- 修复：
+  - 在 `build_default_brain()` 中补回 `a3_config = dict(config.get("a3", {}))`
+  - 在 [tests/test_service_config.py](/Users/loki/Workspace/GraduationDesign/tests/test_service_config.py) 新增默认构造回归测试，显式验证 `a3 / repair` 新配置会被真正映射到运行期 policy
+- 验证：
+
+```bash
+conda run -n GraduationDesign python -m pytest -q
+```
+
+- 结果：
+  - `228 passed`
+
+## 近期更新：2026-05-04 新增诊断算法三批落地执行清单
+
+### 本次目标
+
+- 把当前围绕 `top3_hypothesis_hit / top1_final_answer_hit` 的算法改造方向落成一份可直接执行的开发清单
+- 明确当前基线指标、三批推进顺序、每批的修改点、验收方式和预期改善指标
+- 将新清单接入仓库级入口文档，便于后续直接按批次推进
+
+### 本次改动
+
+- 新增：
+  - [docs/diagnosis_algorithm_batch_execution_checklist.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_algorithm_batch_execution_checklist.md)
+- 更新：
+  - [docs/phase2_execution_checklist.md](/Users/loki/Workspace/GraduationDesign/docs/phase2_execution_checklist.md)
+  - [README.md](/Users/loki/Workspace/GraduationDesign/README.md)
+  - [brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
+
+### 具体内容
+
+- 新清单文档在开头明确记录当前算法基线：
+  - `top3_hypothesis_hit = 24/95 = 25.3%`
+  - `top1_final_answer_hit = 10/95 = 10.5%`
+  - `average_revealed_slots = 0.79`
+  - `true_candidate_missing = 28`
+  - `true_candidate_but_final_wrong = 19`
+- 将当前改造路线按三批拆分：
+  - 第一批：`P1 + P2`
+    - repair 不再被 explorer 覆盖
+    - 早期 `exam-context rescue`
+  - 第二批：`P3 + P6`
+    - 证据反馈不再只作用当前 hypothesis
+    - `missing_key_support` 升级为 competition repair
+  - 第三批：`P4 + P5 + P7`
+    - 多分支 rollout / 防塌缩
+    - final score 重平衡
+    - scope-aware rerank 前移
+- 对每一批都补充：
+  - 重点修改文件与函数
+  - 建议新增配置开关
+  - 建议补充的测试与 replay
+  - 预计优先改善的指标
+- 在 `README.md`、`brain/README.md` 和 `phase2_execution_checklist.md` 中新增入口，方便后续从仓库主文档直接跳转到该清单
+
+### 验证结果
+
+- 已执行：
+
+```bash
+rg -n "diagnosis_algorithm_batch_execution_checklist|top3_hypothesis_hit|top1_final_answer_hit" README.md brain/README.md docs/phase2_execution_checklist.md docs/diagnosis_algorithm_batch_execution_checklist.md
+```
+
+- 结果：
+  - 新清单文档已入库
+  - README、brain README 与 phase2 执行清单已挂接新入口
+  - 本次为文档与开发清单更新，未运行 Python 单元测试
+
 ## 近期更新：2026-05-03 为 evidence anchor 常量补充中文注释约定
 
 ### 本次目标
@@ -4204,3 +4454,243 @@ conda run -n GraduationDesign python -m py_compile scripts/run_batch_replay.py b
 - 结果：
   - `17 passed`
   - `py_compile` 通过
+
+## 四十八、2026-05-05：第三批落地 rollout 防塌缩、final score 重平衡与 scope cluster rerank 前移
+
+### 本次目标
+
+- 落地执行清单第三批 `P4 + P5 + P7`
+- 让同一个 child action 不再只复制单条最乐观 rollout
+- 降低“单答案且低真实锚点”时 consistency/diversity 对 top1 的误导
+- 把 scope / granularity 信息从 acceptance guard 前移到 A2 rerank 与 final score
+
+### 本次实现
+
+- 更新：
+  - [brain/simulation_engine.py](/Users/loki/Workspace/GraduationDesign/brain/simulation_engine.py)
+  - [brain/trajectory_evaluator.py](/Users/loki/Workspace/GraduationDesign/brain/trajectory_evaluator.py)
+  - [brain/evidence_anchor.py](/Users/loki/Workspace/GraduationDesign/brain/evidence_anchor.py)
+  - [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml)
+  - [docs/diagnosis_algorithm_batch_execution_checklist.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_algorithm_batch_execution_checklist.md)
+  - [tests/test_simulation_engine.py](/Users/loki/Workspace/GraduationDesign/tests/test_simulation_engine.py)
+  - [tests/test_trajectory_evaluator.py](/Users/loki/Workspace/GraduationDesign/tests/test_trajectory_evaluator.py)
+  - [tests/test_evidence_anchor.py](/Users/loki/Workspace/GraduationDesign/tests/test_evidence_anchor.py)
+  - [tests/test_service_config.py](/Users/loki/Workspace/GraduationDesign/tests/test_service_config.py)
+  - [README.md](/Users/loki/Workspace/GraduationDesign/README.md)
+  - [brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
+
+### 具体改动
+
+- `SimulationEngine` 新增第三批 rollout 控制开关：
+  - `enable_multi_branch_rollout`
+  - `branch_budget_per_action`
+  - `enable_anti_collapse_penalty`
+- `run_reasoning_search()` 现在会对同一个 child action 生成多条 branch-seeded trajectory，而不是固定只保留一条最乐观路径
+- `search_metadata` 新增：
+  - `rollout_trajectory_count`
+  - `answer_group_count`
+  - `single_answer_group`
+  - `rollout_branch_seed_counts`
+- `TrajectoryEvaluator` 新增第三批 final score 控制：
+  - 动态 group weights
+  - `single_answer_group_score_cap`
+  - `candidate_rank_prior`
+  - `final_scope_penalty`
+- `EvidenceAnchorAnalyzer` 新增 `scope_cluster_bonus / scope_cluster_level`，并把它前移到 A2 observed-anchor rerank
+- `build_default_brain()` 与 `configs/brain.yaml` 新增第三批配置映射：
+  - `rollout_control.*`
+  - `path_evaluation.enable_dynamic_group_weights`
+  - `path_evaluation.enable_single_answer_group_cap`
+  - `path_evaluation.low_anchor_single_group_score_cap`
+  - `path_evaluation.enable_scope_penalty_in_final_score`
+  - `a2.enable_scope_cluster_rerank`
+  - `a2.scope_cluster_exact_bonus`
+  - `a2.scope_cluster_generic_penalty`
+- 执行清单补入第二批 replay 实测结果，为是否进入第三批提供了明确归因
+
+### 验证
+
+- 执行：
+
+```bash
+conda run -n GraduationDesign python -m pytest tests/test_simulation_engine.py tests/test_trajectory_evaluator.py tests/test_evidence_anchor.py tests/test_service_config.py -q
+conda run -n GraduationDesign python -m pytest -q
+python -m py_compile brain/simulation_engine.py brain/trajectory_evaluator.py brain/evidence_anchor.py brain/service.py
+```
+
+- 结果：
+  - 聚焦测试 `31 passed`
+  - 全量测试 `236 passed`
+  - `py_compile` 通过
+
+## 四十九、2026-05-05：记录第三批 replay 结果，并补充第三批后的 ablation 方案
+
+### 本次目标
+
+- 把第三批 `error_focus_smoke95` replay 的真实结果固定记录到执行清单中
+- 根据第三批结果，补一组可直接执行的 ablation 方案，拆分 `P4 / P5 / P7` 的实际贡献
+
+### 本次更新
+
+- 更新：
+  - [docs/diagnosis_algorithm_batch_execution_checklist.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_algorithm_batch_execution_checklist.md)
+
+### 记录的第三批 replay 结果
+
+- 结果目录：
+  - [error_focus_smoke95_qwen35_batch1_p4p5p7](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_replay/error_focus_smoke95_qwen35_batch1_p4p5p7)
+- 相比第二批：
+  - `top1_final_answer_hit`: `13/95` -> `12/95`
+  - `top3_hypothesis_hit`: `40/95` -> `37/95`
+  - `hypothesis_hit`: `58/95` -> `59/95`
+  - `average_revealed_slots`: `1.48` -> `1.45`
+  - `wrong_accepted_count`: `13` -> `12`
+  - `true_candidate_missing`: `31` -> `29`
+  - `true_candidate_but_final_wrong`: `29` -> `31`
+
+### 本次结论
+
+- 第三批的内部行为是生效的：
+  - `single_answer_group_rate` 已降到 `3.68%`
+  - `rollout_branch_seed_counts` 已显示正反两类 seed 都在真实产物里稳定出现
+- 但第三批没有带来主指标净提升：
+  - `top1_final_answer_hit` 与 `top3_hypothesis_hit` 都小幅回退
+- 当前更像是把一部分问题从“真病没进候选”转成了“真病进入同家族竞争，但最终排到错误 sibling / generic disease”
+- 因此下一步不宜继续在 `P4 + P5 + P7` 全开状态上叠新逻辑，而应先做 ablation
+
+### 新增的 ablation 方案
+
+- `batch2 + P4 only`
+  - 用于判断多分支 rollout / 防塌缩本身是否有正收益
+- `batch2 + P4 + P5`
+  - 用于判断 final score 重平衡是否主要改善 accepted 质量
+- `batch2 + P7 only`
+  - 用于判断当前 scope-aware rerank 是否是第三批回退的主要来源
+
+### 下一步建议
+
+- 建议按以下顺序执行：
+  1. `batch2 + P4 only`
+  2. `batch2 + P4 + P5`
+  3. `batch2 + P7 only`
+
+## 五十、2026-05-05：将默认 brain 配置切到 `batch2 + P4 only`
+
+### 本次目标
+
+- 为下一轮 ablation replay 直接切换默认配置
+- 保留 `P4`，关闭 `P5` 与 `P7`
+
+### 本次更新
+
+- 更新：
+  - [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml)
+
+### 具体改动
+
+- 保留：
+  - `rollout_control.enable_multi_branch_rollout = true`
+  - `rollout_control.branch_budget_per_action = 2`
+  - `rollout_control.enable_anti_collapse_penalty = true`
+- 关闭：
+  - `path_evaluation.enable_dynamic_group_weights = false`
+  - `path_evaluation.enable_single_answer_group_cap = false`
+  - `path_evaluation.enable_scope_penalty_in_final_score = false`
+  - `a2.enable_scope_cluster_rerank = false`
+
+### 说明
+
+- 当前这份默认配置是为了直接运行 `batch2 + P4 only`
+- 后续如果要继续跑：
+  - `batch2 + P4 + P5`
+  - `batch2 + P7 only`
+  需要再按 ablation 方案切换对应开关
+
+## 五十一、2026-05-05：记录 `batch2 + P4 only` 结果，并将默认配置切到 `batch2 + P4 + P5`
+
+### 本次目标
+
+- 记录 `P4 only` ablation replay 的真实结果
+- 基于结果判断是否保留 `P4`
+- 将默认配置切换到下一轮 `batch2 + P4 + P5`
+
+### 本次更新
+
+- 更新：
+  - [docs/diagnosis_algorithm_batch_execution_checklist.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_algorithm_batch_execution_checklist.md)
+  - [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml)
+
+### 记录的 `P4 only` replay 结果
+
+- 结果目录：
+  - [error_focus_smoke95_qwen35_batch1_p4only](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_replay/error_focus_smoke95_qwen35_batch1_p4only)
+- 相比第二批：
+  - `top1_final_answer_hit`: `13/95` -> `12/95`
+  - `top3_hypothesis_hit`: `40/95` -> `39/95`
+  - `hypothesis_hit`: `58/95` -> `60/95`
+  - `completed`: `19` -> `23`
+  - `true_candidate_missing`: `31` -> `28`
+  - `true_candidate_but_final_wrong`: `29` -> `32`
+  - `wrong_accepted_count`: `13` -> `16`
+
+### 本次结论
+
+- `P4` 本身是有效的：
+  - 多分支 rollout 已稳定生效
+  - 真病进入候选池的能力有所增强
+- 但 `P4` 单独使用还不够：
+  - 没有把 `top1_final_answer_hit` 拉起来
+  - 还放大了 `true_candidate_but_final_wrong` 与 `wrong_accepted_count`
+- 因此最合理的下一步是：
+  - 保留 `P4`
+  - 打开 `P5`
+  - 继续关闭 `P7`
+
+### 本次配置切换
+
+- 当前默认配置已切到 `batch2 + P4 + P5`
+- 具体为：
+  - 保留 `rollout_control.*`
+  - 打开 `path_evaluation.enable_dynamic_group_weights = true`
+  - 打开 `path_evaluation.enable_single_answer_group_cap = true`
+  - 继续关闭 `path_evaluation.enable_scope_penalty_in_final_score = false`
+  - 继续关闭 `a2.enable_scope_cluster_rerank = false`
+
+## 五十二、2026-05-05：修复问句模板错位，并将默认配置切到 `P4 + P5 + P7`
+
+### 本次目标
+
+- 修复 replay 中“检查模态提示和目标证据语义不匹配”的问句模板浪费 turn 问题
+- 打开 `P7` 相关配置，便于继续观察 scope-aware rerank 的真实收益
+
+### 本次更新
+
+- 更新：
+  - [brain/action_builder.py](/Users/loki/Workspace/GraduationDesign/brain/action_builder.py)
+  - [tests/test_action_builder.py](/Users/loki/Workspace/GraduationDesign/tests/test_action_builder.py)
+  - [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml)
+  - [brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
+
+### 具体改动
+
+- 为 `ActionBuilder` 增加 `question_type_hint` 纠偏：
+  - 会按 `label + acquisition_mode` 强制归一成 `lab / imaging / pathogen / risk / detail / symptom`
+  - 避免高成本化验、影像、病原节点被上游脏 metadata 误导成普通症状问法
+- 重写通用检查模板分流：
+  - `imaging` 不再一律问“胸片或 CT”，而是按眼底 / 头颅 / 胸部 / 腹盆腔分流
+  - `pathogen` 不再一律问“痰检、核酸/PCR 或支气管镜取样”，而是按 HIV 抽血检查 / 脑脊液 / 皮损分泌物 / 呼吸道样本分流
+  - `lab` 对 HIV 相关抽血检查与脑脊液类化验增加更贴切的默认问法
+- 增加回归测试覆盖：
+  - 眼底类影像不再落入胸片/胸部 CT 模板
+  - HIV 相关目标不再落入痰检/支气管镜模板
+  - `question_type_hint` 会按标签与获取方式自动纠偏
+- 默认配置切换为：
+  - 打开 `path_evaluation.enable_scope_penalty_in_final_score = true`
+  - 打开 `a2.enable_scope_cluster_rerank = true`
+
+### 预期收益
+
+- 减少 8 轮预算里被明显错误问句直接浪费的 turn
+- 提高 repair / verifier 推荐证据真正被患者回答命中的概率
+- 为后续继续观察 `top1_final_answer_hit` 与 `scope` 相关错配问题提供更干净的输入

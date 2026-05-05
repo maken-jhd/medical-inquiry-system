@@ -145,9 +145,15 @@
   - `process_turn()` 当前已按“统一解释本轮回答 -> 消化上一轮 pending action -> 判断本轮阶段 -> search / verifier / repair -> 输出下一问或最终报告”的顺序补充分段中文注释，便于顺着源码阅读控制流。
   - 当前会先把可信实体链接回填到 `mention.node_id / normalized_name`，再派生 `PatientContext` 和 `A1`，保证 opening 证据、slot 更新、R1 和 mention_context 使用同一图谱锚点。
   - 当前会把 `exam_context` 回答中的检查名与结果原文再次送入实体链接；可信命中 `LabFinding / ImagingFinding / Pathogen` 时直接写入 slot/evidence_state，且不再围绕 `__exam_context__::general` 重复追问。
+  - 当前第一批改造已落地两条动作仲裁规则：repair 动作在仍可问时不会再被 low-cost explorer 覆盖；前 2 轮且候选明显 exam-driven 时，会优先拉起 `collect_general_exam_context / collect_exam_context` 入口。
   - 当前病原体阳性、影像/化验阳性、CD4 低值等强证据进入后，会设置 `force_a2_refresh` 和 `force_tree_refresh`，促使下一步重新执行 A2 并围绕新强证据收束。
   - 当前会在 A2、repair、stop 前刷新 `observed_anchor_index`，让真实病原体/检查强锚点、同族锚点和背景证据分别进入候选排序；rollout 模拟阳性只保留为路径推演，不再污染真实 confirmed evidence。
+  - 当前第三批改造已把 `scope cluster rerank` 前移到 A2 observed-anchor rerank：`exact_scope / family_scope / generic` 会通过 `scope_cluster_bonus` 更早影响候选顺位，不再主要依赖 acceptance guard 兜底。
   - 当前在证据揭示不足或 top 候选只靠背景支持时，会启用 low-cost explorer，从 top3 候选的 R2 中主动选择患者可直接回答、非背景且有区分度的问题。
+  - 当前 `search_report` / `final_reasoning_report` 会额外输出 `search_metadata`，可直接复盘 `selected_action_source`、early exam rescue 与 repair-explorer 仲裁结果。
+  - 当前第二批改造已把真实证据反馈、`exam_context` 反馈与 rollout 模拟反馈统一切到多 `hypothesis` fan-out 更新，并把 turn 级反馈摘要写入 `search_metadata.turn_evidence_feedback`。
+  - 当前第三批改造已把 `rollout_trajectory_count / answer_group_count / single_answer_group / rollout_branch_seed_counts` 写入 `search_metadata`，便于离线观察是否仍存在单答案塌缩。
+  - 当前 `missing_key_support` 在“当前答案零真实锚点 / 连续缺支持 / verifier 推荐高成本补缺但备选已有更强 observed anchor”时，会升级为 competition repair，而不是继续围绕当前错答案自修补。
   - 当前 repair/action 从“追当前 top hypothesis”转为“补缺失证据角色”：背景证据支撑不足时优先寻找 `disease_specific_anchor / definition_anchor`，已有 `family_anchor / provisional_anchor` 时优先补 clear confirmation，存在更强 anchored alternative 时直接切向该候选。
   - 当前会持久化 `repair_feedback_counts`：同一答案连续因为缺少关键支持、缺少真实 anchor 或轨迹不足被拒停时，后续 hypothesis 排序会逐轮增加降权；已有 observed anchor 的备选会获得更明确的 repair 抬分。
   - 当前 verifier / repair 的主控制原因已收敛到 `missing_required_anchor / anchored_alternative_exists / hard_negative_key_evidence`；`strong_unresolved_alternative_candidates` 等细粒度原因继续保存在 metadata 中供复盘和消融使用。
@@ -184,6 +190,7 @@
   - 负责整理由图谱检索得到的候选疾病，并维护主假设与备选假设。
   - 当前已能结合患者上下文和证据类型做轻量重排。
   - 若启用 LLM 排序，还会把 `supporting_features / conflicting_features / recommended_next_evidence` 写入 metadata。
+  - 当前会按 `evidence_node_ids / evidence_names / relation_types + observed anchor tier` 计算多候选反馈权重，不再只更新当前动作所属的单个 hypothesis。
   - 当前 repair 重排主要消费打薄后的 anchor-controlled 拒停原因，对缺少真实锚点、anchored alternative、硬反证和关键支持缺失分别施加不同分数调整。
 
 - [action_builder.py](/Users/loki/Workspace/GraduationDesign/brain/action_builder.py)
@@ -191,6 +198,7 @@
   - 负责把图谱返回的验证证据转成“下一步可执行动作”。
   - 当前已支持结合 competing hypotheses 估计 `discriminative_gain`。
   - 当前也会消费 `recommended_next_evidence`，让动作更贴近鉴别诊断。
+  - 当前问句模板会按标签、`acquisition_mode` 与证据语义纠偏：眼底/头颅/胸部影像、HIV 相关抽血检查、呼吸道病原检查不再共用一刀切模板。
   - 当前高成本检查聚合成 `collect_general_exam_context` 时，也会把推荐证据命中分、区分度和新颖度提到动作顶层，保证 repair scorer 真正读到 verifier 推荐缺口。
   - 当前检查上下文已经带状态门控：`general` 已回答后不再生成 `collect_general_exam_context`，具体 `lab / imaging / pathogen` 已明确未做时会跳过对应高成本结果追问。
 
@@ -209,6 +217,8 @@
   - 负责对候选动作做浅层局部预演。
   - 当前会估算 `positive / negative / doubtful` 三种回答分支的收益。
   - 当前已支持从树节点出发做浅层多步 rollout。
+  - rollout 内部的模拟证据反馈现在也复用多候选 fan-out 规则，避免路径评估只围绕当前 hypothesis 单点自嗨。
+  - 当前第三批已支持 `multi-branch rollout`：同一个 child action 至少保留 `positive + negative/doubtful` 两类 seed，并在低真实锚点但正向分支垄断时施加 `anti_collapse_penalty`。
 
 - [trajectory_evaluator.py](/Users/loki/Workspace/GraduationDesign/brain/trajectory_evaluator.py)
   - 对齐论文最后的轨迹聚合器。
@@ -219,6 +229,8 @@
   - 当前 `trajectory_agent_verifier` 会显式区分 `observed_session_evidence` 与 `simulated_trajectory_evidence`；若接受理由只依赖 rollout 模拟阳性强证据、真实会话没有当前答案的特异支持，会被二次 guard 改为 `missing_key_support` 拒停。
   - 当前 LLM verifier 接受后还会经过 deterministic scope guard；若答案粒度与真实证据作用域不一致，会改为 `strong_alternative_not_ruled_out` 并把缺失作用域写入推荐补证据。
   - 当前 trajectory 聚合会读取 `observed_anchor_index`，把 exact/family observed anchor 转成 `observed_anchor_agent_bonus`，并对“只有 rollout 模拟关键阳性、没有真实 anchor”的答案施加 `simulated_key_evidence_penalty`。
+  - 当前第三批已支持动态 final score 权重：单答案且低真实锚点时，会下调 `consistency / diversity`、提高 `agent_evaluation` 比重，并对低锚点单答案触发 `single_answer_group_score_cap`。
+  - 当前第三批也会把 `generic_scope_penalty / scope_requirement_missing_score / scope_cluster_bonus` 真正扣进 `final_score`，让部位漂移、IRIS 漂移和泛病名漂移更早在排序阶段暴露出来。
   - 当前支持 `score_candidate_hypotheses_without_trajectories()`，用于在轨迹聚合断层时把现有候选疾病转成 answer score；该 fallback 会运行 observed-evidence final evaluator，接受结果会直接交给 `VerifierAcceptanceController`。
 
 ### 5. 辅助文件
@@ -271,6 +283,10 @@
 - 论文对照与启发式参数说明：
   - [med_mcts_vs_current_system.md](/Users/loki/Workspace/GraduationDesign/docs/med_mcts_vs_current_system.md)
   - 当前文档集中说明 Med-MCTS 论文实现与本系统动态问诊实现的差异，并整理启发式参数的主要来源、当前定位和后续优化方向。
+
+- 当前诊断算法三批落地清单：
+  - [diagnosis_algorithm_batch_execution_checklist.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_algorithm_batch_execution_checklist.md)
+  - 当前文档按 `P1+P2 -> P3+P6 -> P4+P5+P7` 三批节奏拆分具体修改点、预期指标与回放验收方式，适合作为本轮算法落地入口。
 
 - 当前诊断系统待办清单：
   - [diagnosis_system_todolist.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_system_todolist.md)

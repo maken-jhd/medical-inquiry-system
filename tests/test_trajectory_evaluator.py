@@ -379,3 +379,52 @@ def test_trajectory_evaluator_defers_llm_verifier_before_accept_window() -> None
     assert scores[0].metadata["verifier_mode"] == "llm_verifier_deferred"
     assert scores[0].metadata["verifier_called"] is False
     assert scores[0].metadata["verifier_deferred_reason"] == "turn_index_too_low"
+
+
+# 验证单答案且真实锚点很弱时，final score 会触发动态降权和封顶，避免 rollout 自嗨直接登顶。
+def test_trajectory_evaluator_caps_low_anchor_single_answer_group() -> None:
+    evaluator = TrajectoryEvaluator(
+        TrajectoryEvaluatorConfig(
+            enable_dynamic_group_weights=True,
+            enable_single_answer_group_cap=True,
+            low_anchor_single_group_score_cap=0.62,
+        )
+    )
+    trajectories = [
+        ReasoningTrajectory(
+            trajectory_id="t_low_anchor",
+            final_answer_id="generic_infection",
+            final_answer_name="感染",
+            steps=[
+                {"stage": "A3", "action_name": "病原检测"},
+                {"stage": "PENDING_ACTION", "answer_branch": "positive"},
+            ],
+            score=0.95,
+        )
+    ]
+    patient_context = PatientContext(
+        raw_text="发热咳嗽",
+        metadata={
+            "observed_anchor_index": {
+                "candidate_anchor_summary": [
+                    {
+                        "candidate_id": "generic_infection",
+                        "anchor_tier": "speculative",
+                        "observed_anchor_score": 0.0,
+                        "exact_scope_anchor_score": 0.0,
+                        "family_scope_anchor_score": 0.0,
+                        "generic_scope_penalty": 0.0,
+                    }
+                ]
+            }
+        },
+    )
+
+    scores = evaluator.score_groups(
+        evaluator.group_by_answer(trajectories),
+        patient_context=patient_context,
+    )
+
+    assert scores[0].final_score <= 0.62
+    assert scores[0].metadata["dynamic_weight_mode"] == "single_group_low_anchor"
+    assert scores[0].metadata["single_answer_group_cap_applied"] is True

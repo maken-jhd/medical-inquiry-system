@@ -77,6 +77,52 @@ def test_action_builder_renders_imaging_question() -> None:
     assert "雾状" in question
 
 
+# 验证眼底类检查不会被错误套用成“胸片或 CT”模板。
+def test_action_builder_renders_ophthalmic_imaging_question() -> None:
+    builder = ActionBuilder()
+    action = MctsAction(
+        action_id="verify::cmv::fundus",
+        action_type="verify_evidence",
+        target_node_id="fundus_exam",
+        target_node_label="ImagingFinding",
+        target_node_name="眼底镜检查异常",
+        hypothesis_id="cmv_retinitis",
+        metadata={
+            "question_type_hint": "imaging",
+            "acquisition_mode": "needs_clinician_assessment",
+        },
+    )
+
+    question = builder.render_question_text(action)
+
+    assert "眼底检查" in question or "眼科" in question
+    assert "胸片" not in question
+    assert "胸部 CT" not in question
+
+
+# 验证 HIV 相关目标不会再被错误套用成“痰检/支气管镜取样”模板。
+def test_action_builder_renders_hiv_question_without_respiratory_pathogen_template() -> None:
+    builder = ActionBuilder()
+    action = MctsAction(
+        action_id="verify::hiv::hiv1",
+        action_type="verify_evidence",
+        target_node_id="hiv_1",
+        target_node_label="Pathogen",
+        target_node_name="HIV-1",
+        hypothesis_id="hiv",
+        metadata={
+            "question_type_hint": "pathogen",
+            "acquisition_mode": "needs_pathogen_test",
+        },
+    )
+
+    question = builder.render_question_text(action)
+
+    assert "HIV 相关抽血检查" in question
+    assert "痰检" not in question
+    assert "支气管镜" not in question
+
+
 # 验证 ART 这类专业缩写不会原样暴露给患者，而是改成普通人能懂的问法。
 def test_action_builder_renders_art_question_patient_friendly() -> None:
     builder = ActionBuilder()
@@ -149,6 +195,8 @@ def test_action_builder_collects_exam_context_before_high_cost_evidence() -> Non
     assert len(actions) == 1
     assert actions[0].action_type == "collect_general_exam_context"
     assert actions[0].metadata["exam_kind"] == "general"
+    assert actions[0].metadata["exam_context_entry_kind"] == "general"
+    assert actions[0].metadata["exam_context_priority_reason"] == "collect_exam_availability_first"
     assert actions[0].metadata["candidate_exam_kinds"] == ["lab"]
     assert "CD4+ T淋巴细胞计数 < 200/μL" in actions[0].metadata["exam_examples"]
     question = builder.render_question_text(actions[0])
@@ -156,6 +204,29 @@ def test_action_builder_collects_exam_context_before_high_cost_evidence() -> Non
     assert "抽血化验" in question
     assert "CT" in question
     assert "PCR" in question
+
+
+# 验证动作构造会按标签/获取方式纠偏 question_type，避免高成本化验节点被当成普通症状模板。
+def test_action_builder_normalizes_question_type_hint_from_label_and_acquisition() -> None:
+    builder = ActionBuilder()
+    action = builder.build_verification_actions(
+        [
+            {
+                "node_id": "lab_hiv_ab",
+                "label": "LabFinding",
+                "name": "HIV抗体阳性",
+                "relation_type": "DIAGNOSED_BY",
+                "question_type_hint": "symptom",
+                "acquisition_mode": "needs_lab_test",
+                "evidence_cost": "high",
+                "priority": 2.0,
+                "topic_id": "Disease",
+            }
+        ],
+        hypothesis_id="hiv",
+    )[0]
+
+    assert action.metadata["question_type_hint"] == "lab"
 
 
 # 验证 lab / imaging / pathogen 高成本证据会合并成一个统一检查入口，而不是三轮分别追问。
@@ -290,6 +361,8 @@ def test_action_builder_uses_specific_exam_context_after_general_was_asked() -> 
     assert len(actions) == 1
     assert actions[0].action_type == "collect_exam_context"
     assert actions[0].target_node_id == "__exam_context__::lab"
+    assert actions[0].metadata["exam_context_entry_kind"] == "specific"
+    assert actions[0].metadata["exam_context_priority_reason"] == "collect_specific_exam_results_after_general"
 
 
 # 验证低成本动作中，特异症状会压过发热这类背景问题。

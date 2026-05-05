@@ -62,8 +62,13 @@ class ActionBuilder:
             priority = float(row.get("priority", 0.0))
             contradiction_priority = float(row.get("contradiction_priority", 0.0))
             relation_weight = float(row.get("relation_weight", 0.0))
-            question_type_hint = str(row.get("question_type_hint", "symptom"))
-            acquisition_mode, evidence_cost = self._resolve_acquisition_info(row, question_type_hint)
+            raw_question_type_hint = str(row.get("question_type_hint", "symptom"))
+            acquisition_mode, evidence_cost = self._resolve_acquisition_info(row, raw_question_type_hint)
+            question_type_hint = self._normalize_question_type_hint(
+                raw_question_type_hint,
+                acquisition_mode,
+                str(row.get("label", "")),
+            )
             exam_kind = self._infer_exam_kind(acquisition_mode, question_type_hint, str(row.get("label", "")))
             alternative_overlap = self._estimate_alternative_overlap(row, alternatives)
             recommended_bonus, recommended_match_score, evidence_tags = self._estimate_recommended_bonus(
@@ -248,7 +253,12 @@ class ActionBuilder:
         if len(custom_question) > 0:
             return custom_question
 
-        question_type_hint = str(action.metadata.get("question_type_hint", "symptom"))
+        acquisition_mode = str(action.metadata.get("acquisition_mode") or "").strip()
+        question_type_hint = self._normalize_question_type_hint(
+            str(action.metadata.get("question_type_hint", "symptom")),
+            acquisition_mode,
+            str(action.target_node_label or ""),
+        )
         target_name = action.target_node_name
 
         # 检查上下文动作和普通 verify 动作走不同问法：
@@ -265,16 +275,16 @@ class ActionBuilder:
             return specific_question
 
         # 最后才回退到按 question_type_hint 的通用模板，保证未命中特化规则时也能自然发问。
-        target_text = self.patient_friendly_target_name(target_name)
-
         if question_type_hint == "lab":
-            return f"如果你记得化验单或医生说过结果，想确认一下：{target_text}。大概是这样吗？"
+            return self._render_generic_lab_question(target_name)
 
         if question_type_hint == "imaging":
-            return f"如果最近做过胸片或 CT，报告里有没有提到{target_text}？"
+            return self._render_generic_imaging_question(target_name)
 
         if question_type_hint == "pathogen":
-            return f"如果做过痰检、核酸/PCR 或支气管镜取样，结果有没有提示{target_text}？"
+            return self._render_generic_pathogen_question(target_name)
+
+        target_text = self.patient_friendly_target_name(target_name)
 
         if question_type_hint == "risk":
             return f"想了解一下，最近或既往有没有{target_text}？如果不方便细说，可以只回答有、没有或不确定。"
@@ -347,8 +357,24 @@ class ActionBuilder:
         if any(keyword in normalized for keyword in ("hivrna", "病毒载量", "病毒量")):
             return "如果你记得化验结果，HIV 病毒量有没有偏高，或者医生有没有说病毒还能检测到？"
 
+        if question_type_hint in {"lab", "pathogen"} and any(
+            keyword in normalized for keyword in ("hiv1", "hiv抗体", "hiv抗原", "p24抗原")
+        ):
+            return (
+                "如果做过 HIV 相关抽血检查，比如 HIV 抗体、抗原、核酸或病毒载量，"
+                "结果有没有提示阳性、检出，或者医生有没有明确提到 HIV？"
+            )
+
         if any(keyword in normalized for keyword in ("βd葡聚糖", "bdg", "葡聚糖", "g试验")):
             return "如果你做过 G 试验或 β-D 葡聚糖这个真菌相关化验，医生有没有说结果升高或阳性？"
+
+        if question_type_hint == "imaging" and any(
+            keyword in normalized for keyword in ("眼底", "眼底镜", "视网膜", "黄斑", "视乳头", "玻璃体")
+        ):
+            return (
+                "如果做过眼底检查或看过眼科，医生有没有说眼底有异常，"
+                "比如出血、渗出、棉絮斑，或者直接提到眼底镜检查异常？"
+            )
 
         if any(keyword in normalized for keyword in ("磨玻璃", "胸部ct", "ct", "胸片")) and question_type_hint == "imaging":
             return "如果做过胸片或胸部 CT，报告里有没有写“磨玻璃影”，或者医生有没有说肺里有雾状、片状阴影？"
@@ -360,6 +386,92 @@ class ActionBuilder:
             return "如果做过痰液、核酸/PCR 或支气管镜取样检查，医生有没有说检出了肺孢子菌或其他病原体？"
 
         return None
+
+    # 对 question type 做最后一层纠偏，避免上游 metadata 把高成本检查问成普通症状。
+    def _normalize_question_type_hint(self, question_type_hint: str, acquisition_mode: str, label: str) -> str:
+        normalized_hint = str(question_type_hint or "").strip()
+        normalized_mode = str(acquisition_mode or "").strip()
+        normalized_label = str(label or "").strip()
+
+        if normalized_hint == "exam_context":
+            return normalized_hint
+
+        if normalized_mode == "needs_pathogen_test" or normalized_label == "Pathogen":
+            return "pathogen"
+
+        if normalized_mode == "needs_imaging" or normalized_label == "ImagingFinding":
+            return "imaging"
+
+        if normalized_mode == "needs_lab_test" or normalized_label in {"LabFinding", "LabTest"}:
+            return "lab"
+
+        if normalized_label == "ClinicalAttribute":
+            return "detail"
+
+        if normalized_label in {"RiskFactor", "PopulationGroup"}:
+            return "risk"
+
+        if normalized_label == "ClinicalFinding":
+            return "symptom"
+
+        return normalized_hint or "symptom"
+
+    # 通用 lab 模板按证据语义分流，避免把 HIV/脑脊液类结果问得过于生硬。
+    def _render_generic_lab_question(self, target_name: str) -> str:
+        normalized = self._normalize_evidence_text(target_name)
+        target_text = self.patient_friendly_target_name(target_name)
+
+        if any(keyword in normalized for keyword in ("hiv1", "hiv抗体", "hiv抗原", "p24抗原", "hivrna", "病毒载量")):
+            return (
+                "如果做过 HIV 相关抽血检查，比如 HIV 抗体、核酸、病毒载量或 CD4，"
+                f"结果有没有提示{target_text}？"
+            )
+
+        if any(keyword in normalized for keyword in ("脑脊液", "墨汁染色", "隐球菌抗原")):
+            return f"如果做过脑脊液或相关化验，结果有没有提示{target_text}？"
+
+        return f"如果你记得化验单或医生说过结果，想确认一下：{target_text}。大概是这样吗？"
+
+    # 影像/专科检查问句按部位分流，避免一律套“胸片或 CT”模板。
+    def _render_generic_imaging_question(self, target_name: str) -> str:
+        normalized = self._normalize_evidence_text(target_name)
+        target_text = self.patient_friendly_target_name(target_name)
+
+        if any(keyword in normalized for keyword in ("眼底", "眼底镜", "视网膜", "黄斑", "视乳头", "玻璃体")):
+            return f"如果做过眼底检查或看过眼科，医生有没有说{target_text}？"
+
+        if any(keyword in normalized for keyword in ("头颅", "颅脑", "脑膜", "基底节", "脑室", "脑实质", "占位", "强化", "低密度", "高密度")):
+            return f"如果做过头颅 CT 或 MRI，报告里有没有提到{target_text}？"
+
+        if any(keyword in normalized for keyword in ("肝", "肝脏", "腹部", "腹腔", "脾", "盆腔", "宫颈")):
+            return f"如果做过腹部或盆腔超声、CT、MRI 之类的检查，报告里有没有提到{target_text}？"
+
+        if any(keyword in normalized for keyword in ("肺", "双肺", "胸", "磨玻璃", "实变", "间质", "空洞", "胸片", "x线", "ct")):
+            return f"如果最近做过胸片或胸部 CT，报告里有没有提到{target_text}？"
+
+        return f"如果做过相关影像检查或专科检查，报告里有没有提到{target_text}？"
+
+    # 病原学问句按样本来源分流，避免把 HIV 等血液学检测问成“痰检/支气管镜取样”。
+    def _render_generic_pathogen_question(self, target_name: str) -> str:
+        normalized = self._normalize_evidence_text(target_name)
+        target_text = self.patient_friendly_target_name(target_name)
+
+        if any(keyword in normalized for keyword in ("hiv1", "hiv抗体", "hiv抗原", "p24抗原", "hivrna", "病毒载量")):
+            return (
+                "如果做过 HIV 相关抽血检查，比如 HIV 抗体、抗原、核酸或病毒载量，"
+                "结果有没有提示阳性、检出，或者医生有没有明确提到 HIV？"
+            )
+
+        if any(keyword in normalized for keyword in ("脑脊液", "墨汁染色", "隐球菌", "脑膜")):
+            return f"如果做过脑脊液、培养、抗原或核酸检查，结果有没有提示{target_text}？"
+
+        if any(keyword in normalized for keyword in ("皮肤", "皮损", "分泌物", "脓液", "溃疡")):
+            return f"如果做过皮损分泌物、涂片、培养或核酸检查，结果有没有提示{target_text}？"
+
+        if any(keyword in normalized for keyword in ("肺孢子", "pcp", "痰", "支气管", "肺泡灌洗", "bal", "balf", "结核", "分枝杆菌")):
+            return f"如果做过痰检、核酸/PCR 或支气管镜取样，结果有没有提示{target_text}？"
+
+        return f"如果做过病原学检查、培养、核酸或相关化验，结果有没有提示{target_text}？"
 
     # 识别 ART / 抗逆转录病毒治疗相关节点，统一转成人话。
     def _is_art_related(self, normalized_text: str) -> bool:
@@ -419,7 +531,11 @@ class ActionBuilder:
             "label": row.get("label", "Unknown"),
             "name": row.get("name", row["node_id"]),
             "relation_type": row.get("relation_type"),
-            "question_type_hint": row.get("question_type_hint", exam_kind),
+            "question_type_hint": self._normalize_question_type_hint(
+                str(row.get("question_type_hint", exam_kind)),
+                acquisition_mode,
+                str(row.get("label", "")),
+            ),
             "acquisition_mode": acquisition_mode,
             "evidence_cost": evidence_cost,
             "exam_kind": candidate_exam_kind,
@@ -456,6 +572,16 @@ class ActionBuilder:
                     "question_type_hint": "exam_context" if exam_kind == "general" else exam_kind,
                     "acquisition_mode": "needs_medical_exam_context" if exam_kind == "general" else acquisition_mode,
                     "evidence_cost": evidence_cost,
+                    # exam_context 动作分两层：
+                    # - general: 先确认“做过没”
+                    # - specific: general 已问过后，继续追 lab / imaging / pathogen 的具体结果
+                    "exam_context_entry_kind": "general" if exam_kind == "general" else "specific",
+                    "exam_context_priority_reason": (
+                        "collect_exam_availability_first"
+                        if exam_kind == "general"
+                        else "collect_specific_exam_results_after_general"
+                    ),
+                    "exam_context_rescue_candidate": True,
                     "patient_burden": 0.35,
                     "accessibility_bias": -0.05,
                     "discriminative_gain": discriminative_gain,

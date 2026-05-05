@@ -12,6 +12,7 @@
 
 - 本文主要记录“目标路线”和“当前执行状态”
 - 若需要查看更偏过程复盘与论文素材整理的内容，可参见 [phase2_changelog.md](/Users/loki/Workspace/GraduationDesign/docs/phase2_changelog.md)
+- 若需要查看 2026-05-04 起围绕 `top3_hypothesis_hit / top1_final_answer_hit` 分三批推进的可执行改造清单，可参见 [diagnosis_algorithm_batch_execution_checklist.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_algorithm_batch_execution_checklist.md)
 
 ## 当前进度快照
 

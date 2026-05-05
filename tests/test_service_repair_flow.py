@@ -5,7 +5,7 @@ from brain.hypothesis_manager import HypothesisManager
 from brain.mcts_engine import MctsEngine
 from brain.service import BrainDependencies, ConsultationBrain, RepairPolicyConfig
 from brain.state_tracker import StateTracker
-from brain.types import HypothesisScore, MctsAction, PendingActionResult, SearchResult, SessionState
+from brain.types import FinalAnswerScore, HypothesisScore, MctsAction, PendingActionResult, SearchResult, SessionState, StopDecision
 
 
 class RepairFakeRetriever:
@@ -755,6 +755,155 @@ def test_service_strong_alternative_prioritizes_non_current_discriminative_actio
     assert action is not None
     assert action.hypothesis_id == "tb"
     assert action.target_node_name == "盗汗"
+
+
+# 验证当前答案零真实锚点、而备选已具备更强 observed anchor 时，missing_key_support 会升级为 competition repair。
+def test_service_missing_support_zero_anchor_escalates_to_competition_repair() -> None:
+    tracker = StateTracker()
+    state = tracker.create_session("s_missing_support_zero_anchor")
+    state.candidate_hypotheses = [
+        HypothesisScore(
+            node_id="generic_infection",
+            label="Disease",
+            name="原发性肺部感染",
+            score=1.08,
+            metadata={
+                "anchor_tier": "background_supported",
+                "observed_anchor_score": 0.0,
+                "exact_scope_anchor_score": 0.0,
+            },
+        ),
+        HypothesisScore(
+            node_id="pcp",
+            label="Disease",
+            name="肺孢子菌肺炎 (PCP)",
+            score=0.96,
+            metadata={
+                "anchor_tier": "strong_anchor",
+                "observed_anchor_score": 0.72,
+                "exact_scope_anchor_score": 0.68,
+            },
+        ),
+    ]
+    brain = _build_brain([], tracker)
+    best_answer_score = FinalAnswerScore(
+        answer_id="generic_infection",
+        answer_name="原发性肺部感染",
+        consistency=0.42,
+        diversity=0.38,
+        agent_evaluation=0.35,
+        final_score=0.39,
+        metadata={
+            "verifier_mode": "llm_verifier",
+            "verifier_should_accept": False,
+            "verifier_reject_reason": "missing_key_support",
+            "verifier_recommended_next_evidence": ["肺孢子菌 PCR"],
+            "anchor_stronger_alternative_candidates": [
+                {
+                    "answer_id": "pcp",
+                    "answer_name": "肺孢子菌肺炎 (PCP)",
+                    "reason": "备选诊断已具备更强 observed anchor。",
+                    "observed_anchor_score": 0.72,
+                    "exact_scope_anchor_score": 0.68,
+                }
+            ],
+        },
+    )
+
+    repair_context = brain._build_verifier_repair_context(
+        "s_missing_support_zero_anchor",
+        SearchResult(best_answer_id="generic_infection", best_answer_name="原发性肺部感染"),
+        best_answer_score,
+        StopDecision(
+            False,
+            "verifier_not_ready",
+            metadata={"repair_reject_reason": "missing_key_support"},
+        ),
+    )
+
+    assert repair_context is not None
+    assert repair_context["force_competition_repair"] is True
+    assert repair_context["repair_escalated_to_competition"] is True
+    assert "current_answer_zero_observed_anchor" in repair_context["repair_escalation_reasons"]
+    assert repair_context["repair_target_hypothesis_id"] == "pcp"
+    selected = brain._select_current_repair_hypothesis(state, repair_context)
+    assert selected is not None
+    assert selected.node_id == "pcp"
+
+
+# 验证同一错误答案连续两轮 missing_key_support 后，会升级成 competition repair。
+def test_service_missing_support_repeated_repair_count_escalates_to_competition() -> None:
+    tracker = StateTracker()
+    state = tracker.create_session("s_missing_support_repeat")
+    state.candidate_hypotheses = [
+        HypothesisScore(
+            node_id="generic_infection",
+            label="Disease",
+            name="原发性肺部感染",
+            score=1.02,
+            metadata={
+                "anchor_tier": "background_supported",
+                "observed_anchor_score": 0.12,
+                "exact_scope_anchor_score": 0.0,
+            },
+        ),
+        HypothesisScore(
+            node_id="pcp",
+            label="Disease",
+            name="肺孢子菌肺炎 (PCP)",
+            score=0.97,
+            metadata={
+                "anchor_tier": "family_anchor",
+                "observed_anchor_score": 0.54,
+                "exact_scope_anchor_score": 0.42,
+            },
+        ),
+    ]
+    state.metadata["repair_feedback_counts"] = {
+        "generic_infection": {
+            "missing_key_support": 1,
+        }
+    }
+    brain = _build_brain([], tracker)
+    best_answer_score = FinalAnswerScore(
+        answer_id="generic_infection",
+        answer_name="原发性肺部感染",
+        consistency=0.45,
+        diversity=0.36,
+        agent_evaluation=0.34,
+        final_score=0.38,
+        metadata={
+            "verifier_mode": "llm_verifier",
+            "verifier_should_accept": False,
+            "verifier_reject_reason": "missing_key_support",
+            "verifier_recommended_next_evidence": ["胸部CT结果", "病原学检测结果"],
+            "anchor_stronger_alternative_candidates": [
+                {
+                    "answer_id": "pcp",
+                    "answer_name": "肺孢子菌肺炎 (PCP)",
+                    "reason": "竞争诊断已有更强真实锚点。",
+                    "observed_anchor_score": 0.54,
+                    "exact_scope_anchor_score": 0.42,
+                }
+            ],
+        },
+    )
+
+    repair_context = brain._build_verifier_repair_context(
+        "s_missing_support_repeat",
+        SearchResult(best_answer_id="generic_infection", best_answer_name="原发性肺部感染"),
+        best_answer_score,
+        StopDecision(
+            False,
+            "verifier_not_ready",
+            metadata={"repair_reject_reason": "missing_key_support"},
+        ),
+    )
+
+    assert repair_context is not None
+    assert repair_context["current_answer_repair_feedback_count"] == 2
+    assert repair_context["force_competition_repair"] is True
+    assert "repeated_missing_key_support" in repair_context["repair_escalation_reasons"]
 
 
 # 验证 trajectory_insufficient 会惩罚同一 evidence family 的相似追问，而不是只看节点是否不同。

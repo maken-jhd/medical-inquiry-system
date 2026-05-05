@@ -9,6 +9,14 @@ search:
   discount_factor: 1.0
   max_kg_triplets: 15
 
+rollout_control:
+  # 当前默认配置切到 batch2 + P4 + P5 + P7。
+  # 也就是保留多分支 rollout / 防塌缩、动态权重、单答案封顶，
+  # 并重新打开 scope-aware rerank 与 final score scope penalty。
+  enable_multi_branch_rollout: true
+  branch_budget_per_action: 2
+  enable_anti_collapse_penalty: true
+
 kg:
   entity_link_threshold: 0.72
   top_k_entity_matches: 5
@@ -23,6 +31,10 @@ path_evaluation:
   llm_verifier_min_trajectory_count: 2
   observed_final_accept_threshold: 0.72
   observed_final_scope_mismatch_block_threshold: 0.28
+  enable_dynamic_group_weights: true
+  enable_single_answer_group_cap: true
+  low_anchor_single_group_score_cap: 0.62
+  enable_scope_penalty_in_final_score: true
 
 a1:
   use_llm_extractor: true
@@ -30,15 +42,32 @@ a1:
 a2:
   expand_top_k_hypotheses: 3
   scope_sibling_limit: 12
+  enable_scope_cluster_rerank: true
+  scope_cluster_exact_bonus: 0.35
+  scope_cluster_generic_penalty: 0.28
 
 a3:
   use_discriminative_gain: true
   validation_limit: 10
+  enable_early_exam_context_rescue: true
+  early_exam_context_turn_limit: 2
+  early_exam_context_revealed_count_threshold: 2
+  exam_context_rescue_high_cost_role_threshold: 0.45
+
+candidate_feedback:
+  enable_multi_hypothesis_feedback: true
+  use_scope_weighted_feedback: true
+  max_related_hypotheses_per_evidence: 5
 
 repair:
   enable_verifier_hypothesis_reshuffle: true
   enable_best_repair_action: true
   enable_tree_reroot: true
+  protect_repair_action_from_low_cost_explorer: true
+  allow_low_cost_explorer_after_repair_if_unaskable_only: true
+  enable_missing_key_support_competition_escalation: true
+  missing_key_support_retry_threshold: 2
+  zero_anchor_current_answer_force_competition: true
 
 fallback:
   enable_question_selector_mode: true

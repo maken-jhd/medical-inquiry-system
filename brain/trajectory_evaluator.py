@@ -38,6 +38,10 @@ class TrajectoryEvaluatorConfig:
     simulated_key_evidence_penalty_cap: float = 0.12
     observed_final_accept_threshold: float = 0.72
     observed_final_scope_mismatch_block_threshold: float = 0.28
+    enable_dynamic_group_weights: bool = True
+    enable_single_answer_group_cap: bool = True
+    low_anchor_single_group_score_cap: float = 0.62
+    enable_scope_penalty_in_final_score: bool = True
 
 
 class TrajectoryEvaluator:
@@ -73,6 +77,7 @@ class TrajectoryEvaluator:
         session_turn_index: int | None = None,
     ) -> List[FinalAnswerScore]:
         total_trajectories = sum(len(items) for items in grouped.values())
+        answer_group_count = len(grouped)
 
         # answer_candidates 会传给 verifier，帮助它知道当前不是“单答案判断”，
         # 而是在比较一组互相竞争的最终答案。
@@ -108,18 +113,42 @@ class TrajectoryEvaluator:
                 anchor_profile=anchor_profile,
             )
             agent_evaluation = max(min(agent_evaluation + anchor_bonus - simulated_penalty, 1.0), 0.0)
+            candidate_rank_prior, candidate_rank_position = self._candidate_rank_prior(patient_context, answer_id)
+            consistency_weight, diversity_weight, agent_eval_weight, weight_mode = self._resolve_group_weights(
+                answer_group_count=answer_group_count,
+                anchor_profile=anchor_profile,
+            )
+            scope_penalty, scope_metadata = self._final_scope_penalty(anchor_profile)
+            final_agent_component = max(min(agent_evaluation + candidate_rank_prior, 1.0), 0.0)
             agent_metadata.update(
                 {
                     **self._anchor_profile_metadata(anchor_profile),
                     "observed_anchor_agent_bonus": round(anchor_bonus, 4),
+                    "candidate_rank_position": candidate_rank_position,
+                    "candidate_rank_prior": round(candidate_rank_prior, 4),
+                    "answer_group_count": answer_group_count,
+                    "dynamic_weight_mode": weight_mode,
+                    "consistency_weight": round(consistency_weight, 4),
+                    "diversity_weight": round(diversity_weight, 4),
+                    "agent_eval_weight": round(agent_eval_weight, 4),
+                    "final_agent_component": round(final_agent_component, 4),
+                    **scope_metadata,
                     **simulated_metadata,
                 }
             )
             final_score = (
-                consistency * self.config.consistency_weight
-                + diversity * self.config.diversity_weight
-                + agent_evaluation * self.config.agent_eval_weight
+                consistency * consistency_weight
+                + diversity * diversity_weight
+                + final_agent_component * agent_eval_weight
             )
+            final_score = max(final_score - scope_penalty, 0.0)
+            if self.config.enable_single_answer_group_cap and answer_group_count == 1 and self._is_low_anchor_profile(anchor_profile):
+                capped_score = min(final_score, self.config.low_anchor_single_group_score_cap)
+                agent_metadata["single_answer_group_cap_applied"] = capped_score < final_score
+                agent_metadata["single_answer_group_score_cap"] = round(self.config.low_anchor_single_group_score_cap, 4)
+                final_score = capped_score
+            else:
+                agent_metadata["single_answer_group_cap_applied"] = False
             scores.append(
                 FinalAnswerScore(
                     answer_id=answer_id,
@@ -160,6 +189,7 @@ class TrajectoryEvaluator:
         max_score = max(float(item.score) for item in ranked) or 1.0
         observed_evidence = self._observed_session_evidence(patient_context)
         scores: list[FinalAnswerScore] = []
+        answer_group_count = len(ranked)
 
         for index, hypothesis in enumerate(ranked):
             normalized_score = max(min(float(hypothesis.score) / max_score, 1.0), 0.0)
@@ -189,12 +219,22 @@ class TrajectoryEvaluator:
             )
             consistency = max(0.12 - index * 0.025, 0.04)
             diversity = 0.0
-            final_score = max(
-                consistency * self.config.consistency_weight
-                + diversity * self.config.diversity_weight
-                + agent_evaluation * self.config.agent_eval_weight,
-                float(observed_final["observed_final_score"]) * 0.58,
+            candidate_rank_prior, candidate_rank_position = self._candidate_rank_prior(patient_context, hypothesis.node_id)
+            consistency_weight, diversity_weight, agent_eval_weight, weight_mode = self._resolve_group_weights(
+                answer_group_count=answer_group_count,
+                anchor_profile=anchor_profile,
             )
+            scope_penalty, scope_metadata = self._final_scope_penalty(anchor_profile)
+            final_agent_component = max(min(agent_evaluation + candidate_rank_prior, 1.0), 0.0)
+            final_score = max(
+                consistency * consistency_weight
+                + diversity * diversity_weight
+                + final_agent_component * agent_eval_weight
+                - scope_penalty,
+                max(float(observed_final["observed_final_score"]) * 0.58 - scope_penalty * 0.35, 0.0),
+            )
+            if self.config.enable_single_answer_group_cap and answer_group_count == 1 and self._is_low_anchor_profile(anchor_profile):
+                final_score = min(final_score, self.config.low_anchor_single_group_score_cap)
             scores.append(
                 FinalAnswerScore(
                     answer_id=hypothesis.node_id,
@@ -218,11 +258,20 @@ class TrajectoryEvaluator:
                         "verifier_schema_valid": True,
                         "answer_score_source": "candidate_state_fallback",
                         "candidate_rank": index + 1,
+                        "candidate_rank_position": candidate_rank_position,
+                        "candidate_rank_prior": round(candidate_rank_prior, 4),
                         "candidate_state_score": hypothesis.score,
                         "heuristic_agent_evaluation": round(heuristic_agent_evaluation, 4),
                         "observed_answer_specific_support_count": observed_support_count,
                         "observed_answer_specific_support": observed_support,
                         "observed_anchor_agent_bonus": round(anchor_bonus, 4),
+                        "answer_group_count": answer_group_count,
+                        "dynamic_weight_mode": weight_mode,
+                        "consistency_weight": round(consistency_weight, 4),
+                        "diversity_weight": round(diversity_weight, 4),
+                        "agent_eval_weight": round(agent_eval_weight, 4),
+                        "final_agent_component": round(final_agent_component, 4),
+                        **scope_metadata,
                         **observed_final["metadata"],
                         **self._anchor_profile_metadata(anchor_profile),
                     },
@@ -449,6 +498,8 @@ class TrajectoryEvaluator:
             "scope_specificity_score",
             "generic_scope_penalty",
             "scope_requirement_missing_score",
+            "scope_cluster_level",
+            "scope_cluster_bonus",
             "candidate_scope_facets",
             "observed_scope_facets",
             "missing_scope_facets",
@@ -466,6 +517,102 @@ class TrajectoryEvaluator:
             "low_cost_profile_satisfied",
         )
         return {key: profile.get(key) for key in keys if key in profile}
+
+    # 将固定的 consistency/diversity/agent 权重改成可切换的动态权重，降低单答案塌缩的误导性。
+    def _resolve_group_weights(
+        self,
+        *,
+        answer_group_count: int,
+        anchor_profile: dict,
+    ) -> tuple[float, float, float, str]:
+        base_consistency, base_diversity, base_agent = self._normalize_weights(
+            self.config.consistency_weight,
+            self.config.diversity_weight,
+            self.config.agent_eval_weight,
+        )
+        if not self.config.enable_dynamic_group_weights:
+            return base_consistency, base_diversity, base_agent, "static"
+
+        if answer_group_count == 1 and self._is_low_anchor_profile(anchor_profile):
+            consistency = min(base_consistency, 0.18)
+            diversity = min(base_diversity, 0.12)
+            agent = max(1.0 - consistency - diversity, 0.0)
+            return consistency, diversity, agent, "single_group_low_anchor"
+
+        if answer_group_count == 1 and float(anchor_profile.get("exact_scope_anchor_score", 0.0) or 0.0) > 0.0:
+            consistency = min(base_consistency + 0.04, 0.38)
+            diversity = max(base_diversity - 0.06, 0.14)
+            agent = max(1.0 - consistency - diversity, 0.0)
+            return consistency, diversity, agent, "single_group_exact_anchor"
+
+        return base_consistency, base_diversity, base_agent, "static"
+
+    def _normalize_weights(self, consistency: float, diversity: float, agent_eval: float) -> tuple[float, float, float]:
+        total = max(consistency + diversity + agent_eval, 1e-6)
+        return consistency / total, diversity / total, agent_eval / total
+
+    def _is_low_anchor_profile(self, profile: dict) -> bool:
+        observed_anchor_score = float(profile.get("observed_anchor_score", 0.0) or 0.0)
+        exact_scope_anchor_score = float(profile.get("exact_scope_anchor_score", 0.0) or 0.0)
+        family_scope_anchor_score = float(profile.get("family_scope_anchor_score", 0.0) or 0.0)
+        anchor_tier = str(profile.get("anchor_tier") or "speculative")
+        return (
+            observed_anchor_score <= 0.18
+            and exact_scope_anchor_score < 0.15
+            and family_scope_anchor_score < 0.2
+            and anchor_tier in {"speculative", "background_supported", "phenotype_supported", "negative_anchor"}
+        )
+
+    # 用当前 A2 / observed anchor 排序位置作为一个轻量先验，避免第 5 名候选仅靠 rollout 自证突然登顶。
+    def _candidate_rank_prior(self, patient_context: PatientContext | None, answer_id: str) -> tuple[float, int | None]:
+        if patient_context is None:
+            return 0.0, None
+
+        anchor_index = patient_context.metadata.get("observed_anchor_index", {})
+        if not isinstance(anchor_index, dict):
+            return 0.0, None
+
+        summaries = anchor_index.get("candidate_anchor_summary", [])
+        if not isinstance(summaries, list):
+            return 0.0, None
+
+        for index, item in enumerate(summaries):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("candidate_id") or "") != answer_id:
+                continue
+            prior = max(0.08 - index * 0.02, 0.0)
+            return prior, index + 1
+
+        return 0.0, None
+
+    # 将 scope mismatch / generic drift 真正扣进最终分数，而不是只等 acceptance guard 最后拦截。
+    def _final_scope_penalty(self, profile: dict) -> tuple[float, dict]:
+        if not self.config.enable_scope_penalty_in_final_score or not isinstance(profile, dict) or len(profile) == 0:
+            return 0.0, {"final_scope_penalty": 0.0}
+
+        scope_mismatch_score = float(profile.get("scope_mismatch_score", 0.0) or 0.0)
+        generic_scope_penalty = float(profile.get("generic_scope_penalty", 0.0) or 0.0)
+        scope_requirement_missing_score = float(profile.get("scope_requirement_missing_score", 0.0) or 0.0)
+        scope_specificity_score = float(profile.get("scope_specificity_score", 0.0) or 0.0)
+        scope_cluster_bonus = float(profile.get("scope_cluster_bonus", 0.0) or 0.0)
+        exact_scope_anchor_score = float(profile.get("exact_scope_anchor_score", 0.0) or 0.0)
+        family_scope_anchor_score = float(profile.get("family_scope_anchor_score", 0.0) or 0.0)
+
+        raw_penalty = (
+            scope_mismatch_score * 0.11
+            + generic_scope_penalty * 0.16
+            + scope_requirement_missing_score * 0.12
+            - scope_specificity_score * 0.05
+            - scope_cluster_bonus * 0.08
+            - exact_scope_anchor_score * 0.03
+            - family_scope_anchor_score * 0.02
+        )
+        penalty = max(min(raw_penalty, 0.22), 0.0)
+        return penalty, {
+            "final_scope_penalty": round(penalty, 4),
+            "final_scope_penalty_raw": round(raw_penalty, 4),
+        }
 
     # LLM verifier guard 也消费 anchor analyzer 已经对齐好的 observed 支持，避免纯文本 overlap 漏召回。
     def _observed_support_from_anchor_profile(self, profile: dict) -> list[dict]:
