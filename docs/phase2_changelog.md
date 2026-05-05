@@ -4694,3 +4694,36 @@ python -m py_compile brain/simulation_engine.py brain/trajectory_evaluator.py br
 - 减少 8 轮预算里被明显错误问句直接浪费的 turn
 - 提高 repair / verifier 推荐证据真正被患者回答命中的概率
 - 为后续继续观察 `top1_final_answer_hit` 与 `scope` 相关错配问题提供更干净的输入
+
+## 五十三、2026-05-05：刷新运行链路文档，移除旧 `stop rule` 口径
+
+### 本次目标
+
+- 把第二阶段运行链路文档更新到当前实现
+- 明确当前系统已经从旧 `A1 / A2 / A3 / A4 + stop rule` 口径迁移到 `turn_interpreter -> A1 / A2 / A3 -> verifier-only acceptance -> repair`
+- 避免后续复盘、答辩或论文写作继续引用过时的 stop-rule 描述
+
+### 本次更新
+
+- 更新：
+  - [docs/brain_runtime_call_chain_guide.md](/Users/loki/Workspace/GraduationDesign/docs/brain_runtime_call_chain_guide.md)
+  - [README.md](/Users/loki/Workspace/GraduationDesign/README.md)
+  - [brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
+
+### 具体改动
+
+- 重写 `brain_runtime_call_chain_guide.md`，统一为当前实现口径：
+  - `process_turn()` 以 `turn_interpreter` 为真正单轮入口
+  - 先做 generic state merge，再做 pending-action-specific merge
+  - `A2` 现在明确包括 `R1 + rescue candidate pools + observed anchor rerank`
+  - `A3` 之后不再描述为旧 `A4`，而是 `trajectory aggregation + verifier + repair`
+  - 明确写出 `MCTS/rollout` 仍是启发式搜索内核，但最终 `completed` 只由 verifier / observed final evaluator 接受信号触发
+  - 解释 `StopDecision` 仍在，但旧结构化 `stop rule` 已从主链路移除
+- README 中同步更新运行链路指南索引说明，避免目录页继续沿用旧 `A1 / A2 / A3 + anchor` 的简化口径
+- `brain/README.md` 中同步去掉旧 `STOP` 路由主流程口径，改为当前 `pending action -> A1 / A2 / A3 -> verifier / repair` 描述
+
+### 结果影响
+
+- 后续查看运行链路时，不再把 `A4` 和旧 stop-rule 误认为仍在主流程内
+- 更容易对齐当前代码中的 `repair / early exam rescue / low-cost explorer / verifier-only acceptance`
+- 为答辩、论文描述和后续参数实验提供一致的流程叙述基线

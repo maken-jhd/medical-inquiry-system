@@ -15,7 +15,8 @@
 - `run_reasoning_search()` 会真正执行多次 `select -> expand -> simulate -> backpropagate`
 - `select_leaf()` 已按 tree policy 沿树向下选择，而不是简单摊平叶子排序
 - `rollout_from_tree_node()` 已支持浅层多步 rollout，并会显式记录 `A3 -> PENDING_ACTION -> ROUTE`
-- `process_turn()` 已按 `STOP / A3 / A2 / A1 / FALLBACK` 分支使用 `route_after_pending_action`
+- `process_turn()` 当前按“统一解释 -> generic merge -> pending-action-specific merge -> A1 / A2 / A3 -> verifier / repair”组织主流程
+- `route_after_pending_action` 现在主要负责把上一轮回答重新路由回 `A1 / A2 / A3 / FALLBACK`，最终 `completed` 不再由旧 `STOP` 路由直接决定
 - 默认构造已真正消费 [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml)
 
 当前抽取与解释链路还有一个新的固定约定：
@@ -278,7 +279,7 @@
 
 - 详细运行链路说明：
   - [brain_runtime_call_chain_guide.md](/Users/loki/Workspace/GraduationDesign/docs/brain_runtime_call_chain_guide.md)
-  - 当前文档已按 `A1 / A2 / A3 + pending action + anchor-controlled acceptance/repair` 的实现口径重写，可直接对照 `process_turn()` 阅读。
+  - 当前文档已按 `turn_interpreter -> A1 / A2 / A3 -> verifier-only acceptance -> repair` 的实现口径重写，并明确说明旧结构化 `stop rule` 已移出主链，可直接对照 `process_turn()` 阅读。
 
 - 论文对照与启发式参数说明：
   - [med_mcts_vs_current_system.md](/Users/loki/Workspace/GraduationDesign/docs/med_mcts_vs_current_system.md)

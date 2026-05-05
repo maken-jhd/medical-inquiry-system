@@ -23,7 +23,7 @@
 - 第一阶段搜索专用知识图谱处理链：[knowledge_graph/README.md](/Users/loki/Workspace/GraduationDesign/knowledge_graph/README.md)
 - 旧版全量指南图谱备份：[knowledge_graph_bak/README.md](/Users/loki/Workspace/GraduationDesign/knowledge_graph_bak/README.md)
 - 第二阶段问诊大脑：[brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
-- 第二阶段问诊大脑详细运行链路指南（当前按 `A1 / A2 / A3 + anchor` 口径说明）：[brain_runtime_call_chain_guide.md](/Users/loki/Workspace/GraduationDesign/docs/brain_runtime_call_chain_guide.md)
+- 第二阶段问诊大脑详细运行链路指南（当前按 `turn_interpreter -> A1 / A2 / A3 -> verifier-only acceptance -> repair` 口径说明，且已移除旧结构化 `stop rule`）：[brain_runtime_call_chain_guide.md](/Users/loki/Workspace/GraduationDesign/docs/brain_runtime_call_chain_guide.md)
 - Med-MCTS 论文实现与当前系统实现对照、启发参数来源与后续优化方向：[med_mcts_vs_current_system.md](/Users/loki/Workspace/GraduationDesign/docs/med_mcts_vs_current_system.md)
 - 虚拟病人与离线回放：[simulator/README.md](/Users/loki/Workspace/GraduationDesign/simulator/README.md)
 - 图谱驱动虚拟病人详细方案：[virtual_patient_generation_scheme.md](/Users/loki/Workspace/GraduationDesign/docs/virtual_patient_generation_scheme.md)
@@ -599,7 +599,7 @@ OPENAI_MODEL=qwen3.5-flash conda run --no-capture-output -n GraduationDesign pyt
 
 - 真实 Neo4j 图谱检索
 - `brain/service.py` 的默认构造逻辑
-- `统一回答解释 -> A1/A2/A3 -> search -> anchor acceptance / repair -> report`
+- `统一回答解释 -> A1/A2/A3 -> search -> verifier acceptance / repair -> report`
 - 虚拟病人自动回放
 
 使用最新 role-QC 的 20 例 smoke 输入：
