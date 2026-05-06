@@ -24,7 +24,7 @@
 - 第一阶段搜索专用知识图谱处理链：[knowledge_graph/README.md](/Users/loki/Workspace/GraduationDesign/knowledge_graph/README.md)
 - 旧版全量指南图谱备份：[knowledge_graph_bak/README.md](/Users/loki/Workspace/GraduationDesign/knowledge_graph_bak/README.md)
 - 第二阶段问诊大脑：[brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
-- 第二阶段问诊大脑详细运行链路指南（当前按 `turn_interpreter -> A1 / A2 / A3 -> verifier-only acceptance -> repair` 口径说明，且已移除旧结构化 `stop rule`）：[brain_runtime_call_chain_guide.md](/Users/loki/Workspace/GraduationDesign/docs/brain_runtime_call_chain_guide.md)
+- 第二阶段问诊大脑详细运行链路指南（当前按 `turn_interpreter -> A1 / A2 / A3 -> verifier-only acceptance -> repair` 口径说明，且已细化到 `pending action / A2 刷新 / verifier guard / repair 分流` 级别）：[brain_runtime_call_chain_guide.md](/Users/loki/Workspace/GraduationDesign/docs/brain_runtime_call_chain_guide.md)
 - Med-MCTS 论文实现与当前系统实现对照、启发参数来源与后续优化方向：[med_mcts_vs_current_system.md](/Users/loki/Workspace/GraduationDesign/docs/med_mcts_vs_current_system.md)
 - 诊断系统 benchmark 可执行实验设计：[diagnosis_benchmark_experiment_design.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_benchmark_experiment_design.md)
 - 虚拟病人与离线回放：[simulator/README.md](/Users/loki/Workspace/GraduationDesign/simulator/README.md)

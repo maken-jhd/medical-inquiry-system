@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
+import os
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
@@ -82,9 +83,15 @@ NO_RESULT_FEEDBACK_COOLDOWN_TURNS = 2
 EXPLICIT_NEGATIVE_FEEDBACK_COOLDOWN_TURNS = 1
 HIGH_COST_NO_RESULT_FALLBACK_STREAK = 2
 
-# 根节点动作选择策略只服务 benchmark / ablation；
-# 默认仍走 MCTS，`greedy` 用于隔离 rollout 价值估计对真实下一问的影响。
-SUPPORTED_ROOT_ACTION_MODES = {"mcts", "greedy"}
+# 根节点动作选择策略只服务 benchmark / ablation：
+# - `mcts`：完整树搜索
+# - `greedy`：仍保留树搜索，但根动作只按 rollout 后的局部先验贪心选择
+# - `no_tree_greedy`：完全跳过 select/expand/rollout/backprop，只看当前候选态的动作先验
+SUPPORTED_ROOT_ACTION_MODES = {"mcts", "greedy", "no_tree_greedy"}
+
+# benchmark 经常需要在不改默认 brain.yaml 的前提下切换整套配置，
+# 因此这里额外支持通过环境变量指定配置文件路径。
+BRAIN_CONFIG_PATH_ENV_VAR = "BRAIN_CONFIG_PATH"
 
 
 def _normalize_root_action_mode(value: object) -> str:
@@ -125,6 +132,7 @@ class RepairPolicyConfig:
     enable_best_repair_action: bool = True
     enable_tree_reroot: bool = True
     protect_repair_action_from_low_cost_explorer: bool = True
+    protect_search_root_action_from_low_cost_explorer: bool = False
     allow_low_cost_explorer_after_repair_if_unaskable_only: bool = True
     enable_missing_key_support_competition_escalation: bool = True
     missing_key_support_retry_threshold: int = 2
@@ -2152,6 +2160,9 @@ class ConsultationBrain:
         session_id: str,
         patient_context: PatientContext,
     ) -> SearchResult:
+        if _normalize_root_action_mode(self.deps.search_policy.root_action_mode) == "no_tree_greedy":
+            return self._run_no_tree_greedy_search(session_id, patient_context)
+
         tracker = self.deps.state_tracker
 
         # 先拿到当前会话状态；这份 state 是“真实会话态”，后续 rollout 使用的则是从它派生出来的轻量分支快照。
@@ -2353,6 +2364,70 @@ class ConsultationBrain:
 
         # 把最近一次 search 结果挂回真实 session metadata；
         # 后续 finalize()、前端 search_report、以及调试复盘都会读取这里。
+        state.metadata["last_search_result"] = search_result
+        return search_result
+
+    # `no_tree_greedy` 直接基于当前候选态选下一问，不进入 select/expand/rollout/backprop。
+    def _run_no_tree_greedy_search(
+        self,
+        session_id: str,
+        patient_context: PatientContext,
+    ) -> SearchResult:
+        tracker = self.deps.state_tracker
+        state = tracker.get_session(session_id)
+        current_hypothesis, alternatives = self._build_search_root_hypothesis_context(state)
+        actions = self._build_actions_for_hypothesis_context(
+            state,
+            current_hypothesis=current_hypothesis,
+            alternatives=alternatives,
+        )
+        selected_action = self._select_action_from_no_tree_candidates(
+            actions,
+            excluded_target_node_ids=state.asked_node_ids,
+        )
+
+        if selected_action is not None:
+            selected_action.metadata = {
+                **dict(selected_action.metadata),
+                "selected_by_no_tree_greedy": True,
+            }
+
+        verifier_patient_context = self._build_verifier_patient_context(session_id, patient_context)
+        final_scores: list[FinalAnswerScore] = []
+        if len(state.candidate_hypotheses) > 0:
+            final_scores = self.deps.trajectory_evaluator.score_candidate_hypotheses_without_trajectories(
+                state.candidate_hypotheses,
+                patient_context=verifier_patient_context,
+            )
+
+        best_answer = self.deps.trajectory_evaluator.select_best_answer(final_scores)
+        search_result = SearchResult(
+            selected_action=selected_action,
+            root_best_action=selected_action,
+            trajectories=[],
+            final_answer_scores=final_scores,
+            best_answer_id=best_answer.answer_id if best_answer is not None else None,
+            best_answer_name=best_answer.answer_name if best_answer is not None else None,
+            metadata={
+                "rollouts_requested": 0,
+                "rollouts_executed": 0,
+                "rollout_trajectory_count": 0,
+                "answer_group_count": len(final_scores),
+                "single_answer_group": len(final_scores) == 1,
+                "rollout_branch_seed_counts": {},
+                "tree_node_count": 0,
+                "tree_refresh": {
+                    "rerooted": False,
+                    "reason": "no_tree_greedy",
+                    "root_signature": "",
+                    "top_hypothesis_id": getattr(current_hypothesis, "node_id", None),
+                },
+                "root_action_mode": "no_tree_greedy",
+                "no_tree_greedy": True,
+                "root_candidate_action_count": len(actions),
+                "candidate_state_answer_fallback": True,
+            },
+        )
         state.metadata["last_search_result"] = search_result
         return search_result
 
@@ -2763,9 +2838,20 @@ class ConsultationBrain:
                 search_result,
                 selected_action,
             )
+            if not skip_low_cost_explorer:
+                skip_low_cost_explorer, skip_reason = self._should_skip_low_cost_explorer_after_search_root(
+                    session_id,
+                    search_result,
+                    selected_action,
+                )
             if skip_low_cost_explorer:
                 search_result.metadata["low_cost_explorer_skipped_reason"] = skip_reason
-                search_result.metadata["repair_action_override_guarded"] = True
+                search_result.metadata["repair_action_override_guarded"] = (
+                    skip_reason == "repair_action_protected"
+                )
+                search_result.metadata["search_root_override_guarded"] = (
+                    skip_reason == "search_root_action_protected"
+                )
             else:
                 if len(skip_reason) > 0:
                     search_result.metadata["low_cost_explorer_after_repair_reason"] = skip_reason
@@ -3360,26 +3446,75 @@ class ConsultationBrain:
             "alternatives": alternatives,
         }
 
+    # 从当前候选态解析搜索根的主假设与竞争备选，供 no-tree / root action 构造共用。
+    def _build_search_root_hypothesis_context(
+        self,
+        state: SessionState,
+    ) -> tuple[HypothesisScore | HypothesisCandidate | None, list[HypothesisScore | HypothesisCandidate]]:
+        if len(state.candidate_hypotheses) == 0:
+            return None, []
+
+        ranked = sorted(state.candidate_hypotheses, key=lambda item: (-item.score, item.name))
+        current_hypothesis = ranked[0]
+        alternatives = [item for item in ranked if item.node_id != current_hypothesis.node_id]
+        return current_hypothesis, alternatives
+
+    # 围绕同一个主假设构造一批可执行 A3 动作，既服务树搜索叶子扩展，也服务 no-tree greedy。
+    def _build_actions_for_hypothesis_context(
+        self,
+        session_state: SessionState,
+        *,
+        current_hypothesis: HypothesisScore | HypothesisCandidate | None,
+        alternatives: Sequence[HypothesisScore | HypothesisCandidate],
+    ) -> list[MctsAction]:
+        if current_hypothesis is None:
+            return []
+
+        rows = self.deps.retriever.retrieve_r2_expected_evidence(current_hypothesis, session_state)
+        actions = self.deps.action_builder.build_verification_actions(
+            rows,
+            hypothesis_id=current_hypothesis.node_id,
+            topic_id=current_hypothesis.label,
+            competing_hypotheses=list(alternatives),
+            current_hypothesis=current_hypothesis,
+            session_state=session_state,
+        )
+        return actions[: self.deps.mcts_engine.config.max_child_nodes]
+
     # 根据当前叶子所处路径扩展下一批 A3 验证动作。
     def _expand_actions_for_leaf(self, leaf: TreeNode, rollout_context: dict) -> list[MctsAction]:
         _ = leaf
         rollout_state: SessionState = rollout_context["state"]
         current_hypothesis = rollout_context["current_hypothesis"]
         alternatives = rollout_context["alternatives"]
-
-        if current_hypothesis is None:
-            return []
-
-        rows = self.deps.retriever.retrieve_r2_expected_evidence(current_hypothesis, rollout_state)
-        actions = self.deps.action_builder.build_verification_actions(
-            rows,
-            hypothesis_id=current_hypothesis.node_id,
-            topic_id=current_hypothesis.label,
-            competing_hypotheses=alternatives,
+        return self._build_actions_for_hypothesis_context(
+            rollout_state,
             current_hypothesis=current_hypothesis,
-            session_state=rollout_state,
+            alternatives=alternatives,
         )
-        return actions[: self.deps.mcts_engine.config.max_child_nodes]
+
+    # no-tree greedy 只按当前动作局部先验选 root action，不消费树上的 visit/value。
+    def _select_action_from_no_tree_candidates(
+        self,
+        actions: Sequence[MctsAction],
+        *,
+        excluded_target_node_ids: Sequence[str] | None = None,
+    ) -> MctsAction | None:
+        excluded = set(excluded_target_node_ids or [])
+        selectable = [item for item in actions if item.target_node_id not in excluded]
+
+        if len(selectable) == 0:
+            return None
+
+        return sorted(
+            selectable,
+            key=lambda item: (
+                -float(item.prior_score),
+                -float(item.metadata.get("answerability_score", 0.0) or 0.0),
+                -float(item.metadata.get("discriminative_gain", 0.0) or 0.0),
+                item.action_id,
+            ),
+        )[0]
 
     # 根据节点 id 从当前候选假设中找到对应对象。
     def _find_hypothesis_by_id(
@@ -5035,6 +5170,30 @@ class ConsultationBrain:
 
         return True, "repair_action_protection_without_unaskable_exception"
 
+    # 在 no-tree / greedy 暴露实验里，可选择保护 search root，不让 low-cost explorer 立刻改问别的问题。
+    def _should_skip_low_cost_explorer_after_search_root(
+        self,
+        session_id: str,
+        search_result: SearchResult,
+        selected_action: MctsAction | None,
+    ) -> tuple[bool, str]:
+        policy = self.deps.repair_policy
+        root_action = search_result.root_best_action
+
+        if not bool(policy.protect_search_root_action_from_low_cost_explorer) or root_action is None:
+            return False, ""
+
+        if search_result.repair_selected_action is not None:
+            return False, ""
+
+        if selected_action is None or selected_action.action_id != root_action.action_id:
+            return False, ""
+    
+        if self._selected_action_is_askable(session_id, root_action):
+            return True, "search_root_action_protected"
+
+        return False, "search_root_action_unaskable"
+
     # 在证据揭示不足时，主动从 top3 候选里找低成本且有区分度的问题。
     def _choose_low_cost_explorer_action(
         self,
@@ -5607,6 +5766,9 @@ def build_default_brain(
             protect_repair_action_from_low_cost_explorer=bool(
                 repair_config.get("protect_repair_action_from_low_cost_explorer", True)
             ),
+            protect_search_root_action_from_low_cost_explorer=bool(
+                repair_config.get("protect_search_root_action_from_low_cost_explorer", False)
+            ),
             allow_low_cost_explorer_after_repair_if_unaskable_only=bool(
                 repair_config.get("allow_low_cost_explorer_after_repair_if_unaskable_only", True)
             ),
@@ -5652,7 +5814,17 @@ def build_default_brain_from_env(
 
 # 读取第二阶段默认配置文件。
 def load_brain_config(config_path: str | Path | None = None) -> dict:
-    path = Path(config_path) if config_path is not None else Path(__file__).resolve().parents[1] / "configs" / "brain.yaml"
+    project_root = Path(__file__).resolve().parents[1]
+
+    if config_path is not None:
+        path = Path(config_path)
+    else:
+        env_config_path = str(os.getenv(BRAIN_CONFIG_PATH_ENV_VAR) or "").strip()
+        if len(env_config_path) > 0:
+            candidate = Path(env_config_path).expanduser()
+            path = candidate if candidate.is_absolute() else project_root / candidate
+        else:
+            path = project_root / "configs" / "brain.yaml"
 
     if not path.exists():
         return {}

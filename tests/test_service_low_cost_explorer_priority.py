@@ -429,3 +429,48 @@ def test_service_forces_low_cost_definition_fallback_after_repeated_exam_no_resu
     assert action.target_node_id == "ldl_high"
     assert action.metadata["selected_by_low_cost_explorer"] is True
     assert search_result.metadata["selected_action_source_reason"] == "recent_exam_no_result_streak"
+
+
+# 关闭 best repair action 后，如需暴露 search root，本轮 askable root 不应再被 low-cost explorer 抢走。
+def test_service_protects_search_root_action_from_low_cost_explorer_when_enabled() -> None:
+    tracker = StateTracker()
+    state = tracker.create_session("s_search_root_guard")
+    state.candidate_hypotheses = [
+        HypothesisScore(node_id="pcp", label="Disease", name="PCP", score=1.0),
+    ]
+    brain = _build_brain(tracker, {"pcp": _exam_driven_rows()})
+    brain.deps.repair_policy.protect_search_root_action_from_low_cost_explorer = True
+    root_action = _low_cost_symptom_action()
+    search_result = SearchResult(root_best_action=root_action)
+
+    should_skip, reason = brain._should_skip_low_cost_explorer_after_search_root(
+        "s_search_root_guard",
+        search_result,
+        root_action,
+    )
+
+    assert should_skip is True
+    assert reason == "search_root_action_protected"
+
+
+# 若 search root 自己已经不可问，则仍允许 explorer 接管，避免保护逻辑把会话卡死。
+def test_service_allows_low_cost_explorer_after_unaskable_search_root() -> None:
+    tracker = StateTracker()
+    state = tracker.create_session("s_search_root_unaskable")
+    state.candidate_hypotheses = [
+        HypothesisScore(node_id="pcp", label="Disease", name="PCP", score=1.0),
+    ]
+    state.asked_node_ids.append("symptom_fever")
+    brain = _build_brain(tracker, {"pcp": _exam_driven_rows()})
+    brain.deps.repair_policy.protect_search_root_action_from_low_cost_explorer = True
+    root_action = _low_cost_symptom_action()
+    search_result = SearchResult(root_best_action=root_action)
+
+    should_skip, reason = brain._should_skip_low_cost_explorer_after_search_root(
+        "s_search_root_unaskable",
+        search_result,
+        root_action,
+    )
+
+    assert should_skip is False
+    assert reason == "search_root_action_unaskable"

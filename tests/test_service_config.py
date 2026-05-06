@@ -29,7 +29,7 @@ def test_load_brain_config_reads_yaml_file(tmp_path: Path) -> None:
                 "search:",
                 "  num_rollouts: 5",
                 "search_policy:",
-                "  root_action_mode: greedy",
+                "  root_action_mode: no_tree_greedy",
                 "rollout_control:",
                 "  enable_multi_branch_rollout: true",
                 "  branch_budget_per_action: 2",
@@ -46,6 +46,7 @@ def test_load_brain_config_reads_yaml_file(tmp_path: Path) -> None:
                 "repair:",
                 "  enable_tree_reroot: false",
                 "  protect_repair_action_from_low_cost_explorer: true",
+                "  protect_search_root_action_from_low_cost_explorer: true",
                 "a3:",
                 "  enable_early_exam_context_rescue: true",
                 "  early_exam_context_turn_limit: 2",
@@ -60,7 +61,7 @@ def test_load_brain_config_reads_yaml_file(tmp_path: Path) -> None:
     config = load_brain_config(config_path)
 
     assert config["search"]["num_rollouts"] == 5
-    assert config["search_policy"]["root_action_mode"] == "greedy"
+    assert config["search_policy"]["root_action_mode"] == "no_tree_greedy"
     assert config["rollout_control"]["enable_multi_branch_rollout"] is True
     assert config["rollout_control"]["branch_budget_per_action"] == 2
     assert config["path_evaluation"]["agent_eval_mode"] == "llm_verifier"
@@ -72,11 +73,34 @@ def test_load_brain_config_reads_yaml_file(tmp_path: Path) -> None:
     assert config["a2"]["scope_cluster_exact_bonus"] == 0.4
     assert config["repair"]["enable_tree_reroot"] is False
     assert config["repair"]["protect_repair_action_from_low_cost_explorer"] is True
+    assert config["repair"]["protect_search_root_action_from_low_cost_explorer"] is True
     assert config["a3"]["enable_early_exam_context_rescue"] is True
     assert config["a3"]["early_exam_context_turn_limit"] == 2
     assert config["candidate_feedback"]["enable_multi_hypothesis_feedback"] is True
     assert config["candidate_feedback"]["max_related_hypotheses_per_evidence"] == 4
     assert "stop" not in config
+
+
+# 验证 load_brain_config 也支持从环境变量切换整套 benchmark 配置文件。
+def test_load_brain_config_supports_env_override(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "brain_env.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "search_policy:",
+                "  root_action_mode: mcts",
+                "repair:",
+                "  enable_best_repair_action: false",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("BRAIN_CONFIG_PATH", str(config_path))
+    config = load_brain_config()
+
+    assert config["search_policy"]["root_action_mode"] == "mcts"
+    assert config["repair"]["enable_best_repair_action"] is False
 
 
 # 验证默认构造会真正读取 a3 / repair 配置，并且不会在启动阶段遗漏配置变量。
@@ -85,7 +109,7 @@ def test_build_default_brain_maps_a3_and_repair_config() -> None:
         client=object(),
         config_overrides={
             "search_policy": {
-                "root_action_mode": "greedy",
+                "root_action_mode": "no_tree_greedy",
             },
             "a3": {
                 "enable_early_exam_context_rescue": True,
@@ -94,7 +118,9 @@ def test_build_default_brain_maps_a3_and_repair_config() -> None:
                 "exam_context_rescue_high_cost_role_threshold": 0.55,
             },
             "repair": {
+                "enable_best_repair_action": False,
                 "protect_repair_action_from_low_cost_explorer": True,
+                "protect_search_root_action_from_low_cost_explorer": True,
                 "allow_low_cost_explorer_after_repair_if_unaskable_only": False,
                 "enable_missing_key_support_competition_escalation": True,
                 "missing_key_support_retry_threshold": 3,
@@ -124,12 +150,14 @@ def test_build_default_brain_maps_a3_and_repair_config() -> None:
         llm_client=FakeAvailableLlmClient(),
     )
 
-    assert brain.deps.search_policy.root_action_mode == "greedy"
+    assert brain.deps.search_policy.root_action_mode == "no_tree_greedy"
     assert brain.deps.a3_routing_policy.enable_early_exam_context_rescue is True
     assert brain.deps.a3_routing_policy.early_exam_context_turn_limit == 3
     assert brain.deps.a3_routing_policy.early_exam_context_revealed_count_threshold == 1
     assert brain.deps.a3_routing_policy.exam_context_rescue_high_cost_role_threshold == 0.55
+    assert brain.deps.repair_policy.enable_best_repair_action is False
     assert brain.deps.repair_policy.protect_repair_action_from_low_cost_explorer is True
+    assert brain.deps.repair_policy.protect_search_root_action_from_low_cost_explorer is True
     assert brain.deps.repair_policy.allow_low_cost_explorer_after_repair_if_unaskable_only is False
     assert brain.deps.repair_policy.enable_missing_key_support_competition_escalation is True
     assert brain.deps.repair_policy.missing_key_support_retry_threshold == 3

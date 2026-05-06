@@ -143,11 +143,16 @@
   - 第二阶段的总编排层。
   - 当前已经串联 `turn_interpreter -> mention merge -> A1 -> A2 -> R2/A3 -> rollout -> report` 的搜索闭环。
   - 当前也是读取 [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml) 并构造默认依赖的入口。
-  - 当前 benchmark 已支持 `search_policy.root_action_mode = mcts | greedy`：默认保持 MCTS 根动作 exploitation，`greedy` 用于做 `KG + Greedy` 消融。
+  - 当前 `load_brain_config()` 也支持读取环境变量 `BRAIN_CONFIG_PATH`，可在 benchmark 中直接切到 [configs/brain_benchmark_opening_only.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain_benchmark_opening_only.yaml) 或 [configs/brain_benchmark_no_repair.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain_benchmark_no_repair.yaml)，避免手改默认配置。
+  - 当前 benchmark 已支持 `search_policy.root_action_mode = mcts | greedy | no_tree_greedy`：
+    - `mcts`：完整树搜索
+    - `greedy`：仍保留树搜索，但根动作只按 rollout 后的局部先验贪心选择
+    - `no_tree_greedy`：完全跳过 select/expand/rollout/backprop，只按当前候选态动作先验选下一问
   - `process_turn()` 当前已按“统一解释本轮回答 -> 消化上一轮 pending action -> 判断本轮阶段 -> search / verifier / repair -> 输出下一问或最终报告”的顺序补充分段中文注释，便于顺着源码阅读控制流。
   - 当前会先把可信实体链接回填到 `mention.node_id / normalized_name`，再派生 `PatientContext` 和 `A1`，保证 opening 证据、slot 更新、R1 和 mention_context 使用同一图谱锚点。
   - 当前会把 `exam_context` 回答中的检查名与结果原文再次送入实体链接；可信命中 `LabFinding / ImagingFinding / Pathogen` 时直接写入 slot/evidence_state，且不再围绕 `__exam_context__::general` 重复追问。
   - 当前第一批改造已落地两条动作仲裁规则：repair 动作在仍可问时不会再被 low-cost explorer 覆盖；前 2 轮且候选明显 exam-driven 时，会优先拉起 `collect_general_exam_context / collect_exam_context` 入口。
+  - 当前也支持在 benchmark 中暂时关闭 `enable_best_repair_action`，并通过 `protect_search_root_action_from_low_cost_explorer` 暴露 search root 本身，避免 low-cost explorer 立刻覆盖 `default_search_action / no_tree_greedy` 的下一问。
   - 当前病原体阳性、影像/化验阳性、CD4 低值等强证据进入后，会设置 `force_a2_refresh` 和 `force_tree_refresh`，促使下一步重新执行 A2 并围绕新强证据收束。
   - 当前会在 A2、repair、stop 前刷新 `observed_anchor_index`，让真实病原体/检查强锚点、同族锚点和背景证据分别进入候选排序；rollout 模拟阳性只保留为路径推演，不再污染真实 confirmed evidence。
   - 当前第三批改造已把 `scope cluster rerank` 前移到 A2 observed-anchor rerank：`exact_scope / family_scope / generic` 会通过 `scope_cluster_bonus` 更早影响候选顺位，不再主要依赖 acceptance guard 兜底。
@@ -283,7 +288,7 @@
 
 - 详细运行链路说明：
   - [brain_runtime_call_chain_guide.md](/Users/loki/Workspace/GraduationDesign/docs/brain_runtime_call_chain_guide.md)
-  - 当前文档已按 `turn_interpreter -> A1 / A2 / A3 -> verifier-only acceptance -> repair` 的实现口径重写，并明确说明旧结构化 `stop rule` 已移出主链，可直接对照 `process_turn()` 阅读。
+  - 当前文档已按 `turn_interpreter -> A1 / A2 / A3 -> verifier-only acceptance -> repair` 的实现口径重写，并进一步细化到 `pending action` 分型写回、`A2` 刷新条件、verifier guard 与 repair 动作分流，可直接对照 `process_turn()` 阅读。
 
 - 论文对照与启发式参数说明：
   - [med_mcts_vs_current_system.md](/Users/loki/Workspace/GraduationDesign/docs/med_mcts_vs_current_system.md)

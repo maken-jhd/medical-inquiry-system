@@ -1,3 +1,5 @@
+# Opening-Only 复用当前 Full System 主链路配置，
+# 只是在 replay 命令层通过 --max-turns 0 禁止进入多轮追问。
 llm:
   structured_retry_count: 2
 
@@ -10,14 +12,9 @@ search:
   max_kg_triplets: 15
 
 search_policy:
-  # 当前这轮 benchmark 先切到 No-Tree Greedy：
-  # 直接跳过 select/expand/rollout/backprop，只按当前候选态动作先验选下一问。
   root_action_mode: mcts
 
 rollout_control:
-  # 当前默认配置切到 batch2 + P4 + P5 + P7。
-  # 也就是保留多分支 rollout / 防塌缩、动态权重、单答案封顶，
-  # 并重新打开 scope-aware rerank 与 final score scope penalty。
   enable_multi_branch_rollout: true
   branch_budget_per_action: 2
   enable_anti_collapse_penalty: true
@@ -66,12 +63,10 @@ candidate_feedback:
 
 repair:
   enable_verifier_hypothesis_reshuffle: true
-  # 为了暴露 search root 本身的价值，这轮先临时关闭 repair action 接管。
-  enable_best_repair_action: false
+  enable_best_repair_action: true
   enable_tree_reroot: true
   protect_repair_action_from_low_cost_explorer: true
-  # 同时限制 low-cost explorer 抢走 search root，避免 no-tree root policy 还没落地就被覆盖。
-  protect_search_root_action_from_low_cost_explorer: true
+  protect_search_root_action_from_low_cost_explorer: false
   allow_low_cost_explorer_after_repair_if_unaskable_only: true
   enable_missing_key_support_competition_escalation: true
   missing_key_support_retry_threshold: 2

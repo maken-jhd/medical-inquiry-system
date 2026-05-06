@@ -1,3 +1,5 @@
+# No-Repair 保留当前 Full System 的检索、A1/A2/A3 与树搜索主链路，
+# 但关闭 verifier 拒停后的假设改排、repair 动作接管与 reroot 相关能力。
 llm:
   structured_retry_count: 2
 
@@ -10,14 +12,9 @@ search:
   max_kg_triplets: 15
 
 search_policy:
-  # 当前这轮 benchmark 先切到 No-Tree Greedy：
-  # 直接跳过 select/expand/rollout/backprop，只按当前候选态动作先验选下一问。
   root_action_mode: mcts
 
 rollout_control:
-  # 当前默认配置切到 batch2 + P4 + P5 + P7。
-  # 也就是保留多分支 rollout / 防塌缩、动态权重、单答案封顶，
-  # 并重新打开 scope-aware rerank 与 final score scope penalty。
   enable_multi_branch_rollout: true
   branch_budget_per_action: 2
   enable_anti_collapse_penalty: true
@@ -65,17 +62,15 @@ candidate_feedback:
   max_related_hypotheses_per_evidence: 5
 
 repair:
-  enable_verifier_hypothesis_reshuffle: true
-  # 为了暴露 search root 本身的价值，这轮先临时关闭 repair action 接管。
+  enable_verifier_hypothesis_reshuffle: false
   enable_best_repair_action: false
-  enable_tree_reroot: true
-  protect_repair_action_from_low_cost_explorer: true
-  # 同时限制 low-cost explorer 抢走 search root，避免 no-tree root policy 还没落地就被覆盖。
-  protect_search_root_action_from_low_cost_explorer: true
-  allow_low_cost_explorer_after_repair_if_unaskable_only: true
-  enable_missing_key_support_competition_escalation: true
+  enable_tree_reroot: false
+  protect_repair_action_from_low_cost_explorer: false
+  protect_search_root_action_from_low_cost_explorer: false
+  allow_low_cost_explorer_after_repair_if_unaskable_only: false
+  enable_missing_key_support_competition_escalation: false
   missing_key_support_retry_threshold: 2
-  zero_anchor_current_answer_force_competition: true
+  zero_anchor_current_answer_force_competition: false
 
 fallback:
   enable_question_selector_mode: true

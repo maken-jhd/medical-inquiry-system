@@ -10,6 +10,171 @@
 - `phase2_execution_checklist.md` 更偏“路线设计与待办清单”
 - 本文更偏“已经发生过哪些阶段性变化、分别解决了什么问题”
 
+## 近期更新：2026-05-06 跑完 `Opening-Only` 与 `No-Repair`，并把结果写回 benchmark checklist
+
+### 本次目标
+
+- 补齐论文主表中“多轮问诊是否必要”和“repair 是否必要”两组关键内部消融
+- 不只记录数值，还把结果含义与下一步动作写回 benchmark 文档
+
+### 本次结果
+
+- `Opening-Only`
+  - 输出目录：
+    - [opening_only](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_replay/benchmark_20260505_full227_baseline/opening_only)
+  - 相比 `Full System`：
+    - `top1_final_answer_hit_rate: 0.4185 -> 0.1982`
+    - `top3_hypothesis_hit_rate: 0.6740 -> 0.4670`
+    - `completion_rate: 0.3921 -> 0.0000`
+    - `top_exact_correct_but_rejected_count: 32 -> 45`
+  - 结论：
+    - opening 本身有初筛价值
+    - 但只靠 opening 无法补齐 verifier 所需的关键证据
+    - 这组结果可以作为“多轮问诊必要性”的强负对照
+
+- `No-Repair`
+  - 输出目录：
+    - [no_repair](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_replay/benchmark_20260505_full227_baseline/no_repair)
+  - 相比 `Full System`：
+    - `top1_final_answer_hit_rate: 0.4185 -> 0.3128`
+    - `top3_hypothesis_hit_rate: 0.6740 -> 0.5066`
+    - `completion_rate: 0.3921 -> 0.1850`
+    - `accepted_exact_hit_count: 63 -> 27`
+    - `top_exact_correct_but_rejected_count: 32 -> 44`
+    - `average_turns: 5.98 -> 7.09`
+  - 结论：
+    - `repair` 不是边缘 safety layer
+    - 它是把 verifier 拒停信号转成关键补证据动作的核心模块
+    - 去掉 `repair` 后，系统会明显转向 low-cost explorer，问得更多但命中更少
+
+### 本次改动
+
+- [docs/diagnosis_benchmark_experiment_design.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_benchmark_experiment_design.md)
+  - 将 `Opening-Only` 与 `No-Repair` 从待完成改为已完成
+  - 补充 `overall` 与 `eligible112` 的关键指标
+  - 补充 `No-Repair` 的内部机制分析：
+    - `avg_truth_hit_questions: 1.85 -> 1.41`
+    - `avg_required_family_coverage_gain: 1.74 -> 0.59`
+    - `verifier_rejected_stop: 112 -> 178`
+    - `repair_selected_action: 782 -> 0`
+    - `low_cost_explorer_action: 388 -> 1167`
+    - `question_count_by_cost.high: 564 -> 30`
+  - 将 benchmark 下一步收敛为：
+    - 先整理 `Full System / No-Tree Greedy / Opening-Only / No-Repair` 主表与正文
+    - 再决定是否补跑 `No Scope-Aware Rerank`
+
+### 影响
+
+- 论文正文所需的最小 4 组内部消融已经齐备
+- `Opening-Only` 与 `No-Repair` 都已经有足够明确的结论，不再只是“跑过了”
+- benchmark 现在可以从“继续补跑”切换到“整理主表 + 写实验分析正文”
+
+## 近期更新：2026-05-06 为 benchmark 增加专用 brain 配置文件切换入口
+
+### 本次目标
+
+- 不再依赖手工改写 [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml) 切 benchmark 变体
+- 直接为 `Opening-Only` 和 `No-Repair` 提供可复用的整套配置文件
+
+### 本次改动
+
+- [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - `load_brain_config()` 新增对环境变量 `BRAIN_CONFIG_PATH` 的支持
+  - benchmark 运行时可直接指定另一份 brain YAML，而不污染默认配置
+- [configs/brain_benchmark_opening_only.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain_benchmark_opening_only.yaml)
+  - 新增 `Opening-Only` 专用配置
+  - 复用当前 `Full System` 主链路参数，并切回 `search_policy.root_action_mode = mcts`
+- [configs/brain_benchmark_no_repair.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain_benchmark_no_repair.yaml)
+  - 新增 `No-Repair` 专用配置
+  - 关闭 verifier 拒停后的 hypothesis reshuffle、repair action 与 tree reroot
+- [docs/diagnosis_benchmark_experiment_design.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_benchmark_experiment_design.md)
+  - checklist 改为直接引用专用配置文件
+  - `Opening-Only / No-Repair` 命令模板改为 `BRAIN_CONFIG_PATH=...`
+- [brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
+  - 补充 benchmark 配置切换入口说明
+- [tests/test_service_config.py](/Users/loki/Workspace/GraduationDesign/tests/test_service_config.py)
+  - 新增环境变量配置切换回归测试
+
+### 影响
+
+- 后续跑 benchmark 变体时，不需要反复手改默认配置
+- `No-Tree Greedy` 当前默认态不会再和 `Opening-Only / No-Repair` 命令串档
+- 更适合论文阶段频繁补跑和复现实验
+
+## 近期更新：2026-05-06 benchmark 设计文档改为 checklist 模式，并明确当前下一步
+
+### 本次目标
+
+- 不再让 benchmark 文档停留在长篇方案说明
+- 直接把它改成“当前进度 + 待办 + 下一步动作”的执行清单
+
+### 本次改动
+
+- [docs/diagnosis_benchmark_experiment_design.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_benchmark_experiment_design.md)
+  - 从长篇实验设计改写为 checklist 模式
+  - 明确记录当前已完成变体：
+    - `Full System`
+    - `KG + Greedy`
+    - `No-Tree Greedy`
+  - 明确记录当前待完成变体：
+    - `Opening-Only`
+    - `No-Repair`
+    - `No Scope-Aware Rerank`
+  - 将下一步执行顺序收紧为：
+    - 先跑 `Opening-Only`
+    - 再跑 `No-Repair`
+    - 视时间决定是否补 `No Scope-Aware Rerank`
+
+### 影响
+
+- 后续 benchmark 推进可直接按 checklist 执行
+- 论文主表与补充实验的优先级更清晰
+- 避免继续在弱价值的 `KG + Greedy` 结果上反复纠缠
+
+## 近期更新：2026-05-06 支持 `No-Tree Greedy` 变体，并增加 search root 保护开关
+
+### 本次目标
+
+- 给 benchmark 增加一个真正跳过树搜索的 `No-Tree Greedy` 变体
+- 在关闭 `enable_best_repair_action` 时，避免 low-cost explorer 立刻覆盖 search root，保证 root policy 能真实暴露出来
+
+### 本次改动
+
+- [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - `SUPPORTED_ROOT_ACTION_MODES` 扩展为：
+    - `mcts`
+    - `greedy`
+    - `no_tree_greedy`
+  - `run_reasoning_search()` 新增 `no_tree_greedy` 分支：
+    - 直接从当前 top hypothesis 取 R2 动作
+    - 不再执行 `select_leaf / expand_node / rollout / backpropagate`
+    - 最终答案评分改走 `score_candidate_hypotheses_without_trajectories()`
+  - 新增 `protect_search_root_action_from_low_cost_explorer`
+    - 当 root action 仍可问时，可暂时禁止 low-cost explorer 抢走这一轮
+    - 主要用于 `No-Tree Greedy` 和关闭 `enable_best_repair_action` 的 benchmark 暴露实验
+- [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml)
+  - 当前默认实验配置临时切到：
+    - `search_policy.root_action_mode = no_tree_greedy`
+    - `repair.enable_best_repair_action = false`
+    - `repair.protect_search_root_action_from_low_cost_explorer = true`
+- [tests/test_service_no_tree_greedy.py](/Users/loki/Workspace/GraduationDesign/tests/test_service_no_tree_greedy.py)
+  - 新增回归测试，验证 no-tree 路径不会误入树搜索入口
+- [tests/test_service_low_cost_explorer_priority.py](/Users/loki/Workspace/GraduationDesign/tests/test_service_low_cost_explorer_priority.py)
+  - 新增 search root 保护相关测试
+- [tests/test_service_config.py](/Users/loki/Workspace/GraduationDesign/tests/test_service_config.py)
+  - 更新配置映射测试，覆盖 `no_tree_greedy` 与新保护开关
+- [brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
+  - 补充三种 root action mode 与 search root 保护说明
+- [docs/diagnosis_benchmark_experiment_design.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_benchmark_experiment_design.md)
+  - 补充 `no_tree_greedy` 作为严格无树搜索消融的运行口径
+
+### 验证结果
+
+- `conda run -n GraduationDesign python -m pytest tests/test_service_config.py tests/test_service_low_cost_explorer_priority.py tests/test_service_no_tree_greedy.py -q`
+  - `13 passed`
+- `conda run -n GraduationDesign python -m pytest tests/test_run_batch_replay.py tests/test_report_builder.py -q`
+  - `21 passed`
+
 ## 近期更新：2026-05-05 论文方法部分文稿修订（第 3 章 3.2 / 3.3 / 3.4）
 
 ## 近期更新：2026-05-05 回退到 benchmark 基线，并补三项低风险防空转修复
@@ -5112,6 +5277,40 @@ python -m py_compile brain/simulation_engine.py brain/trajectory_evaluator.py br
 - 后续查看运行链路时，不再把 `A4` 和旧 stop-rule 误认为仍在主流程内
 - 更容易对齐当前代码中的 `repair / early exam rescue / low-cost explorer / verifier-only acceptance`
 - 为答辩、论文描述和后续参数实验提供一致的流程叙述基线
+
+## 五十八、2026-05-06：把运行链路指南从“摘要版”扩充为“细粒度过程版”
+
+### 本次目标
+
+- 继续细化第二阶段运行链路文档，不只说明“有哪些阶段”，还说明“每一步写了什么状态、为什么会分流、verifier/repair 如何接管后半程”
+- 让这份文档能同时服务于源码阅读、答辩讲解、实验复盘和后续维护
+
+### 本次更新
+
+- 更新：
+  - [docs/brain_runtime_call_chain_guide.md](/Users/loki/Workspace/GraduationDesign/docs/brain_runtime_call_chain_guide.md)
+  - [README.md](/Users/loki/Workspace/GraduationDesign/README.md)
+  - [brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
+
+### 具体改动
+
+- 重写 `brain_runtime_call_chain_guide.md` 的结构与粒度，新增或显著展开：
+  - 关键运行时对象说明：`PatientContext / SessionState / SlotUpdate / EvidenceState / SearchResult / FinalAnswerScore / StopDecision`
+  - `process_turn()` 前半段的真实状态写回链：`turn_interpreter -> generic merge -> pending-action-specific merge`
+  - `pending_action` 的分型处理：`collect_chief_complaint`、`exam_context`、普通 `verify_evidence`
+  - `A2` 的刷新条件、candidate pool 合并方式以及 observed-anchor rerank 作用
+  - `run_reasoning_search()` 的树复用、leaf/context 恢复、动作扩展、启发式 rollout 和答案分组流程
+  - verifier 的两层结构：`TrajectoryEvaluator` 产出信号、`VerifierAcceptanceController` 消费信号
+  - `llm_verifier` 的触发窗口、输入输出 schema、`observed_evidence_guard` 与 `scope_acceptance_guard`
+  - `observed_evidence_final_evaluator` 作为 candidate-state fallback verifier 的位置
+  - repair context 的构造、hypothesis reshuffle、competition escalation、early exam rescue 与 low-cost explorer 覆盖链
+- README 与 `brain/README.md` 中同步更新运行链路指南索引说明，明确这份文档已经细化到 `pending action / verifier / repair` 级别
+
+### 结果影响
+
+- 后续阅读者不再只知道“当前有 A1/A2/A3”，而能顺着文档理解“每一步到底写回了哪些状态”
+- 更容易把 verifier 的判停、guard 和 repair 理由与源码字段一一对上
+- 更适合作为答辩讲稿底稿与实验复盘参考，而不只是项目目录索引
 
 ## 五十四、2026-05-05：统一绪论术语口径并补强研究现状过渡
 
