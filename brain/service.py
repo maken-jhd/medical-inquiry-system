@@ -154,6 +154,12 @@ class SearchPolicyConfig:
     """控制根节点下一问的选择策略，便于切换 MCTS / Greedy 实验变体。"""
 
     root_action_mode: str = "mcts"
+    # 下面三项只服务 benchmark：
+    # 当 root_action_mode=greedy 时，可显式关闭 verifier repair、early exam rescue、
+    # low-cost explorer 这些 root 后处理覆盖器，做更干净的 greedy 基线。
+    disable_verifier_repair_for_greedy: bool = False
+    disable_early_exam_context_rescue_for_greedy: bool = False
+    disable_low_cost_explorer_for_greedy: bool = False
 
 
 class ConsultationBrain:
@@ -2450,6 +2456,28 @@ class ConsultationBrain:
             excluded_target_node_ids=excluded_target_node_ids,
         )
 
+    # 当前 root action mode 会被多个 benchmark 小开关复用，集中封装避免分散判断。
+    def _current_root_action_mode(self) -> str:
+        return _normalize_root_action_mode(self.deps.search_policy.root_action_mode)
+
+    # clean greedy benchmark 可选择完全禁用 verifier repair，暴露 root policy 本身。
+    def _should_disable_verifier_repair_for_current_policy(self) -> bool:
+        return self._current_root_action_mode() == "greedy" and bool(
+            self.deps.search_policy.disable_verifier_repair_for_greedy
+        )
+
+    # clean greedy benchmark 可选择禁用 early exam rescue，避免检查入口后处理覆盖 root action。
+    def _should_disable_early_exam_context_rescue_for_current_policy(self) -> bool:
+        return self._current_root_action_mode() == "greedy" and bool(
+            self.deps.search_policy.disable_early_exam_context_rescue_for_greedy
+        )
+
+    # clean greedy benchmark 可选择禁用 low-cost explorer，避免低成本补问覆盖 root policy。
+    def _should_disable_low_cost_explorer_for_current_policy(self) -> bool:
+        return self._current_root_action_mode() == "greedy" and bool(
+            self.deps.search_policy.disable_low_cost_explorer_for_greedy
+        )
+
     # rollout 可能只产出 UNKNOWN/空答案组；此时用当前 A2 候选态补一组保守 answer score。
     def _needs_candidate_state_answer_fallback(self, scores: Sequence[FinalAnswerScore]) -> bool:
         if len(scores) == 0:
@@ -2797,22 +2825,36 @@ class ConsultationBrain:
         )
 
         if repair_context is not None:
-            # repair 的本质不是推翻 search，而是把“为什么不能停”写回 hypothesis 排名与 tree refresh 理由，
-            # 然后专门选一条更能补关键缺口的下一问。
-            self._apply_verifier_repair_strategy(session_id, repair_context)
-            if bool(self.deps.repair_policy.enable_best_repair_action):
-                selected_action = self._choose_repair_action(session_id, search_result, repair_context)
-                search_result.repair_selected_action = selected_action
+            if self._should_disable_verifier_repair_for_current_policy():
+                # clean greedy benchmark 不让 verifier repair 改写 hypothesis、reroot 或接管下一问，
+                # 让后续观测更接近“root policy 自己会怎么问”。
+                selected_action = default_search_action
+                search_result.metadata["repair_bypassed_by_search_policy"] = True
+                search_result.metadata["repair_bypassed_reason"] = "greedy_policy_disabled_verifier_repair"
                 if selected_action is not None:
                     self._record_selected_action_source(
                         search_result,
-                        "repair_selected_action",
-                        priority_rank=1,
-                        reason=str(repair_context.get("reject_reason", "")),
+                        "default_search_action",
+                        priority_rank=4,
+                        reason="greedy_policy_disabled_verifier_repair",
                     )
             else:
-                # ablation 关闭 repair action 时，仍退回 search 原本给出的 root action。
-                selected_action = default_search_action
+                # repair 的本质不是推翻 search，而是把“为什么不能停”写回 hypothesis 排名与 tree refresh 理由，
+                # 然后专门选一条更能补关键缺口的下一问。
+                self._apply_verifier_repair_strategy(session_id, repair_context)
+                if bool(self.deps.repair_policy.enable_best_repair_action):
+                    selected_action = self._choose_repair_action(session_id, search_result, repair_context)
+                    search_result.repair_selected_action = selected_action
+                    if selected_action is not None:
+                        self._record_selected_action_source(
+                            search_result,
+                            "repair_selected_action",
+                            priority_rank=1,
+                            reason=str(repair_context.get("reject_reason", "")),
+                        )
+                else:
+                    # ablation 关闭 repair action 时，仍退回 search 原本给出的 root action。
+                    selected_action = default_search_action
         elif default_search_action is not None:
             # verifier 没有拦截时，沿用 search 默认动作即可。
             selected_action = default_search_action
@@ -2824,13 +2866,16 @@ class ConsultationBrain:
             )
 
         if not accept_decision.should_stop:
-            selected_action = self._maybe_choose_early_exam_context_rescue_action(
-                session_id,
-                search_result,
-                selected_action,
-                repair_context=repair_context,
-                turn_index=turn_index,
-            )
+            if self._should_disable_early_exam_context_rescue_for_current_policy():
+                search_result.metadata["early_exam_context_rescue_skipped_reason"] = "greedy_policy_disabled"
+            else:
+                selected_action = self._maybe_choose_early_exam_context_rescue_action(
+                    session_id,
+                    search_result,
+                    selected_action,
+                    repair_context=repair_context,
+                    turn_index=turn_index,
+                )
 
         if not accept_decision.should_stop:
             skip_low_cost_explorer, skip_reason = self._should_skip_low_cost_explorer_after_repair(
@@ -2855,7 +2900,11 @@ class ConsultationBrain:
             else:
                 if len(skip_reason) > 0:
                     search_result.metadata["low_cost_explorer_after_repair_reason"] = skip_reason
-                selected_action = self._choose_low_cost_explorer_action(session_id, search_result, selected_action)
+                selected_action = self._maybe_choose_low_cost_explorer_action(
+                    session_id,
+                    search_result,
+                    selected_action,
+                )
 
         # 若 search 没选出动作，再尝试阶段性停止；仍不能停时，最后退回冷启动探针问题。
         if selected_action is None and not accept_decision.should_stop:
@@ -2885,7 +2934,7 @@ class ConsultationBrain:
         selected_action = self._filter_selected_action_for_repeat(session_id, selected_action, search_result)
         if selected_action is None and not accept_decision.should_stop and not stop_decision.should_stop:
             # 若原动作因为重复模板或负反馈冷却被拦截，优先尝试退回低成本定义性证据，而不是直接冷启动。
-            selected_action = self._choose_low_cost_explorer_action(session_id, search_result, None)
+            selected_action = self._maybe_choose_low_cost_explorer_action(session_id, search_result, None)
 
         if selected_action is None and not accept_decision.should_stop and not stop_decision.should_stop:
             selected_action = self._choose_cold_start_probe_action(session_id)
@@ -5060,6 +5109,10 @@ class ConsultationBrain:
         state = self.deps.state_tracker.get_session(session_id)
         config = self.deps.a3_routing_policy
 
+        if self._should_disable_early_exam_context_rescue_for_current_policy():
+            search_result.metadata["early_exam_context_rescue_skipped_reason"] = "greedy_policy_disabled"
+            return selected_action
+
         if not bool(config.enable_early_exam_context_rescue) or len(state.candidate_hypotheses) == 0:
             return selected_action
 
@@ -5272,6 +5325,19 @@ class ConsultationBrain:
             ),
         )
         return best_action
+
+    # benchmark 可在 greedy 模式下整体关闭 low-cost explorer，避免它覆盖 root policy 的下一问。
+    def _maybe_choose_low_cost_explorer_action(
+        self,
+        session_id: str,
+        search_result: SearchResult,
+        selected_action: MctsAction | None,
+    ) -> MctsAction | None:
+        if self._should_disable_low_cost_explorer_for_current_policy():
+            search_result.metadata["low_cost_explorer_skipped_reason"] = "greedy_policy_disabled"
+            return selected_action
+
+        return self._choose_low_cost_explorer_action(session_id, search_result, selected_action)
 
     # 连续两轮高成本检查“没做/没结果”后，主动强制退回低成本定义性证据，避免继续耗在检查模板上。
     def _should_force_low_cost_definition_fallback(
@@ -5797,6 +5863,15 @@ def build_default_brain(
         search_policy=SearchPolicyConfig(
             root_action_mode=_normalize_root_action_mode(
                 search_policy_config.get("root_action_mode", "mcts")
+            ),
+            disable_verifier_repair_for_greedy=bool(
+                search_policy_config.get("disable_verifier_repair_for_greedy", False)
+            ),
+            disable_early_exam_context_rescue_for_greedy=bool(
+                search_policy_config.get("disable_early_exam_context_rescue_for_greedy", False)
+            ),
+            disable_low_cost_explorer_for_greedy=bool(
+                search_policy_config.get("disable_low_cost_explorer_for_greedy", False)
             ),
         ),
     )

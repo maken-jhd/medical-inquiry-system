@@ -27,6 +27,7 @@
 - 第二阶段问诊大脑详细运行链路指南（当前按 `turn_interpreter -> A1 / A2 / A3 -> verifier-only acceptance -> repair` 口径说明，且已细化到 `pending action / A2 刷新 / verifier guard / repair 分流` 级别）：[brain_runtime_call_chain_guide.md](/Users/loki/Workspace/GraduationDesign/docs/brain_runtime_call_chain_guide.md)
 - Med-MCTS 论文实现与当前系统实现对照、启发参数来源与后续优化方向：[med_mcts_vs_current_system.md](/Users/loki/Workspace/GraduationDesign/docs/med_mcts_vs_current_system.md)
 - 诊断系统 benchmark 可执行实验设计：[diagnosis_benchmark_experiment_design.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_benchmark_experiment_design.md)
+- 论文实验与测试章节草稿：[thesis_experiment_and_test_section_draft.md](/Users/loki/Workspace/GraduationDesign/docs/thesis_experiment_and_test_section_draft.md)
 - 虚拟病人与离线回放：[simulator/README.md](/Users/loki/Workspace/GraduationDesign/simulator/README.md)
 - 图谱驱动虚拟病人详细方案：[virtual_patient_generation_scheme.md](/Users/loki/Workspace/GraduationDesign/docs/virtual_patient_generation_scheme.md)
 - 前端演示界面：[frontend/README.md](/Users/loki/Workspace/GraduationDesign/frontend/README.md)
@@ -56,6 +57,7 @@ GraduationDesign/
 │   └── README.md
 ├── knowledge_graph_bak/          # 已废弃的旧版全量指南图谱备份
 ├── brain/                        # 第二阶段问诊大脑脚手架
+├── baselines/                    # 外部 pure LLM / 文本 RAG baseline 目录
 ├── simulator/                    # 虚拟病人、离线评测与图谱审计脚手架
 │   ├── graph_audit.py            # 疾病级局部子图与疾病对差异证据审计
 │   └── ...
@@ -323,12 +325,15 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 - [simulator/replay_engine.py](/Users/loki/Workspace/GraduationDesign/simulator/replay_engine.py)
 - [simulator/benchmark.py](/Users/loki/Workspace/GraduationDesign/simulator/benchmark.py)
 - [simulator/path_cache_builder.py](/Users/loki/Workspace/GraduationDesign/simulator/path_cache_builder.py)
+- [baselines/llm_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/baselines/llm_consultation_brain.py)：纯 LLM 医生 baseline，实现 `start_session / process_turn / finalize`
+- [baselines/llm_baseline_types.py](/Users/loki/Workspace/GraduationDesign/baselines/llm_baseline_types.py)：pure LLM baseline 的会话状态与 ask/final 决策结构
 - [scripts/export_disease_evidence_family_catalog.py](/Users/loki/Workspace/GraduationDesign/scripts/export_disease_evidence_family_catalog.py)：基于 Neo4j 导出全证据族 catalog 和疾病最低证据组
 - [scripts/generate_graph_virtual_patients.py](/Users/loki/Workspace/GraduationDesign/scripts/generate_graph_virtual_patients.py)：基于疾病审计结果生成图谱驱动病例骨架
 - [scripts/build_graph_case_smoke_set.py](/Users/loki/Workspace/GraduationDesign/scripts/build_graph_case_smoke_set.py)：从 role-QC eligible 病例中抽取 replay smoke 输入
 - [scripts/build_smoke_case_subset.py](/Users/loki/Workspace/GraduationDesign/scripts/build_smoke_case_subset.py)：从全量病例中按 `case_type` 做可复现均衡抽样，便于生成 `smoke60` 这类中等规模 smoke 集
 - [scripts/run_role_qc_smoke20_replay.sh](/Users/loki/Workspace/GraduationDesign/scripts/run_role_qc_smoke20_replay.sh)：运行最新 role-QC smoke20 replay 的一键脚本
 - [scripts/run_batch_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_batch_replay.py)：批量虚拟病人回放与评测入口
+- [scripts/run_baseline_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_baseline_replay.py)：纯 LLM baseline 的批量回放与 benchmark 入口
 
 当前实现的要点包括：
 
@@ -357,6 +362,8 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 - `simulator/replay_engine.py` 当前会先累计原始浮点耗时，再在落盘前统一 round；这能减少毫秒级病例里 `brain_turn_seconds_total` 被逐轮 round 放大的误导
 - `run_batch_replay.py` 当前在 `Ctrl+C` / `SIGTERM` 中断时会先写入 `status.json` / `run.log`，再强制退出进程，避免 `ThreadPoolExecutor` 的并发 worker 持续占用大量内存
 - `run_batch_replay.py` 当前输出的 `final_report.metadata` 已做轻量化处理，不再携带原始 `search_tree` 和 `last_search_result` 运行态对象，以降低批量回放的内存占用
+- `Pure LLM` baseline 当前已将模型输出契约收紧为 `decision / question_text / target_name / top3 / reasoning / compiled / final_answer`；`question_group / evidence_cost / decision_confidence` 改为程序端推断，减轻结构化输出负担，同时保留 replay 侧的动作分组与成本分析字段
+- `Pure LLM` baseline 当前还会自动注入当前 benchmark 对应的 closed-set disease scope；默认优先从病例目录祖先 `manifest.json` 提取全量 `Disease` 名称，并要求 `top3 / final_answer` 在这份列表中精确选择，减少“某类机会性感染”这类范围外泛化答案
 - 病人代理当前已改为“骨架驱动开场”：首轮输入优先由 `patient_agent.open_case(case)` 基于 opening slots 生成，而不是直接把 `chief_complaint` 当作唯一入口
 - `brain/service.py` 当前对主诉澄清增加了防重复保护：若已经追问过一次 `chief complaint` 但仍无任何可推理线索，会以 `repeated_chief_complaint_without_signal` 终止，避免 bad opening 在 intake 环节空转 8 轮
 - `brain/med_extractor.py` 与 `brain/evidence_parser.py` 当前补了 competitive 病例常见症状 / 风险词典，并对字符串型 `clinical_features` 输出增加了容错；即使 LLM schema 返回较松，也不至于把整段特征直接丢掉
@@ -504,6 +511,7 @@ streamlit run frontend/app.py --server.port 8514
 - [phase2_execution_checklist.md](/Users/loki/Workspace/GraduationDesign/docs/phase2_execution_checklist.md)：第二阶段与虚拟病人开发清单
 - [diagnosis_algorithm_batch_execution_checklist.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_algorithm_batch_execution_checklist.md)：按三批节奏推进当前诊断算法的可执行开发清单，重点围绕 `top3_hypothesis_hit / top1_final_answer_hit`
 - [diagnosis_system_todolist.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_system_todolist.md)：当前诊断系统待完善点与后续迭代顺序
+- [external_llm_baseline_development_checklist.md](/Users/loki/Workspace/GraduationDesign/docs/external_llm_baseline_development_checklist.md)：外部 `纯 LLM / LLM + 文本 RAG` baseline 的开发清单，补充了 replay summary schema 对齐、`target_node_id` 约定与 runner 启动配置注意事项
 - [med_mcts_vs_current_system.md](/Users/loki/Workspace/GraduationDesign/docs/med_mcts_vs_current_system.md)：整理论文实现与当前动态问诊实现的差异、启发式参数来源及后续优化方向
 - [phase2_changelog.md](/Users/loki/Workspace/GraduationDesign/docs/phase2_changelog.md)：第二阶段实现历程、问题改进与论文写作素材整理
 - [virtual_patient_generation_scheme.md](/Users/loki/Workspace/GraduationDesign/docs/virtual_patient_generation_scheme.md)：图谱驱动虚拟病人详细方案、病例类型规则、骨架字段与论文写作素材整理
@@ -614,6 +622,25 @@ OPENAI_MODEL=qwen3.5-flash conda run --no-capture-output -n GraduationDesign pyt
 - `brain/service.py` 的默认构造逻辑
 - `统一回答解释 -> A1/A2/A3 -> search -> verifier acceptance / repair -> report`
 - 虚拟病人自动回放
+
+纯 LLM baseline smoke：
+
+```bash
+OPENAI_MODEL=qwen3.5-flash conda run --no-capture-output -n GraduationDesign python scripts/run_baseline_replay.py \
+  --baseline-mode pure_llm \
+  --cases-file test_outputs/simulator_cases/graph_cases_20260502_role_qc/smoke20/cases.jsonl \
+  --output-root test_outputs/simulator_replay/benchmark_external_baselines/pure_llm_smoke20 \
+  --max-turns 8 \
+  --case-concurrency 4 \
+  --limit 5 \
+  --no-resume
+```
+
+这条命令会：
+
+- 走 [baselines/llm_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/baselines/llm_consultation_brain.py) 的纯 LLM 医生 baseline
+- 继续复用 [simulator/patient_agent.py](/Users/loki/Workspace/GraduationDesign/simulator/patient_agent.py) 与 [simulator/replay_engine.py](/Users/loki/Workspace/GraduationDesign/simulator/replay_engine.py)
+- 写出与主 batch runner 对齐的 `replay_results.jsonl / benchmark_summary.json / non_completed_cases.json / status.json`
 
 使用最新 role-QC 的 20 例 smoke 输入：
 

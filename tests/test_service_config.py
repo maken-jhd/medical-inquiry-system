@@ -30,6 +30,9 @@ def test_load_brain_config_reads_yaml_file(tmp_path: Path) -> None:
                 "  num_rollouts: 5",
                 "search_policy:",
                 "  root_action_mode: no_tree_greedy",
+                "  disable_verifier_repair_for_greedy: true",
+                "  disable_early_exam_context_rescue_for_greedy: true",
+                "  disable_low_cost_explorer_for_greedy: true",
                 "rollout_control:",
                 "  enable_multi_branch_rollout: true",
                 "  branch_budget_per_action: 2",
@@ -62,6 +65,9 @@ def test_load_brain_config_reads_yaml_file(tmp_path: Path) -> None:
 
     assert config["search"]["num_rollouts"] == 5
     assert config["search_policy"]["root_action_mode"] == "no_tree_greedy"
+    assert config["search_policy"]["disable_verifier_repair_for_greedy"] is True
+    assert config["search_policy"]["disable_early_exam_context_rescue_for_greedy"] is True
+    assert config["search_policy"]["disable_low_cost_explorer_for_greedy"] is True
     assert config["rollout_control"]["enable_multi_branch_rollout"] is True
     assert config["rollout_control"]["branch_budget_per_action"] == 2
     assert config["path_evaluation"]["agent_eval_mode"] == "llm_verifier"
@@ -110,6 +116,9 @@ def test_build_default_brain_maps_a3_and_repair_config() -> None:
         config_overrides={
             "search_policy": {
                 "root_action_mode": "no_tree_greedy",
+                "disable_verifier_repair_for_greedy": True,
+                "disable_early_exam_context_rescue_for_greedy": True,
+                "disable_low_cost_explorer_for_greedy": True,
             },
             "a3": {
                 "enable_early_exam_context_rescue": True,
@@ -151,6 +160,9 @@ def test_build_default_brain_maps_a3_and_repair_config() -> None:
     )
 
     assert brain.deps.search_policy.root_action_mode == "no_tree_greedy"
+    assert brain.deps.search_policy.disable_verifier_repair_for_greedy is True
+    assert brain.deps.search_policy.disable_early_exam_context_rescue_for_greedy is True
+    assert brain.deps.search_policy.disable_low_cost_explorer_for_greedy is True
     assert brain.deps.a3_routing_policy.enable_early_exam_context_rescue is True
     assert brain.deps.a3_routing_policy.early_exam_context_turn_limit == 3
     assert brain.deps.a3_routing_policy.early_exam_context_revealed_count_threshold == 1

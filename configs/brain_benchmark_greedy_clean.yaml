@@ -1,0 +1,81 @@
+# Greedy Clean 复用当前 Full System 的检索、A1/A2/A3 与 rollout 主链路，
+# 但在 root_action_mode=greedy 时，关闭 verifier repair / early exam rescue /
+# low-cost explorer 这三类 root 后处理覆盖器，暴露 greedy root policy 自身表现。
+llm:
+  structured_retry_count: 2
+
+search:
+  num_rollouts: 8
+  max_depth: 6
+  max_child_nodes: 4
+  exploration_weight: 2.0
+  discount_factor: 1.0
+  max_kg_triplets: 15
+
+search_policy:
+  root_action_mode: greedy
+  disable_verifier_repair_for_greedy: true
+  disable_early_exam_context_rescue_for_greedy: true
+  disable_low_cost_explorer_for_greedy: true
+
+rollout_control:
+  enable_multi_branch_rollout: true
+  branch_budget_per_action: 2
+  enable_anti_collapse_penalty: true
+
+kg:
+  entity_link_threshold: 0.72
+  top_k_entity_matches: 5
+  disable_kg_below_threshold: true
+
+path_evaluation:
+  consistency_weight: 0.3
+  diversity_weight: 0.4
+  agent_eval_weight: 0.3
+  agent_eval_mode: llm_verifier
+  llm_verifier_min_turn_index: 2
+  llm_verifier_min_trajectory_count: 2
+  observed_final_accept_threshold: 0.72
+  observed_final_scope_mismatch_block_threshold: 0.28
+  enable_dynamic_group_weights: true
+  enable_single_answer_group_cap: true
+  low_anchor_single_group_score_cap: 0.62
+  enable_scope_penalty_in_final_score: true
+
+a1:
+  use_llm_extractor: true
+
+a2:
+  expand_top_k_hypotheses: 3
+  scope_sibling_limit: 12
+  enable_scope_cluster_rerank: true
+  scope_cluster_exact_bonus: 0.35
+  scope_cluster_generic_penalty: 0.28
+
+a3:
+  use_discriminative_gain: true
+  validation_limit: 10
+  enable_early_exam_context_rescue: true
+  early_exam_context_turn_limit: 2
+  early_exam_context_revealed_count_threshold: 2
+  exam_context_rescue_high_cost_role_threshold: 0.45
+
+candidate_feedback:
+  enable_multi_hypothesis_feedback: true
+  use_scope_weighted_feedback: true
+  max_related_hypotheses_per_evidence: 5
+
+repair:
+  enable_verifier_hypothesis_reshuffle: true
+  enable_best_repair_action: true
+  enable_tree_reroot: true
+  protect_repair_action_from_low_cost_explorer: true
+  protect_search_root_action_from_low_cost_explorer: false
+  allow_low_cost_explorer_after_repair_if_unaskable_only: true
+  enable_missing_key_support_competition_escalation: true
+  missing_key_support_retry_threshold: 2
+  zero_anchor_current_answer_force_competition: true
+
+fallback:
+  enable_question_selector_mode: true
+  max_fail_count: 2

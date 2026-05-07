@@ -27,7 +27,8 @@
   - 当前结论：
     - 与 `Full System` 的 `top1 / top3` 差距较小
     - 更像“根动作选择策略”消融，不足以强力证明树搜索价值
-    - 建议降级为补充材料或附录对照
+    - 且这版结果仍继承了 `repair / low-cost explorer / early exam rescue` 后处理覆盖，不能视作干净的 greedy 对照
+    - 建议降级为补充材料或附录对照；若要重做 greedy，对照应改用 clean greedy 口径
 
 - [x] `No-Tree Greedy` 已完成全量 `full227`
   - 输出目录：
@@ -87,6 +88,14 @@
     - 该组结果非常适合写入正文，用来证明 repair 对完整诊断闭环是必要的
 
 - [ ] `No Scope-Aware Rerank` 尚未跑全量 `full227`
+- [ ] `Greedy Clean` 尚未重跑全量 `full227`
+  - 推荐输出目录：
+    - `test_outputs/simulator_replay/benchmark_20260505_full227_baseline/kg_greedy_clean`
+  - 口径：
+    - `root_action_mode = greedy`
+    - greedy 不再享受 `verifier repair / early exam rescue / low-cost explorer` 三类 root 后处理覆盖
+  - 当前意义：
+    - 作为比历史 `KG + Greedy` 更干净的 greedy 对照
 
 ## 1. 主表口径
 
@@ -136,6 +145,7 @@
   - 当前建议：
     - 不作为“树搜索价值”的主要证据
     - 可放附录或补充实验
+    - 这版结果因继承后处理覆盖而不够干净，若时间允许，优先补跑 `Greedy Clean`
 
 - [x] A2b `No-Tree Greedy`
   - 作用：
@@ -174,6 +184,14 @@
   - 推荐优先级：
     - `P2`
 
+- [ ] A2c `Greedy Clean`
+  - 作用：
+    - 在保留 rollout 的前提下，给 `MCTS vs Greedy` 提供更干净的根动作对照
+  - 推荐输出目录：
+    - `test_outputs/simulator_replay/benchmark_20260505_full227_baseline/kg_greedy_clean`
+  - 推荐优先级：
+    - `P1`
+
 ### 2.3 暂不继续投入
 
 - [ ] `Pure LLM One-shot`
@@ -182,7 +200,9 @@
 
 - [ ] `LLM + 文本 RAG`
   - 当前建议：
-    - 本轮不做
+    - 本轮不直接插入当前内部消融主线
+    - 如需开始实现，开发清单见：
+      - [external_llm_baseline_development_checklist.md](/Users/loki/Workspace/GraduationDesign/docs/external_llm_baseline_development_checklist.md)
 
 ## 3. 当前推荐的论文主叙事
 
@@ -225,27 +245,36 @@
 
 ### 5.1 下一步优先级
 
-- [ ] 第一步：把当前 4 组主实验结果整理进论文主表
+- [ ] 第一步：先补跑 `Greedy Clean`
+  - 原因：
+    - 当前历史 `KG + Greedy` 结果仍带有 `repair / low-cost / exam rescue` 覆盖
+    - clean greedy 更适合与 `Full System` 或后续 `mcts_integrated` 做干净对照
+
+- [ ] 第二步：把当前主实验结果整理进论文主表
   - 当前已具备：
     - `Full System`
     - `No-Tree Greedy`
     - `Opening-Only`
     - `No-Repair`
+    - 待补：
+      - `Greedy Clean`
   - 建议主表同时放：
     - `overall`
     - `eligible112`
 
-- [ ] 第二步：补写正文分析
+- [ ] 第三步：补写正文分析
   - `Opening-Only`：
     - 证明多轮问诊必要
   - `No-Tree Greedy`：
     - 证明树搜索主要提升接受可靠性与错误接受控制
   - `No-Repair`：
     - 证明 repair 是把 verifier 拒停转成有效补证据动作的关键机制
+  - `Greedy Clean`：
+    - 证明在统一保留 rollout 的条件下，去掉 root 后处理覆盖后的 greedy 会更接近“纯根策略”基线
 
-- [ ] 第三步：视时间决定是否跑 `No Scope-Aware Rerank`
+- [ ] 第四步：视时间决定是否跑 `No Scope-Aware Rerank`
   - 原因：
-    - 它重要，但优先级低于 `Opening-Only` 和 `No-Repair`
+    - 它重要，但当前优先级低于 `Greedy Clean`
 
 ### 5.2 当前最推荐的最小可交付主表
 
@@ -329,6 +358,27 @@ conda run --no-capture-output -n GraduationDesign python scripts/run_batch_repla
   --no-resume
 ```
 
+### 6.4 `Greedy Clean`
+
+使用配置：
+
+- [x] [configs/brain_benchmark_greedy_clean.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain_benchmark_greedy_clean.yaml)
+
+命令：
+
+```bash
+OPENAI_MODEL=qwen3.5-flash \
+BRAIN_CONFIG_PATH=configs/brain_benchmark_greedy_clean.yaml \
+BATCH_API_ERROR_COOLDOWN_SECONDS=2.0 \
+conda run --no-capture-output -n GraduationDesign python scripts/run_batch_replay.py \
+  --cases-file test_outputs/simulator_cases/graph_cases_20260502_role_qc/cases.jsonl \
+  --output-root test_outputs/simulator_replay/benchmark_20260505_full227_baseline/kg_greedy_clean \
+  --max-turns 8 \
+  --case-concurrency 6 \
+  --api-error-retries 2 \
+  --no-resume
+```
+
 ## 7. 结果落表 Checklist
 
 - [ ] 主表 A：`overall + eligible`
@@ -387,7 +437,8 @@ conda run --no-capture-output -n GraduationDesign python scripts/run_batch_repla
 ## 8. 当前一句话判断
 
 - [x] `KG + Greedy`：
-  - 差距太小，不适合单独承担“树搜索有效”的主证据
+  - 历史结果差距太小，而且不是 clean 对照
+  - 不适合单独承担“树搜索有效”的主证据
 
 - [x] `No-Tree Greedy`：
   - 已经足够写进毕业设计正文
@@ -404,5 +455,6 @@ conda run --no-capture-output -n GraduationDesign python scripts/run_batch_repla
   - 已足够支撑“repair 是当前系统诊断闭环中的关键模块”
 
 - [ ] 当前真正的下一步：
-  - 先把 `Full System / No-Tree Greedy / Opening-Only / No-Repair` 整理成主表和正文分析
-  - 再决定是否补跑 `No Scope-Aware Rerank`
+  - 先补跑 `Greedy Clean`
+  - 再把 `Full System / No-Tree Greedy / Opening-Only / No-Repair / Greedy Clean` 整理成主表和正文分析
+  - 最后再决定是否补跑 `No Scope-Aware Rerank`

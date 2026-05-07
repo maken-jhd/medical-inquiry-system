@@ -10,6 +10,323 @@
 - `phase2_execution_checklist.md` 更偏“路线设计与待办清单”
 - 本文更偏“已经发生过哪些阶段性变化、分别解决了什么问题”
 
+## 近期更新：2026-05-07 新增论文实验与测试章节草稿
+
+### 本次目标
+
+- 将当前 benchmark 口径、病例集构造方式与已完成消融结果整理成可直接写入毕业论文的章节草稿
+- 让论文中的“实验与测试”部分与仓库现有实现、输出目录和评测指标保持一致
+
+### 本次改动
+
+- [docs/thesis_experiment_and_test_section_draft.md](/Users/loki/Workspace/GraduationDesign/docs/thesis_experiment_and_test_section_draft.md)
+  - 新增论文实验与测试章节草稿
+  - 覆盖：
+    - 实验目标与研究问题
+    - 运行环境与统一配置
+    - 图谱规模与病例集口径
+    - 主实验矩阵与评测指标
+    - `Full System / Opening-Only / No-Tree Greedy / No-Repair` 结果分析
+    - 工程测试与分层验证说明
+- [README.md](/Users/loki/Workspace/GraduationDesign/README.md)
+  - 补充论文实验章节草稿入口，便于后续直接查阅和继续修改
+
+### 影响
+
+- 当前论文实验章节已经可以直接复用仓库里的真实 benchmark 结果，不需要再从零梳理一次实验叙事
+- 论文中的实验指标、病例集规模和消融结论与现有输出目录保持一致，后续补跑 `Greedy Clean` 或外部 baseline 时也更容易继续扩展主表
+
+### 验证结果
+
+- 已检查以下文档的编辑器诊断信息，均无错误：
+  - [docs/thesis_experiment_and_test_section_draft.md](/Users/loki/Workspace/GraduationDesign/docs/thesis_experiment_and_test_section_draft.md)
+  - [README.md](/Users/loki/Workspace/GraduationDesign/README.md)
+  - [docs/phase2_changelog.md](/Users/loki/Workspace/GraduationDesign/docs/phase2_changelog.md)
+- 本次为文档型改动，未涉及可执行代码逻辑，因此未新增单元测试或运行 batch replay
+
+## 近期更新：2026-05-07 为 pure LLM baseline 注入 closed-set disease scope
+
+### 本次目标
+
+- 让 pure LLM baseline 的答案空间与当前 benchmark 的疾病闭集更一致
+- 减少模型输出“某类机会性感染”这类范围外泛化答案
+
+### 本次改动
+
+- [scripts/run_baseline_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_baseline_replay.py)
+  - 新增 disease scope 解析逻辑
+  - 优先从当前 `cases.jsonl` 祖先目录中的 `manifest.json` 提取全量 disease 名称
+  - 若祖先 manifest 不可用，再退回：
+    - `disease_evidence_family_catalog.json`
+    - 或当前病例集合的 `true_conditions`
+  - 当前 role-QC 病例集会自动解析出 `80` 个 disease names
+- [baselines/llm_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/baselines/llm_consultation_brain.py)
+  - baseline doctor 新增 `disease_scope` 注入能力
+  - 每轮 prompt 变量中会携带：
+    - `disease_scope_count`
+    - `disease_scope_names`
+  - 对模型输出的 `top3 / final_answer` 增加闭集对齐逻辑：
+    - 能对齐到 canonical disease name 时优先对齐
+    - 若 `top3` 中存在 in-scope 候选，则优先保留这些候选
+- [brain/llm_client.py](/Users/loki/Workspace/GraduationDesign/brain/llm_client.py)
+  - 在 `baseline_consultation_turn` prompt 中明确要求：
+    - 如果提供了 `disease_scope_names`
+    - 则 `top3[].name` 与 `final_answer` 必须从该列表中精确选择
+- [tests/test_llm_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/tests/test_llm_consultation_brain.py)
+  - 新增 disease scope 注入与 final/top3 闭集对齐测试
+- [tests/test_run_baseline_replay.py](/Users/loki/Workspace/GraduationDesign/tests/test_run_baseline_replay.py)
+  - 新增 runner 从病例目录祖先 manifest 提取 disease scope 的测试
+- [docs/external_llm_baseline_development_checklist.md](/Users/loki/Workspace/GraduationDesign/docs/external_llm_baseline_development_checklist.md)
+  - 补记 closed-set disease scope 已接入 pure LLM baseline
+- [README.md](/Users/loki/Workspace/GraduationDesign/README.md)
+  - 补充 pure LLM baseline 闭集 disease scope 的行为说明
+
+### 影响
+
+- pure LLM baseline 与主系统在“答案必须从当前疾病闭集中选择”这一点上更加公平
+- `top1 / top3` 不再过度受泛化病名影响，更适合直接进入 benchmark 对照
+
+## 近期更新：2026-05-07 收紧 pure LLM baseline 的结构化输出负担
+
+### 本次目标
+
+- 降低 pure LLM baseline 每轮 ask/final JSON 的格式负担
+- 保留 replay 所需的问法分组、证据成本与置信度落盘字段
+
+### 本次改动
+
+- [brain/llm_client.py](/Users/loki/Workspace/GraduationDesign/brain/llm_client.py)
+  - 收紧 `baseline_consultation_turn` prompt 输出字段
+  - 不再强制模型额外输出：
+    - `question_group`
+    - `evidence_cost`
+    - 顶层 `confidence`
+  - 改为只要求：
+    - `decision`
+    - `question_text`
+    - `target_name`
+    - `top3`
+    - `reasoning`
+    - `compiled`
+    - `final_answer`
+- [baselines/llm_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/baselines/llm_consultation_brain.py)
+  - 保留对旧字段的兼容读取
+  - 当模型不再输出上述字段时，改由程序端：
+    - 根据 `question_text + target_name` 推断 `question_group`
+    - 根据 `question_group` 推断 `evidence_cost`
+    - 优先复用 `top3[0].confidence` 作为 `decision_confidence`
+- [tests/test_llm_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/tests/test_llm_consultation_brain.py)
+  - 改为验证“模型缺省这三项字段时，baseline 仍能正常推断并输出 replay 兼容字段”
+- [docs/external_llm_baseline_development_checklist.md](/Users/loki/Workspace/GraduationDesign/docs/external_llm_baseline_development_checklist.md)
+  - 更新 pure LLM ask/final JSON 示例
+  - 明确这三项现在由程序端兜底推断
+- [README.md](/Users/loki/Workspace/GraduationDesign/README.md)
+  - 补充 pure LLM baseline 当前的轻量输出契约说明
+
+### 影响
+
+- 纯 LLM baseline 的结构化 JSON 更短，模型更容易稳定遵守
+- benchmark 仍可继续按 `asked_action_group / asked_action_evidence_cost / decision_confidence` 做复盘
+
+## 近期更新：2026-05-07 落地纯 LLM baseline 最小闭环
+
+### 本次目标
+
+- 先把 `Pure LLM` 外部 baseline 做成可运行的最小系统
+- 保证它能直接接入现有 `ReplayEngine` 与 benchmark 输出口径
+
+### 本次改动
+
+- [baselines/llm_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/baselines/llm_consultation_brain.py)
+  - 新增纯 LLM 医生 baseline
+  - 支持：
+    - `start_session()`
+    - `process_turn()`
+    - `finalize()`
+  - 使用统一 prompt `baseline_consultation_turn`
+  - ask 阶段输出：
+    - `next_question`
+    - `pending_action`
+    - `search_report`
+  - final 阶段输出：
+    - `best_final_answer`
+    - `candidate_hypotheses`
+    - `answer_group_scores`
+    - `metadata.backend = pure_llm`
+  - 到达 turn limit 后会通过 `finalize()` 强制收尾，输出 `baseline_turn_limit_finalize`
+- [baselines/llm_baseline_types.py](/Users/loki/Workspace/GraduationDesign/baselines/llm_baseline_types.py)
+  - 新增 baseline 会话状态、ask/final 决策与 top3 候选数据结构
+- [brain/llm_client.py](/Users/loki/Workspace/GraduationDesign/brain/llm_client.py)
+  - 新增 `baseline_consultation_turn` prompt
+  - 在 prompt 内明确解释 ask/final JSON 中每个字段的含义：
+    - `question_group`
+    - `evidence_cost`
+    - `confidence`
+    - `top3`
+    - `compiled`
+    - `final_answer`
+- [scripts/run_baseline_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_baseline_replay.py)
+  - 新增纯 LLM baseline batch runner
+  - 当前支持：
+    - `--baseline-mode pure_llm`
+    - `--cases-file`
+    - `--output-root`
+    - `--max-turns`
+    - `--limit`
+    - `--case-concurrency`
+    - `--no-resume`
+    - `--api-error-retries`
+  - 复用当前主 batch runner 的：
+    - `ReplayEngine`
+    - 进度心跳
+    - `benchmark_summary.json`
+    - `non_completed_cases.json`
+    - `status.json`
+    - `timing_summary`
+    - `resume` 写盘逻辑
+- [tests/test_llm_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/tests/test_llm_consultation_brain.py)
+  - 新增 pure LLM doctor 单测
+  - 覆盖：
+    - ask -> final 闭环
+    - turn limit 强制 finalize
+    - `exam_context` 的 `target_node_id` 前缀约定
+- [tests/test_run_baseline_replay.py](/Users/loki/Workspace/GraduationDesign/tests/test_run_baseline_replay.py)
+  - 新增 baseline batch runner 单测
+  - 覆盖：
+    - CLI 参数
+    - `llm_available=false` 启动失败写盘
+    - completed summary 写盘与 `baseline_mode`
+- [docs/external_llm_baseline_development_checklist.md](/Users/loki/Workspace/GraduationDesign/docs/external_llm_baseline_development_checklist.md)
+  - 回填 pure LLM 已完成项
+- [README.md](/Users/loki/Workspace/GraduationDesign/README.md)
+  - 补充 `baselines/` 目录与 `scripts/run_baseline_replay.py` 入口说明
+
+### 验证结果
+
+- 已运行：
+  - `conda run -n GraduationDesign python -m pytest tests/test_llm_consultation_brain.py tests/test_run_baseline_replay.py -q`
+  - `conda run -n GraduationDesign python -m pytest tests/test_replay_engine.py tests/test_benchmark.py tests/test_run_batch_replay.py tests/test_patient_agent.py -q`
+- 结果：
+  - 新增 pure LLM baseline 测试 `6 passed`
+  - 相关 replay / benchmark 回归测试 `36 passed`
+- 当前尚未运行真实 `Pure LLM` smoke；后续应优先补 `smoke5`
+
+## 近期更新：2026-05-07 修订外部 LLM 基线开发清单的实现约束
+
+### 本次目标
+
+- 修补外部 baseline checklist 中几处容易让实现跑偏的口径
+- 提前把 replay schema、`target_node_id` 约定和 runner 启动方式说清楚
+
+### 本次改动
+
+- [docs/external_llm_baseline_development_checklist.md](/Users/loki/Workspace/GraduationDesign/docs/external_llm_baseline_development_checklist.md)
+  - 将 `run_baseline_replay.py` 的复用范围从“只复用 `ReplayEngine + summarize_benchmark()`”收紧为：
+    - 同时对齐 `build_non_completed_case_report()`
+    - `build_benchmark_cohort_summary()`
+    - `timing_summary`
+    - `status.json` 刷新逻辑
+  - 明确外部 baseline 不应只产出“同名文件”，而应尽量复用主 batch runner 的 summary schema
+  - 明确 `target_node_id` 约束：
+    - `exam_context` 问题必须沿用 `__exam_context__::<kind>` 前缀
+    - 普通问题优先使用稳定别名或标准名称
+    - 只有找不到稳定锚点时才退回 `baseline::<normalized_target_name>`
+  - 明确 `run_baseline_replay.py` 启动时应先加载 `frontend.yaml / frontend.local.yaml`，再构造 worker 级 `LlmClient`
+
+### 影响
+
+- 后续实现 `Pure LLM / LLM + 文本 RAG` baseline 时，更不容易产出与主 benchmark 不兼容的 summary 文件
+- `exam_driven` 病例不会因为随意的 synthetic `target_node_id` 被问法分组和 coverage 统计拉歪
+- 本机私密配置、模型选择与 batch runner 的运行口径保持一致
+
+## 近期更新：2026-05-07 新增外部 LLM 基线开发清单
+
+### 本次目标
+
+- 将外部基线实验从“口头想法”收敛成可执行 checklist
+- 明确 `纯 LLM` 与 `LLM + 文本 RAG` 的推荐实现路径
+
+### 本次改动
+
+- [docs/external_llm_baseline_development_checklist.md](/Users/loki/Workspace/GraduationDesign/docs/external_llm_baseline_development_checklist.md)
+  - 新增外部基线开发清单
+  - 明确两条实现线：
+    - `纯 LLM` 多轮问诊 baseline
+    - `LLM + 文本 RAG` 多轮问诊 baseline
+  - 明确推荐原则：
+    - 复用 `ReplayEngine / VirtualPatientAgent / benchmark.py`
+    - 新建 baseline doctor，而不是魔改当前 `ConsultationBrain`
+    - 先做 `纯 LLM`，再做 `文本 RAG`
+  - 明确建议新增文件：
+    - `baselines/llm_consultation_brain.py`
+    - `baselines/llm_rag_consultation_brain.py`
+    - `baselines/text_rag_retriever.py`
+    - `scripts/run_baseline_replay.py`
+    - `scripts/build_text_rag_corpus.py`
+  - 明确 `final_report / pending_action / search_report` 的最小输出契约
+  - 明确推荐 smoke 顺序：
+    - `smoke5`
+    - `smoke20 / smoke60`
+    - `full227`
+- [docs/diagnosis_benchmark_experiment_design.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_benchmark_experiment_design.md)
+  - 在外部基线位置补充指向独立开发清单的入口
+
+### 影响
+
+- 外部基线实验的实现路径已经清晰，不必再临时拍脑袋拆文件
+- 后续如果开始做 `Pure LLM / LLM + 文本 RAG`，可以直接按 checklist 落代码
+- benchmark 主文档与外部基线开发文档之间已有明确分工
+
+## 近期更新：2026-05-07 为 greedy 增加 clean benchmark 口径，并沉淀后续 MCTS 集成方案
+
+### 本次目标
+
+- 在不大改 MCTS 主干的前提下，先得到一个更干净的 greedy benchmark 口径
+- 把更完整的 `MCTS integrated root pool` 改造方向单独落成文档，留待后续实现
+
+### 本次改动
+
+- [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - `SearchPolicyConfig` 新增 3 个 benchmark 开关：
+    - `disable_verifier_repair_for_greedy`
+    - `disable_early_exam_context_rescue_for_greedy`
+    - `disable_low_cost_explorer_for_greedy`
+  - 这 3 个开关只在 `root_action_mode=greedy` 时生效
+  - greedy clean 模式下会显式跳过：
+    - verifier repair 改排 / repair action 接管
+    - early exam rescue
+    - low-cost explorer
+- [configs/brain_benchmark_greedy_clean.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain_benchmark_greedy_clean.yaml)
+  - 新增 clean greedy benchmark 配置
+  - 复用当前 `Full System` 主链路参数，只把 greedy 的 root 后处理覆盖器关掉
+- [tests/test_service_config.py](/Users/loki/Workspace/GraduationDesign/tests/test_service_config.py)
+  - 补充新 search_policy 开关的配置映射测试
+- [tests/test_service_low_cost_explorer_priority.py](/Users/loki/Workspace/GraduationDesign/tests/test_service_low_cost_explorer_priority.py)
+  - 新增 clean greedy 行为测试：
+    - early exam rescue 跳过
+    - low-cost explorer 跳过
+    - verifier repair 关闭 helper 判定
+- [docs/diagnosis_benchmark_experiment_design.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_benchmark_experiment_design.md)
+  - 将历史 `KG + Greedy` 标记为“非 clean 对照”
+  - 新增 `Greedy Clean` 待补跑项与命令模板
+  - 将 benchmark 下一步优先级调整为：
+    - 先补跑 `Greedy Clean`
+    - 再整理主表与正文
+- [docs/mcts_integrated_followup_plan.md](/Users/loki/Workspace/GraduationDesign/docs/mcts_integrated_followup_plan.md)
+  - 新增后续 MCTS 集成改造方案文档
+  - 记录：
+    - 为什么当前 `MCTS vs Greedy` 差距小
+    - 为什么不应再让 `repair / low-cost / exam rescue` 作为 MCTS 后覆盖器
+    - 后续 `mcts_integrated / greedy_integrated` 的建议实现顺序
+- [brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
+  - 补充 clean greedy benchmark 的配置入口说明
+
+### 影响
+
+- 后续可以在不大改 MCTS 的前提下，先补一组更干净的 greedy 对照
+- 当前历史 `KG + Greedy` 将不再被误当成纯 root policy 对照
+- 更完整的 MCTS 改造方向已沉淀成独立文档，不会影响当前 benchmark 节奏
+
 ## 近期更新：2026-05-06 跑完 `Opening-Only` 与 `No-Repair`，并把结果写回 benchmark checklist
 
 ### 本次目标

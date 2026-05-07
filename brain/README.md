@@ -143,11 +143,16 @@
   - 第二阶段的总编排层。
   - 当前已经串联 `turn_interpreter -> mention merge -> A1 -> A2 -> R2/A3 -> rollout -> report` 的搜索闭环。
   - 当前也是读取 [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml) 并构造默认依赖的入口。
-  - 当前 `load_brain_config()` 也支持读取环境变量 `BRAIN_CONFIG_PATH`，可在 benchmark 中直接切到 [configs/brain_benchmark_opening_only.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain_benchmark_opening_only.yaml) 或 [configs/brain_benchmark_no_repair.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain_benchmark_no_repair.yaml)，避免手改默认配置。
+  - 当前 `load_brain_config()` 也支持读取环境变量 `BRAIN_CONFIG_PATH`，可在 benchmark 中直接切到 [configs/brain_benchmark_opening_only.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain_benchmark_opening_only.yaml)、[configs/brain_benchmark_no_repair.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain_benchmark_no_repair.yaml) 或 [configs/brain_benchmark_greedy_clean.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain_benchmark_greedy_clean.yaml)，避免手改默认配置。
   - 当前 benchmark 已支持 `search_policy.root_action_mode = mcts | greedy | no_tree_greedy`：
     - `mcts`：完整树搜索
     - `greedy`：仍保留树搜索，但根动作只按 rollout 后的局部先验贪心选择
     - `no_tree_greedy`：完全跳过 select/expand/rollout/backprop，只按当前候选态动作先验选下一问
+  - 当前 `search_policy` 还支持三项 clean greedy benchmark 开关：
+    - `disable_verifier_repair_for_greedy`
+    - `disable_early_exam_context_rescue_for_greedy`
+    - `disable_low_cost_explorer_for_greedy`
+  - 它们只在 `root_action_mode=greedy` 时生效，用于显式关闭 greedy 的 root 后处理覆盖器，避免 `repair / early exam rescue / low-cost explorer` 把 greedy root action 拉平。
   - `process_turn()` 当前已按“统一解释本轮回答 -> 消化上一轮 pending action -> 判断本轮阶段 -> search / verifier / repair -> 输出下一问或最终报告”的顺序补充分段中文注释，便于顺着源码阅读控制流。
   - 当前会先把可信实体链接回填到 `mention.node_id / normalized_name`，再派生 `PatientContext` 和 `A1`，保证 opening 证据、slot 更新、R1 和 mention_context 使用同一图谱锚点。
   - 当前会把 `exam_context` 回答中的检查名与结果原文再次送入实体链接；可信命中 `LabFinding / ImagingFinding / Pathogen` 时直接写入 slot/evidence_state，且不再围绕 `__exam_context__::general` 重复追问。

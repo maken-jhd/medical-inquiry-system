@@ -366,6 +366,37 @@ def test_service_early_exam_context_rescue_prefers_specific_exam_after_general_w
     assert action.metadata["selected_by_early_exam_context_rescue"] is True
 
 
+# clean greedy benchmark 可显式关闭 early exam rescue，避免检查入口后处理覆盖 root action。
+def test_service_greedy_policy_skips_early_exam_context_rescue() -> None:
+    tracker = StateTracker()
+    state = tracker.create_session("s_greedy_exam_rescue_skip")
+    state.candidate_hypotheses = [
+        HypothesisScore(
+            node_id="pcp",
+            label="Disease",
+            name="PCP",
+            score=1.0,
+            metadata={"anchor_tier": "background_supported"},
+        )
+    ]
+    brain = _build_brain(tracker, {"pcp": _exam_driven_rows()})
+    brain.deps.search_policy.root_action_mode = "greedy"
+    brain.deps.search_policy.disable_early_exam_context_rescue_for_greedy = True
+    search_result = SearchResult()
+    original_action = _low_cost_symptom_action()
+
+    action = brain._maybe_choose_early_exam_context_rescue_action(
+        "s_greedy_exam_rescue_skip",
+        search_result,
+        original_action,
+        repair_context=None,
+        turn_index=1,
+    )
+
+    assert action is original_action
+    assert search_result.metadata["early_exam_context_rescue_skipped_reason"] == "greedy_policy_disabled"
+
+
 # 即使 target_node_id 不同，只要连续两轮会问出完全相同的句子，也应被拦住。
 def test_service_blocks_same_question_text_even_when_target_differs() -> None:
     tracker = StateTracker()
@@ -431,6 +462,35 @@ def test_service_forces_low_cost_definition_fallback_after_repeated_exam_no_resu
     assert search_result.metadata["selected_action_source_reason"] == "recent_exam_no_result_streak"
 
 
+# clean greedy benchmark 可显式关闭 low-cost explorer，避免 fallback 低成本问题覆盖 root action。
+def test_service_greedy_policy_skips_low_cost_explorer() -> None:
+    tracker = StateTracker()
+    state = tracker.create_session("s_greedy_low_cost_skip")
+    state.candidate_hypotheses = [
+        HypothesisScore(
+            node_id="dyslipidemia",
+            label="Disease",
+            name="血脂异常",
+            score=1.0,
+        )
+    ]
+    state.metadata["recent_high_cost_no_result_streak"] = 2
+    brain = _build_brain(tracker, {"dyslipidemia": _metabolic_low_cost_rows()})
+    brain.deps.search_policy.root_action_mode = "greedy"
+    brain.deps.search_policy.disable_low_cost_explorer_for_greedy = True
+    search_result = SearchResult()
+    original_action = _high_cost_imaging_action()
+
+    action = brain._maybe_choose_low_cost_explorer_action(
+        "s_greedy_low_cost_skip",
+        search_result,
+        original_action,
+    )
+
+    assert action is original_action
+    assert search_result.metadata["low_cost_explorer_skipped_reason"] == "greedy_policy_disabled"
+
+
 # 关闭 best repair action 后，如需暴露 search root，本轮 askable root 不应再被 low-cost explorer 抢走。
 def test_service_protects_search_root_action_from_low_cost_explorer_when_enabled() -> None:
     tracker = StateTracker()
@@ -474,3 +534,13 @@ def test_service_allows_low_cost_explorer_after_unaskable_search_root() -> None:
 
     assert should_skip is False
     assert reason == "search_root_action_unaskable"
+
+
+# clean greedy benchmark 可显式关闭 verifier repair，让后续行为更接近 root greedy policy 本身。
+def test_service_greedy_policy_reports_verifier_repair_disabled() -> None:
+    tracker = StateTracker()
+    brain = _build_brain(tracker, {})
+    brain.deps.search_policy.root_action_mode = "greedy"
+    brain.deps.search_policy.disable_verifier_repair_for_greedy = True
+
+    assert brain._should_disable_verifier_repair_for_current_policy() is True
