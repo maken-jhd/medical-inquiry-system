@@ -165,6 +165,35 @@
   - 当前在 `Ctrl+C` 或 `SIGTERM` 时会先写出中断状态，再强制结束进程，避免并发线程池在后台继续占用内存。
   - 当前会自动轻量化 `final_report.metadata`，不再把原始 `search_tree` 和 `last_search_result` 运行态对象直接写进 replay 结果，便于控制批量运行的内存占用。
 
+- [run_modular_v2_statistical_smoke60.sh](/Users/loki/Workspace/GraduationDesign/scripts/run_modular_v2_statistical_smoke60.sh)
+  - 一键运行 `smoke60` 的 modular_v2 statistical benchmark。
+  - 默认会通过 [brain_benchmark_modular_v2_statistical.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain_benchmark_modular_v2_statistical.yaml) 固定：
+    - `search_impl = modular_v2`
+    - `transition_model.type = statistical`
+    - `reward_model.type = heuristic_v2`
+    - `search_policy.root_action_mode = mcts`
+  - 默认参数：
+    - `max_turns = 8`
+    - `case_concurrency = 6`
+    - `api_error_retries = 1`
+  - 当前 `BRAIN_CONFIG_PATH` 会把这份 benchmark YAML 作为默认 [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml) 之上的局部 override 深合并，避免只切 `transition_model.type` 时把 verifier/repair 配置意外覆盖掉。
+  - 可通过环境变量覆盖 `OUTPUT_ROOT / MAX_TURNS / CASE_CONCURRENCY / LIMIT / NO_RESUME`。
+
+- [run_modular_v2_heuristic_smoke60.sh](/Users/loki/Workspace/GraduationDesign/scripts/run_modular_v2_heuristic_smoke60.sh)
+  - 一键运行 `smoke60` 的 modular_v2 heuristic 回归 benchmark。
+  - 默认会通过 [brain_benchmark_modular_v2_heuristic.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain_benchmark_modular_v2_heuristic.yaml) 固定：
+    - `search_impl = modular_v2`
+    - `transition_model.type = heuristic`
+    - `reward_model.type = heuristic_v2`
+    - `search_policy.root_action_mode = mcts`
+  - 适合和 statistical 版做对照，验证 skeleton 改造本身是否引入偏差。
+  - 默认参数：
+    - `max_turns = 8`
+    - `case_concurrency = 6`
+    - `api_error_retries = 1`
+  - 当前同样依赖 `BRAIN_CONFIG_PATH` 的局部 override 深合并；因此 heuristic 回归时会继续继承默认 `llm_verifier`、repair 和 stop 相关配置，不会再出现“只换搜索骨架，但 verifier 被意外关闭”的假回归。
+  - 可通过环境变量覆盖 `OUTPUT_ROOT / MAX_TURNS / CASE_CONCURRENCY / LIMIT / NO_RESUME`。
+
 - [diagnose_smoke10_failures.py](/Users/loki/Workspace/GraduationDesign/scripts/diagnose_smoke10_failures.py)
   - 对指定 replay 目录中的 failed opening 做 `med_extractor / A1` LLM payload 审计。
   - 会读取 `replay_results.jsonl`，复现同一批 opening 的结构化调用，并输出：

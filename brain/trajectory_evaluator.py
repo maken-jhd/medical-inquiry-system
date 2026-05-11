@@ -97,6 +97,7 @@ class TrajectoryEvaluator:
             # agent_evaluation 再补一个更偏“临床可信度”的视角。
             consistency = len(trajectories) / total_trajectories if total_trajectories > 0 else 0.0
             diversity = self._compute_diversity(trajectories)
+            reward_proxy_summary = self._reward_proxy_summary(trajectories)
             agent_evaluation, agent_metadata = self._compute_agent_evaluation(
                 trajectories,
                 answer_id=answer_id,
@@ -134,6 +135,7 @@ class TrajectoryEvaluator:
                     "final_agent_component": round(final_agent_component, 4),
                     **scope_metadata,
                     **simulated_metadata,
+                    **reward_proxy_summary,
                 }
             )
             final_score = (
@@ -644,6 +646,58 @@ class TrajectoryEvaluator:
                 values.append(normalized)
 
         return values
+
+    # 从 rollout trajectory metadata 中提取 reward-side confidence proxy，供 acceptance 做轻量校准。
+    def _reward_proxy_summary(self, trajectories: Sequence[ReasoningTrajectory]) -> dict:
+        belief_margins: list[float] = []
+        uncertainty_reductions: list[float] = []
+        acceptance_risks: list[float] = []
+        support_qualities: list[float] = []
+        branch_consistency_scores: list[float] = []
+
+        for trajectory in trajectories:
+            metadata = dict(trajectory.metadata or {})
+            if str(metadata.get("reward_confidence_proxy_source") or "") != "trajectory_reward_proxy":
+                continue
+            belief_margin = metadata.get("belief_margin_proxy")
+            uncertainty_reduction = metadata.get("uncertainty_reduction_proxy")
+            acceptance_risk = metadata.get("acceptance_risk_proxy")
+            support_quality = metadata.get("branch_support_quality")
+            branch_consistency = metadata.get("branch_consistency_score")
+            if isinstance(belief_margin, (int, float)):
+                belief_margins.append(float(belief_margin))
+            if isinstance(uncertainty_reduction, (int, float)):
+                uncertainty_reductions.append(float(uncertainty_reduction))
+            if isinstance(acceptance_risk, (int, float)):
+                acceptance_risks.append(float(acceptance_risk))
+            if isinstance(support_quality, (int, float)):
+                support_qualities.append(float(support_quality))
+            if isinstance(branch_consistency, (int, float)):
+                branch_consistency_scores.append(float(branch_consistency))
+
+        if (
+            len(belief_margins) == 0
+            and len(uncertainty_reductions) == 0
+            and len(acceptance_risks) == 0
+            and len(support_qualities) == 0
+        ):
+            return {}
+
+        return {
+            "reward_confidence_proxy_source": "trajectory_reward_proxy",
+            "belief_margin_proxy": round(sum(belief_margins) / max(len(belief_margins), 1), 4),
+            "uncertainty_reduction_proxy": round(
+                sum(uncertainty_reductions) / max(len(uncertainty_reductions), 1),
+                4,
+            ),
+            "acceptance_risk_proxy": round(sum(acceptance_risks) / max(len(acceptance_risks), 1), 4),
+            "branch_support_quality": round(sum(support_qualities) / max(len(support_qualities), 1), 4),
+            "branch_consistency_score": round(
+                sum(branch_consistency_scores) / max(len(branch_consistency_scores), 1),
+                4,
+            ),
+            "reward_proxy_trajectory_count": len(acceptance_risks) or len(trajectories),
+        }
 
     # 估计同一答案下轨迹的多样性。
     def _compute_diversity(self, trajectories: List[ReasoningTrajectory]) -> float:

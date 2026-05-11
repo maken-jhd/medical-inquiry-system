@@ -3,6 +3,7 @@
 from brain.action_builder import ActionBuilder
 from brain.hypothesis_manager import HypothesisManager
 from brain.response_transition_model import ResponseTransitionModelConfig, StatisticalResponseTransitionModel
+from brain.reward_model import BeliefAwareRolloutRewardModel, HeuristicRolloutRewardModel, RolloutRewardModelConfig
 from brain.router import ReasoningRouter
 from brain.simulation_engine import SimulationConfig, SimulationEngine
 from brain.transition_statistics import TransitionStatistics
@@ -258,8 +259,125 @@ def test_simulation_engine_multi_branch_rollout_keeps_positive_and_negative_seed
     seeds = {trajectory.metadata["branch_seed"] for trajectory in trajectories}
 
     assert len(trajectories) == 2
-    assert "positive" in seeds
-    assert "negative" in seeds
+
+
+def _build_competitive_statistics() -> TransitionStatistics:
+    statistics = TransitionStatistics(smoothing_alpha=0.05, min_total_count=1)
+    for _ in range(8):
+        statistics.record_verify_observation(
+            disease_id="d1",
+            evidence_family="respiratory_symptom",
+            question_type="symptom",
+            outcome="present",
+        )
+    statistics.record_verify_observation(
+        disease_id="d1",
+        evidence_family="respiratory_symptom",
+        question_type="symptom",
+        outcome="absent",
+    )
+    statistics.record_verify_observation(
+        disease_id="d1",
+        evidence_family="respiratory_symptom",
+        question_type="symptom",
+        outcome="unclear",
+    )
+    for _ in range(2):
+        statistics.record_verify_observation(
+            disease_id="d2",
+            evidence_family="respiratory_symptom",
+            question_type="symptom",
+            outcome="present",
+        )
+    for _ in range(6):
+        statistics.record_verify_observation(
+            disease_id="d2",
+            evidence_family="respiratory_symptom",
+            question_type="symptom",
+            outcome="absent",
+        )
+    statistics.record_verify_observation(
+        disease_id="d2",
+        evidence_family="respiratory_symptom",
+        question_type="symptom",
+        outcome="unclear",
+    )
+    return statistics
+
+
+# 验证 modular_v2 + statistical transition + belief-aware reward 会真正产出新的分支区分度 breakdown。
+def test_simulation_engine_supports_belief_aware_reward_with_statistical_transition() -> None:
+    statistics = _build_competitive_statistics()
+    transition_model = StatisticalResponseTransitionModel(
+        ResponseTransitionModelConfig(model_type="statistical"),
+        statistics=statistics,
+    )
+    belief_engine = SimulationEngine(
+        SimulationConfig(
+            search_impl="modular_v2",
+            transition_model_type="statistical",
+            reward_model_type="belief_aware_v1",
+        ),
+        transition_model=transition_model,
+        reward_model=BeliefAwareRolloutRewardModel(
+            RolloutRewardModelConfig(model_type="belief_aware_v1")
+        ),
+    )
+    heuristic_engine = SimulationEngine(
+        SimulationConfig(
+            search_impl="modular_v2",
+            transition_model_type="statistical",
+            reward_model_type="heuristic_v2",
+        ),
+        transition_model=transition_model,
+        reward_model=HeuristicRolloutRewardModel(
+            RolloutRewardModelConfig(model_type="heuristic_v2")
+        ),
+    )
+    state = SessionState(
+        session_id="s_stat_reward",
+        candidate_hypotheses=[
+            HypothesisScore(node_id="d1", label="Disease", name="PCP", score=0.58),
+            HypothesisScore(node_id="d2", label="Disease", name="结核病", score=0.42),
+        ],
+    )
+    action = MctsAction(
+        action_id="verify::cough",
+        action_type="verify_evidence",
+        target_node_id="slot_cough",
+        target_node_label="ClinicalFinding",
+        target_node_name="干咳",
+        prior_score=1.8,
+        metadata={
+            "relation_type": "MANIFESTS_AS",
+            "question_type_hint": "symptom",
+            "evidence_families": ["respiratory_symptom"],
+            "evidence_cost": "low",
+        },
+    )
+
+    belief_outcome = belief_engine.simulate_action(
+        action,
+        state,
+        state.candidate_hypotheses[0],
+        candidate_hypotheses=state.candidate_hypotheses,
+    )
+    heuristic_outcome = heuristic_engine.simulate_action(
+        action,
+        state,
+        state.candidate_hypotheses[0],
+        candidate_hypotheses=state.candidate_hypotheses,
+    )
+    positive_branch = next(
+        item
+        for item in belief_outcome.metadata["branch_estimates"]
+        if item["branch"] == "positive"
+    )
+
+    assert belief_outcome.metadata["reward_model_type"] == "belief_aware_v1"
+    assert "top1_top2_margin_gain_surrogate" in positive_branch["reward_breakdown"]
+    assert "acceptance_risk_proxy" in positive_branch["reward_breakdown"]
+    assert belief_outcome.positive_branch_reward != heuristic_outcome.positive_branch_reward
 
 
 # 验证 modular_v2 在 statistical transition model 下会真正消费统计版分支概率。

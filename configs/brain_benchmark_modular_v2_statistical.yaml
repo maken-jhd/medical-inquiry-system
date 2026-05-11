@@ -1,0 +1,16 @@
+search_impl: modular_v2
+
+search_policy:
+  root_action_mode: mcts
+
+transition_model:
+  type: statistical
+  statistics_source_mode: auto
+  statistics_top_k_hypotheses: 3
+  enable_belief_mixture: true
+  fallback_to_heuristic: true
+  statistics_smoothing_alpha: 0.5
+  statistics_min_total_count: 1
+
+reward_model:
+  type: heuristic_v2

@@ -82,6 +82,7 @@
 
 - 定义 `RolloutRewardModel`
 - 当前默认实现为 `HeuristicRolloutRewardModel`
+- 当前也新增了 `BeliefAwareRolloutRewardModel`
 - 显式拆出：
   - `information_gain_surrogate`
   - `hypothesis_alignment`
@@ -89,6 +90,24 @@
   - `repeat_penalty`
   - `high_cost_penalty`
   - `uncertainty_penalty`
+
+`BeliefAwareRolloutRewardModel` 当前额外会显式消费：
+
+- `candidate_hypotheses`
+- statistical transition 输出的 `belief_components`
+- branch 后的近似 posterior shift
+
+并把 reward 拆成：
+
+- `uncertainty_reduction_surrogate`
+- `top1_top2_margin_gain_surrogate`
+- `acceptance_risk_penalty`
+
+当前并没有上严格 Bayesian posterior update，而是：
+
+- 复用 transition branch metadata 中的 disease-conditioned branch likelihood
+- 用 top-k belief mixture 近似构造 branch posterior
+- 再用 `entropy surrogate + top1-top2 gap` 估计该问题是否真的有助于诊断收敛
 
 这样做的意义是：
 
@@ -123,6 +142,7 @@
 - `search_impl=modular_v2`
   - 启用新的 `transition model + reward model + belief signature` 骨架
   - 当前 `transition_model.type` 已支持 `heuristic | statistical`
+  - 当前 `reward_model.type` 已支持 `heuristic_v2 | belief_aware_v1`
   - 但职责边界已经清晰，后续可逐层替换
 
 ## 5. 当前仍然保留的限制
@@ -132,7 +152,8 @@
 - rollout 里还没有显式 chance node expansion
 - `branch_selection_mode=expectation_ready` 还只是接口占位
 - statistical transition model 当前仍是频数统计 baseline，不是 learned classifier
-- reward model 还不是严格 Bayesian 信息增益
+- belief-aware reward 当前仍是近似 posterior surrogate，不是严格 Bayesian 信息增益
+- acceptance calibration 只做轻量 proxy guard，不是新的 stop rule 体系
 
 也就是说，这次完成的是“骨架升级”，不是“学习版 MCTS 完成”。
 
@@ -140,7 +161,7 @@
 
 建议后续按下面顺序继续推进：
 
-1. 把 `StatisticalResponseTransitionModel` 替换成 learned classifier，例如 `XGBoost / LightGBM / 小型分类器`
-2. 在 `RolloutRewardModel` 上接更合理的 confidence / entropy surrogate
+1. 先继续观察 `BeliefAwareRolloutRewardModel + acceptance calibration` 是否已经足够降低 wrong accepted
+2. 如果 statistical transition 已稳定，再考虑把 `StatisticalResponseTransitionModel` 替换成 learned classifier，例如 `XGBoost / LightGBM / 小型分类器`
 3. 若需要进一步逼近标准 MCTS，再考虑显式 chance node 或 expectation backup
 4. 最后再考虑与 `simulator/*` 的 patient model 联动，而不是本次就一起改

@@ -17,6 +17,7 @@
 - 第二阶段：已经进入“select -> expand -> simulate -> backpropagate 多次 rollout 可跑”的阶段，并已切换到 `LLM-first + 显式错误传播 + 集中 normalization` 的抽取 / 解释链路；当前 intake / pending action interpretation 统一使用 `mention_state + resolution` 语义，不再把自述症状表述成“医学 certainty”
 - 第二阶段：当前已完成前两批 `repair/exam rescue` 与 `multi-hypothesis feedback/competition repair`，第三批 `multi-branch rollout + final score rebalance + scope cluster rerank` 代码已落地，待 replay 验证；新的 replay 产物已可按 turn 落盘 `search_report / search_metadata`，并补充 asked/revealed 诊断字段与 case-level `analysis`
 - 第二阶段：当前 benchmark 已支持通过 `search_policy.root_action_mode = mcts | greedy` 切换 `Full System` 与 `KG + Greedy` 根动作选择策略，便于直接做树搜索消融
+- 第二阶段：当前 `modular_v2` 骨架已补齐 `statistical transition model + belief-aware reward + 轻量 acceptance calibration`；其中 `transition_model.type` 支持 `heuristic | statistical`，`reward_model.type` 支持 `heuristic_v2 | belief_aware_v1`
 - 前端演示：已支持中文 Streamlit 页面，可展示多轮问诊、A1/A2/A3、pending action 解释、候选诊断、下一问、搜索摘要与安全机制
 
 更详细的局部说明可分别查看：
@@ -352,6 +353,7 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 - `run_batch_replay.py` 当前会直接向终端设备输出运行信息；即使通过 `conda run` 启动，也会在病例启动、病例完成和长时间运行期间持续输出可见日志
 - `run_batch_replay.py` 当前会在终端持续输出病例级进度条，并每 15 秒输出一次心跳，例如“已完成病例：2 / 10，活动病例：2，当前最久：case_xxx（已运行 12:30）”
 - `run_batch_replay.py` 当前会像前端实时模式一样自动读取 `configs/frontend.yaml` 与 `configs/frontend.local.yaml`，把 Neo4j / LLM / brain 配置桥接到当前 CLI 进程环境
+- 当通过 `BRAIN_CONFIG_PATH` 指向一份 benchmark / ablation 专用 brain 配置时，当前会先读取默认 [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml)，再把该文件作为局部 override 深合并进去；因此只覆写 `search_impl / transition_model / reward_model` 时，不会再把 `path_evaluation.llm_verifier`、repair 或 stop 相关配置意外打回默认 dataclass 值
 - `run_batch_replay.py` 做模型对比时，如果命令行里显式设置了 `OPENAI_MODEL`，会优先使用该环境变量；这便于在不改动本地私密配置的前提下切换 `qwen3-max / qwen3.5-flash / qwen3.5-plus`
 - `run_batch_replay.py` 当前启动时会直接记录 `llm_available=true/false`；如果为 `false`，批量回放会尽早失败，不再退回旧规则链路
 - `run_batch_replay.py` 当前会在每个病例完成后立即追加写入 `replay_results.jsonl`、`run.log`，并刷新 `benchmark_summary.json` 与 `status.json`；评测摘要会同时给出 `top1_final_answer_hit` 口径和 `top3_hypothesis_hit` 口径，便于区分“最终答案已对”和“候选前三已召回”，并在整批完成后自动补充 `eligible`、按 `case_qc_status`、按 `case_type` 的 cohort 指标
@@ -658,6 +660,73 @@ conda run --no-capture-output -n GraduationDesign python scripts/run_batch_repla
   --case-concurrency 4 \
   --limit 20
 ```
+
+使用 `modular_v2 + statistical transition model + heuristic_v2 reward + mcts root action` 跑 `smoke60`：
+
+```bash
+./scripts/run_modular_v2_statistical_smoke60.sh
+```
+
+这条脚本会等价设置：
+
+- `search_impl = modular_v2`
+- `transition_model.type = statistical`
+- `reward_model.type = heuristic_v2`
+- `search_policy.root_action_mode = mcts`
+
+默认展开命令是：
+
+```bash
+BRAIN_CONFIG_PATH=configs/brain_benchmark_modular_v2_statistical.yaml \
+conda run --no-capture-output -n GraduationDesign python scripts/run_batch_replay.py \
+  --cases-file test_outputs/simulator_cases/graph_cases_20260502_role_qc/smoke60/cases.jsonl \
+  --output-root test_outputs/simulator_replay/benchmark_modular_v2_statistical_smoke60 \
+  --max-turns 8 \
+  --case-concurrency 6 \
+  --api-error-retries 1
+```
+
+如果想临时覆盖输出目录、turn budget 或强制重跑，可直接这样传环境变量：
+
+```bash
+OUTPUT_ROOT=test_outputs/simulator_replay/my_modular_v2_stat_smoke60 \
+MAX_TURNS=10 \
+NO_RESUME=1 \
+./scripts/run_modular_v2_statistical_smoke60.sh
+```
+
+使用 `modular_v2 + heuristic transition model + heuristic_v2 reward + mcts root action` 跑 `smoke60`，可作为“骨架改造本身是否引入偏差”的回归对照：
+
+```bash
+./scripts/run_modular_v2_heuristic_smoke60.sh
+```
+
+默认展开命令是：
+
+```bash
+BRAIN_CONFIG_PATH=configs/brain_benchmark_modular_v2_heuristic.yaml \
+conda run --no-capture-output -n GraduationDesign python scripts/run_batch_replay.py \
+  --cases-file test_outputs/simulator_cases/graph_cases_20260502_role_qc/smoke60/cases.jsonl \
+  --output-root test_outputs/simulator_replay/benchmark_modular_v2_heuristic_smoke60 \
+  --max-turns 8 \
+  --case-concurrency 6 \
+  --api-error-retries 1
+```
+
+同样支持环境变量覆盖：
+
+```bash
+OUTPUT_ROOT=test_outputs/simulator_replay/my_modular_v2_heuristic_smoke60 \
+MAX_TURNS=10 \
+NO_RESUME=1 \
+./scripts/run_modular_v2_heuristic_smoke60.sh
+```
+
+如果要继续观察新的 belief-aware reward，可在任一 modular_v2 benchmark 配置上额外覆写：
+
+- `reward_model.type = belief_aware_v1`
+- 如有需要，再微调 `reward_model.margin_gain_weight / uncertainty_reduction_weight / acceptance_risk_weight`
+- acceptance 侧当前还支持轻量 `acceptance_calibration`，只会在 verifier 已想接受时再参考 `belief_margin_proxy / acceptance_risk_proxy / branch_support_quality` 做一次保守校准
 
 真实 focused baseline ablation：
 

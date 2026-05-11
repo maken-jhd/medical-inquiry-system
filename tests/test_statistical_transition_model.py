@@ -83,6 +83,7 @@ def test_statistical_transition_model_uses_statistics_for_verify_branches() -> N
 
     assert positive.metadata["source"] == "statistical"
     assert positive.probability > negative.probability
+    assert positive.metadata["belief_components"][0]["present_probability"] > 0.0
 
 
 # 验证 exam_context 动作会走 done/not_done -> result 的两层映射，而不是退回普通三分支。
@@ -110,10 +111,12 @@ def test_statistical_transition_model_supports_exam_context_branches() -> None:
         candidate_hypotheses=[HypothesisScore(node_id="d1", label="Disease", name="PCP", score=1.0)],
     )
     branch_names = {branch.branch_name for branch in branches}
+    done_positive = next(branch for branch in branches if branch.branch_name == "done_positive")
 
     assert branch_names == {"done_positive", "done_negative", "done_unclear", "not_done"}
     assert round(sum(branch.probability for branch in branches), 6) == 1.0
     assert any(branch.metadata["branch_schema"] == "exam_context" for branch in branches)
+    assert done_positive.metadata["belief_components"][0]["done_positive_probability"] > 0.0
 
 
 # 验证统计数据缺失时会安全回退到 heuristic，而不是直接失败。

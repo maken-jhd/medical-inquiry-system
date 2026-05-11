@@ -154,6 +154,13 @@
   - 当前 `modular_v2` 的 `transition_model.type` 已支持：
     - `heuristic`：沿用上一轮拆出来的启发式三分支分布
     - `statistical`：基于 graph cases + replay 统计、再结合 top-k hypothesis belief mixture 的条件化分支概率
+  - 当前 `modular_v2` 的 `reward_model.type` 已支持：
+    - `heuristic_v2`：保留原有 surrogate 公式，作为回归基线
+    - `belief_aware_v1`：显式消费 `candidate_hypotheses + belief_components`，并近似估计 branch 后的 `entropy / top1-top2 margin / acceptance risk`
+  - 当前 acceptance 还新增了一层轻量 `reward confidence proxy` 校准：
+    - 只在 `llm_verifier` 已想接受时生效
+    - 只消费 `belief_margin_proxy / acceptance_risk_proxy / branch_support_quality`
+    - 目标是压低 wrong accepted，而不是重写 verifier / stop 体系
   - 当前 `search_policy` 还支持三项 clean greedy benchmark 开关：
     - `disable_verifier_repair_for_greedy`
     - `disable_early_exam_context_rescue_for_greedy`
@@ -242,6 +249,12 @@
   - rollout 内部的模拟证据反馈现在也复用多候选 fan-out 规则，避免路径评估只围绕当前 hypothesis 单点自嗨。
   - 当前第三批已支持 `multi-branch rollout`：同一个 child action 至少保留 `positive + negative/doubtful` 两类 seed，并在低真实锚点但正向分支垄断时施加 `anti_collapse_penalty`。
   - 当前在 `search_impl=modular_v2` 下，`SimulationEngine` 会改为依赖可插拔 `transition model + reward model + branch selection mode`，legacy inline heuristic 仍保留为回归基线。
+  - 当前还会把每步 selected branch 的 reward breakdown 压成 trajectory 级 proxy，例如：
+    - `belief_margin_proxy`
+    - `uncertainty_reduction_proxy`
+    - `acceptance_risk_proxy`
+    - `branch_support_quality`
+    供最终 acceptance 做轻量校准。
 
 - [response_transition_model.py](/Users/loki/Workspace/GraduationDesign/brain/response_transition_model.py)
   - 负责把当前动作和会话状态映射成 rollout 分支概率分布。
@@ -250,8 +263,19 @@
     - `StatisticalResponseTransitionModel`
     - `LearnedResponseTransitionModel` 占位接口
   - `StatisticalResponseTransitionModel` 当前会先从 graph cases / replay 构建粗粒度条件统计，再用 top-k hypothesis belief mixture 计算 `P(y | s, a)`。
+  - 当前 statistical branch metadata 还会额外暴露 disease-conditioned branch likelihood，供 belief-aware reward 近似构造 branch posterior。
   - 对普通问诊动作，当前输出 `positive / negative / doubtful`。
   - 对 `collect_exam_context` 动作，当前内部先估计 `done / not_done` 与结果分布，再映射成 `done_positive / done_negative / done_unclear / not_done`。
+
+- [reward_model.py](/Users/loki/Workspace/GraduationDesign/brain/reward_model.py)
+  - 负责把 rollout branch 转成单步 reward。
+  - 当前同时保留：
+    - `HeuristicRolloutRewardModel`
+    - `BeliefAwareRolloutRewardModel`
+  - `BeliefAwareRolloutRewardModel` 当前不会重跑统计表，而是直接复用 transition branch metadata 中的 `belief_components`，近似估计：
+    - branch 后 `belief entropy` 是否下降
+    - `top1-top2 margin` 是否被拉开
+    - 当前分支是否会提升 premature acceptance risk
 
 - [transition_statistics.py](/Users/loki/Workspace/GraduationDesign/brain/transition_statistics.py)
   - 负责离线统计构建与在线 mixture 辅助。

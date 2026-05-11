@@ -399,6 +399,27 @@ class StatisticalResponseTransitionModel(ResponseTransitionModel):
                     "result_total_count": round(float(result_distribution.total_count), 4),
                     "exam_kind": action_context.exam_kind or "general",
                     "test_type": action_context.test_type or action_context.exam_kind or "general",
+                    "done_probability": round(float(done_probability), 6),
+                    "not_done_probability": round(float(not_done_probability), 6),
+                    "availability_unclear_probability": round(float(unclear_availability_probability), 6),
+                    "result_positive_probability": round(float(result_distribution.probabilities["positive"]), 6),
+                    "result_negative_probability": round(float(result_distribution.probabilities["negative"]), 6),
+                    "result_unclear_probability": round(float(result_distribution.probabilities["unclear"]), 6),
+                    "done_positive_probability": round(
+                        float(done_probability * result_distribution.probabilities["positive"]),
+                        6,
+                    ),
+                    "done_negative_probability": round(
+                        float(done_probability * result_distribution.probabilities["negative"]),
+                        6,
+                    ),
+                    "done_unclear_probability": round(
+                        float(
+                            done_probability * result_distribution.probabilities["unclear"]
+                            + unclear_availability_probability
+                        ),
+                        6,
+                    ),
                 }
             )
 
@@ -564,6 +585,9 @@ class StatisticalResponseTransitionModel(ResponseTransitionModel):
             "backoff_level": distribution.backoff_level,
             "source_key": list(distribution.source_key),
             "total_count": round(float(distribution.total_count), 4),
+            "present_probability": round(float(distribution.probabilities["present"]), 6),
+            "absent_probability": round(float(distribution.probabilities["absent"]), 6),
+            "unclear_probability": round(float(distribution.probabilities["unclear"]), 6),
         }
 
     def _predict_with_heuristic_fallback(

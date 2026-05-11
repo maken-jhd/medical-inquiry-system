@@ -1,0 +1,10 @@
+search_impl: modular_v2
+
+search_policy:
+  root_action_mode: mcts
+
+transition_model:
+  type: heuristic
+
+reward_model:
+  type: heuristic_v2

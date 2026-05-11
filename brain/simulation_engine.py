@@ -303,6 +303,7 @@ class SimulationEngine:
 
         # 单动作 rollout 直接选择期望收益最高的回答分支，构成最轻量的一条前瞻轨迹。
         selected_branch = sorted(branch_payloads, key=lambda item: (-item["weighted_reward"], item["branch"]))[0]
+        reward_proxy_summary = self._summarize_reward_proxy([selected_branch])
 
         steps = [
             {
@@ -327,7 +328,11 @@ class SimulationEngine:
             final_answer_name=hypothesis_name,
             steps=steps,
             score=outcome.expected_reward,
-            metadata={"simulation_outcome": outcome.metadata, "branch_evaluations": branch_payloads},
+            metadata={
+                "simulation_outcome": outcome.metadata,
+                "branch_evaluations": branch_payloads,
+                **reward_proxy_summary,
+            },
         )
 
     # 从搜索树节点出发执行多步 rollout，模拟 A3 -> 回答解释 -> route -> A2/A3 的前瞻过程。
@@ -447,6 +452,7 @@ class SimulationEngine:
         last_stage = "A3"
         branch_trace: list[str] = []
         anti_collapse_penalty_total = 0.0
+        selected_branch_payloads: list[dict] = []
 
         while action is not None and step_depth < max_depth:
             step_depth += 1
@@ -485,6 +491,7 @@ class SimulationEngine:
             total_reward += step_reward + context_bonus
             last_stage = decision.next_stage
             branch_trace.append(str(selected_branch["branch"]))
+            selected_branch_payloads.append(selected_branch)
 
             # 一旦选中了某条模拟回答，就把它像真实 pending_action 一样写回 rollout_state，
             # 这样后续 R2/action selection 才能基于“已知新证据”继续展开。
@@ -561,6 +568,7 @@ class SimulationEngine:
 
         # 最终轨迹保留 rollout_state 副本，供树节点缓存和后续 reroot/repair 使用。
         final_hypothesis = hypothesis or self._resolve_hypothesis(node, rollout_state, current_hypothesis)
+        reward_proxy_summary = self._summarize_reward_proxy(selected_branch_payloads)
         trajectory = ReasoningTrajectory(
             trajectory_id=f"trajectory::{node.node_id}::{str(branch_seed.get('branch') or 'seed')}",
             final_answer_id=final_hypothesis.node_id if final_hypothesis is not None else None,
@@ -584,6 +592,7 @@ class SimulationEngine:
                 "anti_collapse_penalty_total": round(anti_collapse_penalty_total, 4),
                 "anti_collapse_triggered": anti_collapse_penalty_total > 0.0,
                 "_rollout_state": rollout_state,
+                **reward_proxy_summary,
             },
         )
         return trajectory
@@ -764,6 +773,65 @@ class SimulationEngine:
             if str(payload.get("branch") or "") == branch_name:
                 return payload
         return None
+
+    # 把 rollout 每一步 reward breakdown 压成 trajectory 级 confidence proxy，供最终 acceptance 轻量消费。
+    def _summarize_reward_proxy(self, branch_payloads: Sequence[dict]) -> dict[str, float | str]:
+        if len(branch_payloads) == 0:
+            return {}
+
+        belief_margins: list[float] = []
+        uncertainty_reductions: list[float] = []
+        acceptance_risks: list[float] = []
+        support_qualities: list[float] = []
+
+        for payload in branch_payloads:
+            breakdown = payload.get("reward_breakdown", {})
+            if not isinstance(breakdown, dict):
+                continue
+            belief_margin = breakdown.get("belief_margin_proxy")
+            uncertainty_reduction = breakdown.get("uncertainty_reduction_surrogate")
+            acceptance_risk = breakdown.get("acceptance_risk_proxy")
+            support_quality = breakdown.get("branch_support_quality")
+            if isinstance(belief_margin, (int, float)):
+                belief_margins.append(float(belief_margin))
+            if isinstance(uncertainty_reduction, (int, float)):
+                uncertainty_reductions.append(float(uncertainty_reduction))
+            if isinstance(acceptance_risk, (int, float)):
+                acceptance_risks.append(float(acceptance_risk))
+            if isinstance(support_quality, (int, float)):
+                support_qualities.append(float(support_quality))
+
+        if (
+            len(belief_margins) == 0
+            and len(uncertainty_reductions) == 0
+            and len(acceptance_risks) == 0
+            and len(support_qualities) == 0
+        ):
+            return {}
+
+        margin_mean = sum(belief_margins) / len(belief_margins) if len(belief_margins) > 0 else 0.0
+        risk_mean = sum(acceptance_risks) / len(acceptance_risks) if len(acceptance_risks) > 0 else 0.0
+        support_mean = sum(support_qualities) / len(support_qualities) if len(support_qualities) > 0 else 0.0
+        uncertainty_mean = (
+            sum(uncertainty_reductions) / len(uncertainty_reductions)
+            if len(uncertainty_reductions) > 0
+            else 0.0
+        )
+        branch_consistency_score = 1.0
+        if len(belief_margins) > 1:
+            branch_consistency_score = max(
+                0.0,
+                1.0 - min(max(belief_margins) - min(belief_margins), 1.0),
+            )
+
+        return {
+            "reward_confidence_proxy_source": "trajectory_reward_proxy",
+            "belief_margin_proxy": round(margin_mean, 4),
+            "uncertainty_reduction_proxy": round(uncertainty_mean, 4),
+            "acceptance_risk_proxy": round(risk_mean, 4),
+            "branch_support_quality": round(support_mean, 4),
+            "branch_consistency_score": round(branch_consistency_score, 4),
+        }
 
     def _select_best_branch_payload(self, branch_payloads: list[dict], action_id: str) -> dict:
         mode = str(self.config.branch_selection_mode or "greedy").strip().lower()

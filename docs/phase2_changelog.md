@@ -10,6 +10,235 @@
 - `phase2_execution_checklist.md` 更偏“路线设计与待办清单”
 - 本文更偏“已经发生过哪些阶段性变化、分别解决了什么问题”
 
+## 近期更新：2026-05-11 为 modular_v2 statistical 路径补齐 belief-aware reward 与轻量 acceptance calibration
+
+### 本次目标
+
+- 不重做上一轮已经落地的 `statistical transition model`
+- 在现有 `modular_v2 + statistical transition` 骨架上补齐真正消费 `candidate belief` 的 reward
+- 对 acceptance 做最小必要校准，尽量保留 completion 优势，同时压低 wrong accepted
+
+### 问题背景
+
+- 前一轮 benchmark 已经表明：
+  - `modular_v2 + statistical transition` 相比 `modular_v2 + heuristic transition` 已有明显收益
+  - 但与 `legacy` 相比，accepted accuracy 仍略低、wrong accepted 略高
+- 这说明当前瓶颈已经不主要在 future-answer probability，而更可能在：
+  - reward 还没有真正利用 belief mixture 与 branch distinction
+  - acceptance / stop 与新的统计版分支概率尚未完全协同
+
+### 本次改动
+
+- [brain/response_transition_model.py](/Users/loki/Workspace/GraduationDesign/brain/response_transition_model.py)
+  - 为 statistical branch metadata 补充更完整的 disease-conditioned likelihood 信息
+  - 让 reward 不只读 mixture 后的总分布，也能读取每个 disease 在不同 branch 下的细粒度支持度
+- [brain/reward_model.py](/Users/loki/Workspace/GraduationDesign/brain/reward_model.py)
+  - 新增 `BeliefAwareRolloutRewardModel`
+  - 在 `HeuristicRolloutRewardModel` 之上继续保留原有启发量，并额外显式建模：
+    - `uncertainty_reduction_surrogate`
+    - `top1_top2_margin_gain_surrogate`
+    - `acceptance_risk_penalty`
+    - `branch_support_quality`
+  - 当前不会做严格 Bayesian posterior update，而是：
+    - 复用 transition branch metadata 中的 `belief_components`
+    - 构造 top-k hypothesis 的近似 posterior
+    - 用 `entropy surrogate + top1-top2 margin` 估计 branch 后诊断区分度变化
+- [brain/simulation_engine.py](/Users/loki/Workspace/GraduationDesign/brain/simulation_engine.py)
+  - 将 reward 侧 proxy 汇总到 rollout / trajectory metadata
+  - 当前会额外输出：
+    - `belief_margin_proxy`
+    - `uncertainty_reduction_proxy`
+    - `acceptance_risk_proxy`
+    - `branch_support_quality`
+    - `branch_consistency_score`
+- [brain/trajectory_evaluator.py](/Users/loki/Workspace/GraduationDesign/brain/trajectory_evaluator.py)
+  - 将上述 reward proxy 聚合进 `FinalAnswerScore.metadata`
+  - 供 acceptance 做轻量后置校准，而不是把 acceptance 逻辑塞回 MCTS
+- [brain/acceptance_controller.py](/Users/loki/Workspace/GraduationDesign/brain/acceptance_controller.py)
+  - 新增 `AcceptanceCalibrationConfig`
+  - 当前校准策略保持极小侵入：
+    - 只在 `verifier_mode = llm_verifier` 且 verifier 已想接受时生效
+    - 只参考 `acceptance_risk_proxy / belief_margin_proxy / branch_support_quality`
+    - 若判断“强竞争诊断尚未排除”，则阻止本轮 acceptance 并继续 repair
+- [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - 默认构造入口现已支持：
+    - `reward_model.type = heuristic_v2 | belief_aware_v1`
+    - `acceptance_calibration.*`
+- [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml)
+  - 补充 belief-aware reward 相关权重与 acceptance calibration 配置
+- 测试：
+  - [tests/test_belief_aware_reward_model.py](/Users/loki/Workspace/GraduationDesign/tests/test_belief_aware_reward_model.py)
+  - [tests/test_acceptance_calibration.py](/Users/loki/Workspace/GraduationDesign/tests/test_acceptance_calibration.py)
+  - 同时更新：
+    - [tests/test_simulation_engine.py](/Users/loki/Workspace/GraduationDesign/tests/test_simulation_engine.py)
+    - [tests/test_service_config.py](/Users/loki/Workspace/GraduationDesign/tests/test_service_config.py)
+    - [tests/test_statistical_transition_model.py](/Users/loki/Workspace/GraduationDesign/tests/test_statistical_transition_model.py)
+
+### 为什么这一步优先于直接上学习版 transition model
+
+- 当前最直接暴露的问题已经不是“future-answer probability 完全不合理”，而是“系统能更积极完成对话，但 acceptance 略激进”
+- 在这种阶段，先补：
+  - belief-aware reward
+  - branch 后区分度估计
+  - acceptance 轻量校准
+  往往比直接引入 `XGBoost / LightGBM / sklearn` 学习版 transition 更高收益、更易回归
+- 这样也能先验证：
+  - statistical transition 带来的信息增益，是否已经被 rollout / acceptance 真正消费
+  - wrong accepted 到底主要来自 transition、reward 还是 acceptance 协同不足
+
+### 验证结果
+
+- 已运行并通过：
+  - `conda run -n GraduationDesign python -m pytest tests/test_belief_aware_reward_model.py tests/test_acceptance_calibration.py tests/test_reward_model.py tests/test_simulation_engine.py tests/test_service_config.py tests/test_statistical_transition_model.py tests/test_acceptance_controller.py -q`
+  - `conda run -n GraduationDesign python -m pytest tests/test_trajectory_evaluator.py tests/test_service_stop_flow.py tests/test_service_search_impl_switch.py -q`
+  - `conda run -n GraduationDesign python -m pytest tests/test_response_transition_model.py tests/test_statistical_transition_model.py tests/test_reward_model.py tests/test_belief_aware_reward_model.py -q`
+  - `conda run -n GraduationDesign python -m py_compile brain/reward_model.py brain/response_transition_model.py brain/simulation_engine.py brain/trajectory_evaluator.py brain/acceptance_controller.py brain/service.py`
+
+### 当前限制
+
+- 仍未实现学习版 transition model，也没有引入训练依赖
+- belief-aware reward 仍是近似 posterior surrogate，不是严格 Bayesian 信息增益
+- acceptance calibration 仍是轻量 proxy guard，不是新的 stop rule 体系
+- `legacy` 路径、`heuristic` 路径与 `statistical` 路径都继续保留，便于后续 benchmark 回归
+
+## 近期更新：2026-05-11 修复 modular_v2 benchmark 局部配置覆盖导致 verifier 被意外关闭
+
+### 本次目标
+
+- 解释并修复 `modular_v2 + heuristic/statistical` 在 smoke60 中出现的：
+  - `completed_count = 0`
+  - `accepted_final_answer_count = 0`
+  - `stop_reason = verifier_not_ready`
+- 保证 benchmark 专用局部 YAML 只覆写搜索骨架相关字段，不会把默认 verifier / repair 配置一起冲掉
+
+### 问题定位
+
+- `legacy` 路径表现正常，但 `modular_v2` 路径在相同病例上持续走到：
+  - `verifier_mode = "fallback"`
+  - `verifier_called = false`
+  - `stop_reason = "verifier_not_ready"`
+- 根因不是 modular rollout 分数偏低，而是 benchmark 脚本通过 `BRAIN_CONFIG_PATH` 指向最小 override YAML 时，
+  `build_default_brain()` 只读取了这份局部文件，没有先和默认 [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml) 深合并。
+- 结果是：
+  - `path_evaluation.agent_eval_mode` 从默认 `llm_verifier` 退回到了 `TrajectoryEvaluatorConfig` 的 dataclass 默认值 `fallback`
+  - acceptance controller 读取不到 `llm_verifier` / `observed_evidence_final_evaluator` 元数据，于是统一拒停
+
+### 本次改动
+
+- [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - 新增默认 brain 配置路径与单文件读取 helper
+  - 调整 `load_brain_config()`：
+    - 显式 `config_path` 读取时，仍保持“按指定文件原样读取”
+    - 通过 `BRAIN_CONFIG_PATH` 注入 benchmark 配置时，改为：
+      - 先读默认 `configs/brain.yaml`
+      - 再把 override 文件做递归深合并
+  - 这样最小 benchmark YAML 现在可以只声明：
+    - `search_impl`
+    - `search_policy.root_action_mode`
+    - `transition_model.type`
+    - `reward_model.type`
+    而不会把 verifier / repair / stop 配置清空
+- [tests/test_service_config.py](/Users/loki/Workspace/GraduationDesign/tests/test_service_config.py)
+  - 新增回归断言：
+    - `BRAIN_CONFIG_PATH` 局部 override 仍会保留默认 `path_evaluation.agent_eval_mode`
+    - `llm_verifier_min_turn_index / llm_verifier_min_trajectory_count` 不会丢失
+- [README.md](/Users/loki/Workspace/GraduationDesign/README.md)
+- [simulator/README.md](/Users/loki/Workspace/GraduationDesign/simulator/README.md)
+  - 补充 `BRAIN_CONFIG_PATH` 现在按“默认配置 + 局部 override”装配的说明
+
+### 验证结果
+
+- 已运行并通过：
+  - `conda run -n GraduationDesign python -m pytest tests/test_service_config.py -q`
+  - `conda run -n GraduationDesign python -m py_compile brain/service.py tests/test_service_config.py`
+- 已抽取 legacy 已 `completed` 的 5 个病例，重跑 `modular_v2 + heuristic`：
+  - 修复前：5/5 都是 `max_turn_reached`，`stop_reason = verifier_not_ready`
+  - 修复后：5/5 都恢复为 `completed`
+  - 且顶层答案 metadata 重新回到：
+    - `verifier_mode = "llm_verifier"`
+    - `verifier_called = true`
+    - `verifier_should_accept = true`
+
+## 近期更新：2026-05-11 新增 modular_v2 statistical smoke60 一键回放脚本
+
+### 本次目标
+
+- 为当前 `mcts-v2` 分支上的 modular_v2 statistical 实验补一个可直接运行的 smoke60 启动入口
+- 避免每次手动拼接 `BRAIN_CONFIG_PATH + run_batch_replay.py` 长命令
+
+### 本次改动
+
+- [configs/brain_benchmark_modular_v2_statistical.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain_benchmark_modular_v2_statistical.yaml)
+  - 新增最小 benchmark 配置
+  - 固定：
+    - `search_impl = modular_v2`
+    - `transition_model.type = statistical`
+    - `reward_model.type = heuristic_v2`
+    - `search_policy.root_action_mode = mcts`
+- [scripts/run_modular_v2_statistical_smoke60.sh](/Users/loki/Workspace/GraduationDesign/scripts/run_modular_v2_statistical_smoke60.sh)
+  - 新增一键启动脚本
+  - 默认运行：
+    - `smoke60/cases.jsonl`
+    - `max_turns = 8`
+    - `case_concurrency = 6`
+    - `api_error_retries = 1`
+  - 支持通过环境变量覆盖：
+    - `OUTPUT_ROOT`
+    - `MAX_TURNS`
+    - `CASE_CONCURRENCY`
+    - `LIMIT`
+    - `NO_RESUME`
+- [README.md](/Users/loki/Workspace/GraduationDesign/README.md)
+  - 补充该脚本的使用说明与等价展开命令
+- [.gitignore](/Users/loki/Workspace/GraduationDesign/.gitignore)
+  - 放行新脚本，避免继续被全局 `*.sh` 忽略
+
+### 验证结果
+
+- 已执行 `bash -n scripts/run_modular_v2_statistical_smoke60.sh`
+- 已执行 `conda run -n GraduationDesign python - <<'PY' ...` 验证新配置文件可被 YAML 正常读取
+  - 读取结果确认：
+    - `search_impl = modular_v2`
+    - `transition_model.type = statistical`
+    - `reward_model.type = heuristic_v2`
+    - `search_policy.root_action_mode = mcts`
+
+## 近期更新：2026-05-11 新增 modular_v2 heuristic smoke60 回归脚本
+
+### 本次目标
+
+- 为 `modular_v2 + heuristic transition model` 增加一键回放入口
+- 方便与 statistical 版做 A/B 对照，验证骨架改造本身是否引入偏差
+
+### 本次改动
+
+- [configs/brain_benchmark_modular_v2_heuristic.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain_benchmark_modular_v2_heuristic.yaml)
+  - 新增 heuristic 回归配置
+  - 固定：
+    - `search_impl = modular_v2`
+    - `transition_model.type = heuristic`
+    - `reward_model.type = heuristic_v2`
+    - `search_policy.root_action_mode = mcts`
+- [scripts/run_modular_v2_heuristic_smoke60.sh](/Users/loki/Workspace/GraduationDesign/scripts/run_modular_v2_heuristic_smoke60.sh)
+  - 新增一键启动脚本
+  - 默认运行 `smoke60/cases.jsonl`
+  - 默认参数与 statistical 版保持一致，便于做回归对照
+- [README.md](/Users/loki/Workspace/GraduationDesign/README.md)
+  - 补充 heuristic smoke60 命令入口与展开命令
+- [simulator/README.md](/Users/loki/Workspace/GraduationDesign/simulator/README.md)
+  - 补充该回归脚本说明
+- [.gitignore](/Users/loki/Workspace/GraduationDesign/.gitignore)
+  - 放行 heuristic 脚本，避免被 `*.sh` 忽略
+
+### 验证结果
+
+- 已执行 `bash -n scripts/run_modular_v2_heuristic_smoke60.sh`
+- 已执行配置读取校验，确认：
+  - `search_impl = modular_v2`
+  - `transition_model.type = heuristic`
+  - `reward_model.type = heuristic_v2`
+  - `search_policy.root_action_mode = mcts`
+
 ## 近期更新：2026-05-11 为 modular_v2 补齐 statistical transition model 与 belief mixture
 
 ### 本次目标
@@ -6052,6 +6281,103 @@ python -m py_compile brain/simulation_engine.py brain/trajectory_evaluator.py br
 
 - 第 `2` 章目录层级明显收缩，不再被三级标题大量占据版面
 - 正文保留原有内容覆盖范围，但结构更紧凑，更适合作为“相关技术与理论基础”章节
+
+## 六十二、2026-05-11：起草系统设计与实现章节并梳理第 3 章重构方向
+
+### 本次目标
+
+- 根据导师建议，将方法章节与系统介绍章节进一步分离
+- 为新增“系统设计与实现”章节提供可直接扩写的正文初稿
+
+### 本次更新
+
+- 新增：
+  - [docs/chapter4.md](/Users/loki/Workspace/GraduationDesign/docs/chapter4.md)
+
+### 具体改动
+
+- 起草新的第 `4` 章“系统设计与实现”初稿
+- 在新章中补入系统总体架构、知识图谱模块实现、问诊推理引擎实现、虚拟病人与自动回放模块实现以及前端界面展示等内容
+- 为系统架构图、流程图、时序图和界面截图预留图片占位位置，便于后续插图
+
+### 结果影响
+
+- 论文结构上已具备将“方法设计”与“系统介绍/实现说明”分章写作的基础
+- 新章初稿可直接作为后续调整第 `3` 章与顺延实验章节的承接文本
+
+## 六十三、2026-05-11：细化第 3 章方法表达并补写第 4 章系统实现正文
+
+### 本次目标
+
+- 将第 `3` 章进一步收口为更纯粹的方法章节
+- 将第 `4` 章扩写为更接近论文正文的“系统设计与实现”版本
+
+### 本次更新
+
+- 更新：
+  - [docs/chapter3.md](/Users/loki/Workspace/GraduationDesign/docs/chapter3.md)
+  - [docs/chapter4.md](/Users/loki/Workspace/GraduationDesign/docs/chapter4.md)
+
+### 具体改动
+
+- 调整第 `3` 章部分表述，将“本文系统中的 A2 阶段”等说法收口为“本文方法中的 A2 阶段”，进一步强化方法章节边界
+- 保留第 `3` 章中图谱构建、多轮问诊推理和图谱驱动虚拟病人三条方法主线，不再混入过多系统实现语气
+- 将第 `4` 章按“总体架构、知识图谱模块、问诊推理引擎、虚拟病人与自动回放、前端展示”五部分重新细化
+- 为第 `4` 章补入分层架构、双运行模式、统一检索封装、统一状态管理、自动回放控制和结果组织等正文内容
+- 继续保留系统架构图、流程图、时序图和界面截图占位，便于后续插图排版
+
+### 结果影响
+
+- 第 `3` 章与第 `4` 章的职责边界更加清晰，方法与系统实现的区分度更强
+- 第 `4` 章文本已更接近可直接进入论文正文的写法，后续主要可围绕插图、术语微调和与实验章节的衔接继续收口
+
+## 六十四、2026-05-11：补充第 4 章图 4.1 到图 4.5 的图题图注与出图提示
+
+### 本次目标
+
+- 为第 `4` 章前五张系统结构图补齐图题、图注和插图说明
+- 生成一份可直接用于后续出图的提示词文档
+
+### 本次更新
+
+- 新增：
+  - [docs/chapter4_figure_prompts.md](/Users/loki/Workspace/GraduationDesign/docs/chapter4_figure_prompts.md)
+- 更新：
+  - [docs/chapter4.md](/Users/loki/Workspace/GraduationDesign/docs/chapter4.md)
+
+### 具体改动
+
+- 在第 `4` 章的图 `4.1` 到图 `4.5` 占位下方分别补入图题、图注和插图说明
+- 统一明确系统总体架构图、知识图谱构建流程图、单轮问诊时序图、问诊引擎内部流程图、虚拟病人与自动回放流程图的构图重点
+- 额外整理图 `4.1` 到图 `4.5` 的中文出图提示词，便于后续使用绘图模型或设计工具生成论文插图
+
+### 结果影响
+
+- 第 `4` 章的插图占位已从简单备注升级为可直接交付绘图或排版的结构化说明
+- 后续若继续补图，只需根据提示词生成图像并按图号插入即可
+
+## 六十五、2026-05-11：收敛第 4 章正文措辞，使其更贴近毕业论文写法
+
+### 本次目标
+
+- 调整第 `4` 章的正文措辞，使其从“工程说明式”表达进一步收口为更规范的毕业论文表述
+
+### 本次更新
+
+- 更新：
+  - [docs/chapter4.md](/Users/loki/Workspace/GraduationDesign/docs/chapter4.md)
+
+### 具体改动
+
+- 统一将部分偏口语化、偏实现说明式的句子改写为更正式的学术表达
+- 强化“系统设计与实现”章节的论文语气，使模块职责、数据流和运行模式的描述更加凝练
+- 调整部分转折与承接语，减少“这样一来”“并不是”等口语色彩较强的表达
+- 优化问诊推理引擎、自动回放模块和前端展示部分的段落措辞，使其更贴近论文正文风格
+
+### 结果影响
+
+- 第 `4` 章整体语气较此前更加正式，更接近毕业论文正文的写作风格
+- 章节结构、图号和图注体系保持不变，可继续直接用于后续论文整合
 
 ## 六十二、2026-05-11：并行落地 modular_v2 MCTS skeleton，保留 legacy 搜索基线
 

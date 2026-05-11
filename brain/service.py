@@ -12,7 +12,7 @@ import yaml
 
 from .action_builder import ActionBuilder, ActionBuilderConfig
 from .entity_linker import EntityLinker, EntityLinkerConfig
-from .acceptance_controller import VerifierAcceptanceController
+from .acceptance_controller import AcceptanceCalibrationConfig, VerifierAcceptanceController
 from .evidence_anchor import EvidenceAnchorAnalyzer, EvidenceAnchorConfig
 from .evidence_parser import EvidenceParser, EvidenceParserConfig
 from .errors import LlmEmptyExtractionError, LlmUnavailableError
@@ -29,6 +29,7 @@ from .response_transition_model import (
     StatisticalResponseTransitionModel,
 )
 from .reward_model import HeuristicRolloutRewardModel, RolloutRewardModelConfig
+from .reward_model import BeliefAwareRolloutRewardModel
 from .retriever import GraphRetriever, RetrievalConfig
 from .router import ReasoningRouter, RouterConfig
 from .search_tree import SearchTree
@@ -5748,6 +5749,7 @@ def build_default_brain(
     candidate_feedback_config = dict(config.get("candidate_feedback", {}))
     fallback_config = dict(config.get("fallback", {}))
     repair_config = dict(config.get("repair", {}))
+    acceptance_calibration_config = dict(config.get("acceptance_calibration", {}))
     transition_model_config = dict(config.get("transition_model", {}))
     reward_model_config = dict(config.get("reward_model", {}))
     state_signature_config = dict(config.get("state_signature", {}))
@@ -5839,23 +5841,41 @@ def build_default_brain(
         )
     else:
         transition_model = heuristic_transition_model
-    reward_model = HeuristicRolloutRewardModel(
-        RolloutRewardModelConfig(
-            model_type=reward_model_type,
-            information_gain_weight=float(reward_model_config.get("information_gain_weight", 0.6)),
-            hypothesis_alignment_weight=float(reward_model_config.get("hypothesis_alignment_weight", 0.35)),
-            contradiction_signal_weight=float(reward_model_config.get("contradiction_signal_weight", 0.25)),
-            turn_cost=float(reward_model_config.get("turn_cost", 0.06)),
-            repeat_penalty=float(reward_model_config.get("repeat_penalty", 0.18)),
-            high_cost_penalty=float(reward_model_config.get("high_cost_penalty", 0.12)),
-            uncertainty_penalty=float(reward_model_config.get("uncertainty_penalty", 0.1)),
-            negative_resolution_penalty=float(
-                reward_model_config.get("negative_resolution_penalty", 0.08)
-            ),
-            context_match_bonus=float(reward_model_config.get("context_match_bonus", 0.1)),
-            risk_context_bonus=float(reward_model_config.get("risk_context_bonus", 0.05)),
-        )
+    reward_model_runtime_config = RolloutRewardModelConfig(
+        model_type=reward_model_type,
+        information_gain_weight=float(reward_model_config.get("information_gain_weight", 0.6)),
+        hypothesis_alignment_weight=float(reward_model_config.get("hypothesis_alignment_weight", 0.35)),
+        contradiction_signal_weight=float(reward_model_config.get("contradiction_signal_weight", 0.25)),
+        turn_cost=float(reward_model_config.get("turn_cost", 0.06)),
+        repeat_penalty=float(reward_model_config.get("repeat_penalty", 0.18)),
+        high_cost_penalty=float(reward_model_config.get("high_cost_penalty", 0.12)),
+        uncertainty_penalty=float(reward_model_config.get("uncertainty_penalty", 0.1)),
+        negative_resolution_penalty=float(
+            reward_model_config.get("negative_resolution_penalty", 0.08)
+        ),
+        context_match_bonus=float(reward_model_config.get("context_match_bonus", 0.1)),
+        risk_context_bonus=float(reward_model_config.get("risk_context_bonus", 0.05)),
+        belief_top_k_hypotheses=int(reward_model_config.get("belief_top_k_hypotheses", 3)),
+        enable_belief_margin_gain=bool(reward_model_config.get("enable_belief_margin_gain", True)),
+        enable_uncertainty_reduction=bool(reward_model_config.get("enable_uncertainty_reduction", True)),
+        enable_acceptance_risk_penalty=bool(
+            reward_model_config.get("enable_acceptance_risk_penalty", True)
+        ),
+        margin_gain_weight=float(reward_model_config.get("margin_gain_weight", 0.32)),
+        uncertainty_reduction_weight=float(
+            reward_model_config.get("uncertainty_reduction_weight", 0.28)
+        ),
+        acceptance_risk_weight=float(reward_model_config.get("acceptance_risk_weight", 0.22)),
+        branch_likelihood_floor=float(reward_model_config.get("branch_likelihood_floor", 0.05)),
+        min_branch_support_count=float(reward_model_config.get("min_branch_support_count", 3.0)),
+        low_value_high_cost_penalty_multiplier=float(
+            reward_model_config.get("low_value_high_cost_penalty_multiplier", 1.15)
+        ),
     )
+    if reward_model_type == "belief_aware_v1":
+        reward_model = BeliefAwareRolloutRewardModel(reward_model_runtime_config)
+    else:
+        reward_model = HeuristicRolloutRewardModel(reward_model_runtime_config)
     deps = BrainDependencies(
         state_tracker=StateTracker(),
         retriever=GraphRetriever(
@@ -5877,7 +5897,22 @@ def build_default_brain(
             ),
         ),
         question_selector=QuestionSelector(),
-        acceptance_controller=VerifierAcceptanceController(),
+        acceptance_controller=VerifierAcceptanceController(
+            AcceptanceCalibrationConfig(
+                enable_reward_confidence_proxy=bool(
+                    acceptance_calibration_config.get("enable_reward_confidence_proxy", True)
+                ),
+                min_belief_margin_proxy=float(
+                    acceptance_calibration_config.get("min_belief_margin_proxy", 0.12)
+                ),
+                max_acceptance_risk_proxy=float(
+                    acceptance_calibration_config.get("max_acceptance_risk_proxy", 0.22)
+                ),
+                min_branch_support_quality=float(
+                    acceptance_calibration_config.get("min_branch_support_quality", 0.42)
+                ),
+            )
+        ),
         report_builder=ReportBuilder(),
         evidence_parser=EvidenceParser(
             llm_client,
@@ -6042,20 +6077,14 @@ def build_default_brain_from_env(
     return build_default_brain(client, config_overrides=config_overrides, llm_client=llm_client)
 
 
-# 读取第二阶段默认配置文件。
-def load_brain_config(config_path: str | Path | None = None) -> dict:
-    project_root = Path(__file__).resolve().parents[1]
+# 返回仓库内默认 brain 配置文件路径。
+def _default_brain_config_path(project_root: Path | None = None) -> Path:
+    root = project_root or Path(__file__).resolve().parents[1]
+    return root / "configs" / "brain.yaml"
 
-    if config_path is not None:
-        path = Path(config_path)
-    else:
-        env_config_path = str(os.getenv(BRAIN_CONFIG_PATH_ENV_VAR) or "").strip()
-        if len(env_config_path) > 0:
-            candidate = Path(env_config_path).expanduser()
-            path = candidate if candidate.is_absolute() else project_root / candidate
-        else:
-            path = project_root / "configs" / "brain.yaml"
 
+# 读取单个 YAML 配置文件，并保证返回 dict。
+def _read_brain_config_file(path: Path) -> dict:
     if not path.exists():
         return {}
 
@@ -6063,3 +6092,39 @@ def load_brain_config(config_path: str | Path | None = None) -> dict:
         payload = yaml.safe_load(handle) or {}
 
     return payload if isinstance(payload, dict) else {}
+
+
+# 读取第二阶段默认配置文件。
+def load_brain_config(config_path: str | Path | None = None) -> dict:
+    project_root = Path(__file__).resolve().parents[1]
+    default_path = _default_brain_config_path(project_root)
+
+    if config_path is not None:
+        explicit_path = Path(config_path).expanduser()
+        path = explicit_path if explicit_path.is_absolute() else project_root / explicit_path
+        return _read_brain_config_file(path)
+
+    env_config_path = str(os.getenv(BRAIN_CONFIG_PATH_ENV_VAR) or "").strip()
+
+    if len(env_config_path) == 0:
+        return _read_brain_config_file(default_path)
+
+    candidate = Path(env_config_path).expanduser()
+    override_path = candidate if candidate.is_absolute() else project_root / candidate
+
+    if override_path == default_path:
+        return _read_brain_config_file(default_path)
+
+    default_config = _read_brain_config_file(default_path)
+    override_config = _read_brain_config_file(override_path)
+
+    # BRAIN_CONFIG_PATH 主要给 benchmark / ablation 场景使用；
+    # 这里默认把它视为“在默认 brain.yaml 之上的局部覆写”，
+    # 避免只覆盖 search_impl / transition_model 时，把 verifier、repair 等未声明字段意外打回 dataclass 默认值。
+    if len(default_config) == 0:
+        return override_config
+
+    if len(override_config) == 0:
+        return default_config
+
+    return _merge_brain_config(default_config, override_config)

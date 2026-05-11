@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from brain.response_transition_model import StatisticalResponseTransitionModel
+from brain.reward_model import BeliefAwareRolloutRewardModel
 from brain.search_tree import SearchTree
 from brain.service import build_default_brain, load_brain_config
 from brain.types import MctsAction
@@ -158,6 +159,7 @@ def test_load_brain_config_supports_env_override(tmp_path: Path, monkeypatch) ->
     config_path.write_text(
         "\n".join(
             [
+                "search_impl: modular_v2",
                 "search_policy:",
                 "  root_action_mode: mcts",
                 "repair:",
@@ -168,10 +170,21 @@ def test_load_brain_config_supports_env_override(tmp_path: Path, monkeypatch) ->
     )
 
     monkeypatch.setenv("BRAIN_CONFIG_PATH", str(config_path))
+    default_config = load_brain_config(Path(__file__).resolve().parents[1] / "configs" / "brain.yaml")
     config = load_brain_config()
 
+    assert config["search_impl"] == "modular_v2"
     assert config["search_policy"]["root_action_mode"] == "mcts"
     assert config["repair"]["enable_best_repair_action"] is False
+    assert config["path_evaluation"]["agent_eval_mode"] == default_config["path_evaluation"]["agent_eval_mode"]
+    assert (
+        config["path_evaluation"]["llm_verifier_min_turn_index"]
+        == default_config["path_evaluation"]["llm_verifier_min_turn_index"]
+    )
+    assert (
+        config["path_evaluation"]["llm_verifier_min_trajectory_count"]
+        == default_config["path_evaluation"]["llm_verifier_min_trajectory_count"]
+    )
 
 
 # 验证默认构造会真正读取 a3 / repair 配置，并且不会在启动阶段遗漏配置变量。
@@ -297,6 +310,36 @@ def test_build_default_brain_supports_statistical_transition_model(tmp_path: Pat
     assert brain.deps.simulation_engine.config.transition_model_type == "statistical"
     assert isinstance(brain.deps.simulation_engine.transition_model, StatisticalResponseTransitionModel)
     assert brain.deps.simulation_engine.transition_model.config.statistics_top_k_hypotheses == 2
+
+
+# 验证 build_default_brain 也支持 belief-aware reward 与 acceptance calibration 的配置装配。
+def test_build_default_brain_supports_belief_aware_reward_and_acceptance_calibration() -> None:
+    brain = build_default_brain(
+        client=object(),
+        config_overrides={
+            "search_impl": "modular_v2",
+            "reward_model": {
+                "type": "belief_aware_v1",
+                "enable_belief_margin_gain": True,
+                "enable_acceptance_risk_penalty": True,
+                "margin_gain_weight": 0.41,
+                "uncertainty_reduction_weight": 0.27,
+                "acceptance_risk_weight": 0.19,
+            },
+            "acceptance_calibration": {
+                "enable_reward_confidence_proxy": True,
+                "min_belief_margin_proxy": 0.1,
+                "max_acceptance_risk_proxy": 0.24,
+                "min_branch_support_quality": 0.45,
+            },
+        },
+        llm_client=FakeAvailableLlmClient(),
+    )
+
+    assert brain.deps.simulation_engine.config.reward_model_type == "belief_aware_v1"
+    assert isinstance(brain.deps.simulation_engine.reward_model, BeliefAwareRolloutRewardModel)
+    assert brain.deps.simulation_engine.reward_model.config.margin_gain_weight == 0.41
+    assert brain.deps.acceptance_controller.config.max_acceptance_risk_proxy == 0.24
 
 
 # 验证 service 层会按 search_policy 把根动作选择分发给 mcts 或 greedy selector。

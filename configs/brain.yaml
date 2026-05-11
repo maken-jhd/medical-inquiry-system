@@ -48,6 +48,24 @@ transition_model:
 # reward model 负责把信息增益近似、成本和不确定性拆成可替换的组件。
 reward_model:
   type: heuristic_v2
+  enable_belief_margin_gain: true
+  enable_uncertainty_reduction: true
+  enable_acceptance_risk_penalty: true
+  belief_top_k_hypotheses: 3
+  margin_gain_weight: 0.32
+  uncertainty_reduction_weight: 0.28
+  acceptance_risk_weight: 0.22
+  branch_likelihood_floor: 0.05
+  min_branch_support_count: 3.0
+  low_value_high_cost_penalty_multiplier: 1.15
+
+# acceptance calibration 只做 verifier 之后的轻量 proxy guard，
+# 不改 verifier / repair 的整体职责边界。
+acceptance_calibration:
+  enable_reward_confidence_proxy: true
+  min_belief_margin_proxy: 0.12
+  max_acceptance_risk_proxy: 0.22
+  min_branch_support_quality: 0.42
 
 # belief signature 负责决定搜索树何时可复用、child state 如何近似表示。
 state_signature:
