@@ -2,8 +2,10 @@
 
 from brain.action_builder import ActionBuilder
 from brain.hypothesis_manager import HypothesisManager
+from brain.response_transition_model import ResponseTransitionModelConfig, StatisticalResponseTransitionModel
 from brain.router import ReasoningRouter
 from brain.simulation_engine import SimulationConfig, SimulationEngine
+from brain.transition_statistics import TransitionStatistics
 from brain.types import HypothesisCandidate, HypothesisScore, MctsAction, PatientContext, PendingActionResult, SessionState, TreeNode
 
 
@@ -258,3 +260,63 @@ def test_simulation_engine_multi_branch_rollout_keeps_positive_and_negative_seed
     assert len(trajectories) == 2
     assert "positive" in seeds
     assert "negative" in seeds
+
+
+# 验证 modular_v2 在 statistical transition model 下会真正消费统计版分支概率。
+def test_simulation_engine_modular_v2_uses_statistical_transition_model() -> None:
+    statistics = TransitionStatistics(smoothing_alpha=0.05, min_total_count=1)
+    for _ in range(6):
+        statistics.record_verify_observation(
+            disease_id="d1",
+            evidence_family="respiratory_symptom",
+            question_type="symptom",
+            outcome="present",
+        )
+    statistics.record_verify_observation(
+        disease_id="d1",
+        evidence_family="respiratory_symptom",
+        question_type="symptom",
+        outcome="absent",
+    )
+    engine = SimulationEngine(
+        SimulationConfig(
+            search_impl="modular_v2",
+            transition_model_type="statistical",
+        ),
+        transition_model=StatisticalResponseTransitionModel(
+            ResponseTransitionModelConfig(model_type="statistical"),
+            statistics=statistics,
+        ),
+    )
+    state = SessionState(
+        session_id="s_stat_rollout",
+        candidate_hypotheses=[
+            HypothesisScore(node_id="d1", label="Disease", name="PCP", score=1.0),
+        ],
+    )
+    action = MctsAction(
+        action_id="a_stat_rollout",
+        action_type="verify_evidence",
+        target_node_id="slot_cough",
+        target_node_label="ClinicalFinding",
+        target_node_name="干咳",
+        metadata={
+            "question_type_hint": "symptom",
+            "evidence_families": ["respiratory_symptom"],
+        },
+    )
+
+    outcome = engine.simulate_action(
+        action,
+        state,
+        primary_hypothesis=state.candidate_hypotheses[0],
+        candidate_hypotheses=state.candidate_hypotheses,
+    )
+    by_branch = {
+        item["branch"]: item
+        for item in outcome.metadata["branch_estimates"]
+    }
+
+    assert outcome.metadata["transition_model_type"] == "statistical"
+    assert by_branch["positive"]["transition_metadata"]["source"] == "statistical"
+    assert by_branch["positive"]["probability"] > by_branch["negative"]["probability"]

@@ -1,7 +1,9 @@
 """测试默认配置文件会被读取并映射到运行参数。"""
 
+import json
 from pathlib import Path
 
+from brain.response_transition_model import StatisticalResponseTransitionModel
 from brain.search_tree import SearchTree
 from brain.service import build_default_brain, load_brain_config
 from brain.types import MctsAction
@@ -18,6 +20,54 @@ class FakeAvailableLlmClient:
 
     def close(self) -> None:
         return None
+
+
+def _write_minimal_statistical_sources(tmp_path: Path) -> tuple[Path, Path, Path]:
+    evidence_catalog_path = tmp_path / "disease_evidence_family_catalog.json"
+    cases_path = tmp_path / "cases.jsonl"
+    replay_path = tmp_path / "replay_results.jsonl"
+    evidence_catalog_path.write_text(
+        json.dumps(
+            {
+                "diseases": [
+                    {
+                        "disease_id": "d1",
+                        "disease_name": "肺孢子菌肺炎",
+                        "evidence": [
+                            {
+                                "evidence_id": "slot_cough",
+                                "evidence_group": "symptom",
+                                "families": ["respiratory_symptom"],
+                            }
+                        ],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    cases_path.write_text(
+        json.dumps(
+            {
+                "case_id": "case_pcp",
+                "true_conditions": ["肺孢子菌肺炎"],
+                "slot_truth_map": {
+                    "slot_cough": {
+                        "node_id": "slot_cough",
+                        "value": True,
+                        "group": "symptom",
+                        "node_label": "ClinicalFinding",
+                    }
+                },
+                "metadata": {"disease_id": "d1"},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    replay_path.write_text("", encoding="utf-8")
+    return evidence_catalog_path, cases_path, replay_path
 
 
 # 验证 load_brain_config 能从 YAML 文件中读出结构化配置。
@@ -223,6 +273,30 @@ def test_build_default_brain_maps_a3_and_repair_config() -> None:
     assert brain.deps.hypothesis_manager.config.enable_multi_hypothesis_feedback is True
     assert brain.deps.hypothesis_manager.config.use_scope_weighted_feedback is True
     assert brain.deps.hypothesis_manager.config.max_related_hypotheses_per_evidence == 4
+
+
+# 验证 build_default_brain 也支持 statistical transition model 的配置装配。
+def test_build_default_brain_supports_statistical_transition_model(tmp_path: Path) -> None:
+    evidence_catalog_path, cases_path, replay_path = _write_minimal_statistical_sources(tmp_path)
+    brain = build_default_brain(
+        client=object(),
+        config_overrides={
+            "search_impl": "modular_v2",
+            "transition_model": {
+                "type": "statistical",
+                "statistics_source_mode": "explicit",
+                "statistics_top_k_hypotheses": 2,
+                "graph_case_paths": [str(cases_path)],
+                "replay_result_paths": [str(replay_path)],
+                "evidence_catalog_paths": [str(evidence_catalog_path)],
+            },
+        },
+        llm_client=FakeAvailableLlmClient(),
+    )
+
+    assert brain.deps.simulation_engine.config.transition_model_type == "statistical"
+    assert isinstance(brain.deps.simulation_engine.transition_model, StatisticalResponseTransitionModel)
+    assert brain.deps.simulation_engine.transition_model.config.statistics_top_k_hypotheses == 2
 
 
 # 验证 service 层会按 search_policy 把根动作选择分发给 mcts 或 greedy selector。

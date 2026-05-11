@@ -34,6 +34,16 @@ rollout_control:
 # 回答转移模型负责输出 rollout 中 future answer 的条件概率分布。
 transition_model:
   type: heuristic
+  statistics_source_mode: auto
+  statistics_top_k_hypotheses: 3
+  enable_belief_mixture: true
+  fallback_to_heuristic: true
+  statistics_smoothing_alpha: 0.5
+  statistics_min_total_count: 1
+  # 默认留空时，statistical 模式会自动发现最新的 graph cases / replay / evidence catalog。
+  graph_case_paths: []
+  replay_result_paths: []
+  evidence_catalog_paths: []
 
 # reward model 负责把信息增益近似、成本和不确定性拆成可替换的组件。
 reward_model:

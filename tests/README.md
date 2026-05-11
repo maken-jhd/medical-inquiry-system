@@ -16,7 +16,7 @@
 - 虚拟病人自动对战测试
 - 回放指标统计测试
 
-当前测试文件数量为 `46`。
+当前测试文件数量为 `49`。
 
 ## 当前文件说明
 
@@ -59,6 +59,17 @@
 - [test_response_transition_model.py](/Users/loki/Workspace/GraduationDesign/tests/test_response_transition_model.py)
   - 测试 `brain/response_transition_model.py`
   - 主要覆盖回答分支概率是否归一化，以及 red flag / asked_before / relation_type 等启发是否仍生效
+
+- [test_transition_statistics.py](/Users/loki/Workspace/GraduationDesign/tests/test_transition_statistics.py)
+  - 测试 `brain/transition_statistics.py`
+  - 主要覆盖 graph cases / replay / evidence catalog 的最小统计构建，以及条件分布的 backoff
+
+- [test_hypothesis_belief_mixture.py](/Users/loki/Workspace/GraduationDesign/tests/test_hypothesis_belief_mixture.py)
+  - 测试 belief mixture helper 与 statistical transition model 的 top-k 权重偏置
+
+- [test_statistical_transition_model.py](/Users/loki/Workspace/GraduationDesign/tests/test_statistical_transition_model.py)
+  - 测试 `StatisticalResponseTransitionModel`
+  - 主要覆盖普通问诊分支、exam_context done/result 映射，以及统计不足时的 heuristic fallback
 
 - [test_reward_model.py](/Users/loki/Workspace/GraduationDesign/tests/test_reward_model.py)
   - 测试 `brain/reward_model.py`

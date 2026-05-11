@@ -26,6 +26,7 @@ from .report_builder import ReportBuilder
 from .response_transition_model import (
     HeuristicResponseTransitionModel,
     ResponseTransitionModelConfig,
+    StatisticalResponseTransitionModel,
 )
 from .reward_model import HeuristicRolloutRewardModel, RolloutRewardModelConfig
 from .retriever import GraphRetriever, RetrievalConfig
@@ -34,6 +35,7 @@ from .search_tree import SearchTree
 from .simulation_engine import SimulationConfig, SimulationEngine
 from .state_signature import BeliefStateSignatureBuilder, StateSignatureConfig
 from .state_tracker import StateTracker
+from .transition_statistics import TransitionStatisticsBuilder, TransitionStatisticsConfig
 from .trajectory_evaluator import TrajectoryEvaluator, TrajectoryEvaluatorConfig
 from .types import (
     A1ExtractionResult,
@@ -109,6 +111,15 @@ def _normalize_root_action_mode(value: object) -> str:
 def _normalize_search_impl(value: object) -> str:
     search_impl = str(value or "legacy").strip().lower()
     return search_impl if search_impl in SUPPORTED_SEARCH_IMPLS else "legacy"
+
+
+def _normalize_optional_path_list(value: object) -> tuple[str, ...]:
+    if isinstance(value, str):
+        normalized = value.strip()
+        return (normalized,) if len(normalized) > 0 else ()
+    if isinstance(value, (list, tuple)):
+        return tuple(str(item).strip() for item in value if len(str(item).strip()) > 0)
+    return ()
 
 
 @dataclass
@@ -5764,21 +5775,70 @@ def build_default_brain(
     )
     transition_model_type = str(transition_model_config.get("type", "heuristic"))
     reward_model_type = str(reward_model_config.get("type", "heuristic_v2"))
-    transition_model = HeuristicResponseTransitionModel(
-        ResponseTransitionModelConfig(
-            model_type=transition_model_type,
-            base_positive_probability=float(transition_model_config.get("base_positive_probability", 0.6)),
-            base_doubtful_probability=float(transition_model_config.get("base_doubtful_probability", 0.15)),
-            red_flag_positive_bonus=float(transition_model_config.get("red_flag_positive_bonus", 0.1)),
-            asked_before_positive_penalty=float(
-                transition_model_config.get("asked_before_positive_penalty", 0.15)
-            ),
-            detail_positive_penalty=float(transition_model_config.get("detail_positive_penalty", 0.1)),
-            strong_relation_positive_bonus=float(
-                transition_model_config.get("strong_relation_positive_bonus", 0.05)
-            ),
-        )
+    transition_model_runtime_config = ResponseTransitionModelConfig(
+        model_type=transition_model_type,
+        base_positive_probability=float(transition_model_config.get("base_positive_probability", 0.6)),
+        base_doubtful_probability=float(transition_model_config.get("base_doubtful_probability", 0.15)),
+        red_flag_positive_bonus=float(transition_model_config.get("red_flag_positive_bonus", 0.1)),
+        asked_before_positive_penalty=float(
+            transition_model_config.get("asked_before_positive_penalty", 0.15)
+        ),
+        detail_positive_penalty=float(transition_model_config.get("detail_positive_penalty", 0.1)),
+        strong_relation_positive_bonus=float(
+            transition_model_config.get("strong_relation_positive_bonus", 0.05)
+        ),
+        statistics_source_mode=str(transition_model_config.get("statistics_source_mode", "auto")),
+        statistics_top_k_hypotheses=int(transition_model_config.get("statistics_top_k_hypotheses", 3)),
+        enable_belief_mixture=bool(transition_model_config.get("enable_belief_mixture", True)),
+        fallback_to_heuristic=bool(transition_model_config.get("fallback_to_heuristic", True)),
+        statistics_smoothing_alpha=float(transition_model_config.get("statistics_smoothing_alpha", 0.5)),
+        statistics_min_total_count=int(transition_model_config.get("statistics_min_total_count", 1)),
+        graph_case_paths=_normalize_optional_path_list(transition_model_config.get("graph_case_paths", [])),
+        replay_result_paths=_normalize_optional_path_list(transition_model_config.get("replay_result_paths", [])),
+        evidence_catalog_paths=_normalize_optional_path_list(
+            transition_model_config.get("evidence_catalog_paths", [])
+        ),
+        graph_case_glob=str(
+            transition_model_config.get(
+                "graph_case_glob",
+                "test_outputs/simulator_cases/**/cases.jsonl",
+            )
+        ),
+        replay_result_glob=str(
+            transition_model_config.get(
+                "replay_result_glob",
+                "test_outputs/simulator_replay/**/replay_results.jsonl",
+            )
+        ),
+        evidence_catalog_glob=str(
+            transition_model_config.get(
+                "evidence_catalog_glob",
+                "test_outputs/evidence_family/**/disease_evidence_family_catalog.json",
+            )
+        ),
     )
+    heuristic_transition_model = HeuristicResponseTransitionModel(transition_model_runtime_config)
+    if transition_model_type == "statistical":
+        transition_statistics = TransitionStatisticsBuilder(
+            TransitionStatisticsConfig(
+                source_mode=transition_model_runtime_config.statistics_source_mode,
+                graph_case_paths=transition_model_runtime_config.graph_case_paths,
+                replay_result_paths=transition_model_runtime_config.replay_result_paths,
+                evidence_catalog_paths=transition_model_runtime_config.evidence_catalog_paths,
+                graph_case_glob=transition_model_runtime_config.graph_case_glob,
+                replay_result_glob=transition_model_runtime_config.replay_result_glob,
+                evidence_catalog_glob=transition_model_runtime_config.evidence_catalog_glob,
+                smoothing_alpha=transition_model_runtime_config.statistics_smoothing_alpha,
+                min_total_count=transition_model_runtime_config.statistics_min_total_count,
+            )
+        ).build()
+        transition_model = StatisticalResponseTransitionModel(
+            transition_model_runtime_config,
+            statistics=transition_statistics,
+            heuristic_fallback=heuristic_transition_model,
+        )
+    else:
+        transition_model = heuristic_transition_model
     reward_model = HeuristicRolloutRewardModel(
         RolloutRewardModelConfig(
             model_type=reward_model_type,

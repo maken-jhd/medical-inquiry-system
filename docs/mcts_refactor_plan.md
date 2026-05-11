@@ -30,12 +30,13 @@
 1. 后续若要接 learned transition / learned reward，只能继续往 `SimulationEngine` 里堆逻辑
 2. 搜索树的复用和调试都缺少一个更清晰的状态表示层
 
-## 3. 本次新增的三个抽象
+## 3. 当前新增的四个抽象
 
 ### 3.1 `response_transition_model.py`
 
 - 定义 `ResponseTransitionModel`
 - 当前默认实现为 `HeuristicResponseTransitionModel`
+- 当前也新增了 `StatisticalResponseTransitionModel`
 - 输入当前动作、会话状态、候选假设和可选患者上下文
 - 输出回答分支概率分布
 
@@ -52,7 +53,32 @@
 - `done_negative`
 - `done_unclear`
 
-### 3.2 `reward_model.py`
+`StatisticalResponseTransitionModel` 当前的最小落地方式是：
+
+- 先从 graph cases 与 replay 输出构建粗粒度条件统计
+- 再按当前 `candidate_hypotheses` 做 top-k belief mixture
+- 对普通问诊估计：
+  - `P(present / absent / unclear | disease, evidence_family, question_type)`
+- 对检查上下文估计：
+  - `P(done / not_done | disease, exam_kind)`
+  - `P(result | disease, test_type, done)`
+
+### 3.2 `transition_statistics.py`
+
+- 定义 `TransitionStatistics` 与 `TransitionStatisticsBuilder`
+- 负责离线加载：
+  - graph cases
+  - replay results
+  - disease evidence family catalog
+- 负责集中抽取：
+  - `question_type`
+  - `evidence_family`
+  - `exam_kind`
+  - `test_type`
+- 负责 belief helper：
+  - `build_normalized_hypothesis_belief(...)`
+
+### 3.3 `reward_model.py`
 
 - 定义 `RolloutRewardModel`
 - 当前默认实现为 `HeuristicRolloutRewardModel`
@@ -69,7 +95,7 @@
 - 先把旧 heuristic 从“硬编码公式”升级成“可替换接口”
 - 后续如果要切到 entropy reduction、margin gain 或 learned reward，只需要换模型而不是重写 rollout 框架
 
-### 3.3 `state_signature.py`
+### 3.4 `state_signature.py`
 
 - 定义 `BeliefStateSignatureBuilder`
 - 当前可把下面这些信息压成稳定签名：
@@ -96,7 +122,7 @@
 
 - `search_impl=modular_v2`
   - 启用新的 `transition model + reward model + belief signature` 骨架
-  - 当前默认实现仍是 heuristic
+  - 当前 `transition_model.type` 已支持 `heuristic | statistical`
   - 但职责边界已经清晰，后续可逐层替换
 
 ## 5. 当前仍然保留的限制
@@ -105,7 +131,7 @@
 
 - rollout 里还没有显式 chance node expansion
 - `branch_selection_mode=expectation_ready` 还只是接口占位
-- transition model 仍然主要由启发式规则驱动
+- statistical transition model 当前仍是频数统计 baseline，不是 learned classifier
 - reward model 还不是严格 Bayesian 信息增益
 
 也就是说，这次完成的是“骨架升级”，不是“学习版 MCTS 完成”。
@@ -114,7 +140,7 @@
 
 建议后续按下面顺序继续推进：
 
-1. 在 `ResponseTransitionModel` 上接 belief-conditioned branch classifier
+1. 把 `StatisticalResponseTransitionModel` 替换成 learned classifier，例如 `XGBoost / LightGBM / 小型分类器`
 2. 在 `RolloutRewardModel` 上接更合理的 confidence / entropy surrogate
 3. 若需要进一步逼近标准 MCTS，再考虑显式 chance node 或 expectation backup
 4. 最后再考虑与 `simulator/*` 的 patient model 联动，而不是本次就一起改

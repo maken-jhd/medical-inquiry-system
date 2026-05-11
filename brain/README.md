@@ -151,6 +151,9 @@
   - 当前默认构造还支持顶层 `search_impl = legacy | modular_v2`：
     - `legacy`：继续沿用旧版 inline heuristic MCTS
     - `modular_v2`：启用新的 transition model / reward model / belief signature 骨架
+  - 当前 `modular_v2` 的 `transition_model.type` 已支持：
+    - `heuristic`：沿用上一轮拆出来的启发式三分支分布
+    - `statistical`：基于 graph cases + replay 统计、再结合 top-k hypothesis belief mixture 的条件化分支概率
   - 当前 `search_policy` 还支持三项 clean greedy benchmark 开关：
     - `disable_verifier_repair_for_greedy`
     - `disable_early_exam_context_rescue_for_greedy`
@@ -242,7 +245,22 @@
 
 - [response_transition_model.py](/Users/loki/Workspace/GraduationDesign/brain/response_transition_model.py)
   - 负责把当前动作和会话状态映射成 rollout 分支概率分布。
-  - 当前默认实现 `HeuristicResponseTransitionModel` 复用了旧规则，但已经抽离成独立接口，后续可替换为条件化未来回答分类器。
+  - 当前包含三类实现：
+    - `HeuristicResponseTransitionModel`
+    - `StatisticalResponseTransitionModel`
+    - `LearnedResponseTransitionModel` 占位接口
+  - `StatisticalResponseTransitionModel` 当前会先从 graph cases / replay 构建粗粒度条件统计，再用 top-k hypothesis belief mixture 计算 `P(y | s, a)`。
+  - 对普通问诊动作，当前输出 `positive / negative / doubtful`。
+  - 对 `collect_exam_context` 动作，当前内部先估计 `done / not_done` 与结果分布，再映射成 `done_positive / done_negative / done_unclear / not_done`。
+
+- [transition_statistics.py](/Users/loki/Workspace/GraduationDesign/brain/transition_statistics.py)
+  - 负责离线统计构建与在线 mixture 辅助。
+  - 当前集中维护：
+    - graph case / replay 统计加载
+    - `disease + evidence_family + question_type` 的普通问诊分布
+    - `disease + exam_kind / test_type` 的检查上下文分布
+    - top-k hypothesis belief 归一化
+    - action 到 `question_type / family / exam_kind / test_type` 的集中映射
 
 - [reward_model.py](/Users/loki/Workspace/GraduationDesign/brain/reward_model.py)
   - 负责计算单个 rollout 分支的一步 reward。

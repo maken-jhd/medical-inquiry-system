@@ -10,6 +10,57 @@
 - `phase2_execution_checklist.md` 更偏“路线设计与待办清单”
 - 本文更偏“已经发生过哪些阶段性变化、分别解决了什么问题”
 
+## 近期更新：2026-05-11 为 modular_v2 补齐 statistical transition model 与 belief mixture
+
+### 本次目标
+
+- 在上一轮 modular_v2 skeleton 的基础上继续推进 transition model
+- 不改 `simulator/*` 语义，只为 rollout 补上更合理的统计版 future-answer 概率估计
+
+### 本次改动
+
+- [brain/transition_statistics.py](/Users/loki/Workspace/GraduationDesign/brain/transition_statistics.py)
+  - 新增统计构建模块
+  - 负责：
+    - graph cases / replay / evidence catalog 读取
+    - `disease + evidence_family + question_type` 的普通问诊分布
+    - `disease + exam_kind / test_type` 的检查上下文分布
+    - top-k hypothesis belief 归一化与 action condition 映射
+- [brain/response_transition_model.py](/Users/loki/Workspace/GraduationDesign/brain/response_transition_model.py)
+  - 新增 `StatisticalResponseTransitionModel`
+  - 真正实现 `P(y | s, a) = Σ_d b(d) P(y | d, s, a)` 的 belief mixture
+  - 为后续学习化保留 `LearnedResponseTransitionModel` 占位接口
+- [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - 默认构造现已支持 `transition_model.type = statistical`
+  - 会按配置自动或显式加载统计源，并把 statistical model 接入 `SimulationEngine`
+- [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml)
+  - 补充 `statistics_source_mode / statistics_top_k_hypotheses / enable_belief_mixture / fallback_to_heuristic` 等配置
+- 测试：
+  - [tests/test_transition_statistics.py](/Users/loki/Workspace/GraduationDesign/tests/test_transition_statistics.py)
+  - [tests/test_hypothesis_belief_mixture.py](/Users/loki/Workspace/GraduationDesign/tests/test_hypothesis_belief_mixture.py)
+  - [tests/test_statistical_transition_model.py](/Users/loki/Workspace/GraduationDesign/tests/test_statistical_transition_model.py)
+  - 同时补充了 `SimulationEngine` 与 `build_default_brain()` 的 statistical 接线回归
+
+### 影响
+
+- `legacy` 路径保持不变，仍可作为回归 baseline
+- `modular_v2` 现在不再只能依赖 heuristic future-answer 概率
+- 后续若要接 learned transition model，只需要替换 `ResponseTransitionModel` 实现，而不必再把逻辑塞回 `SimulationEngine`
+
+### 验证结果
+
+- 已运行并通过：
+  - `tests/test_transition_statistics.py`
+  - `tests/test_hypothesis_belief_mixture.py`
+  - `tests/test_statistical_transition_model.py`
+  - `tests/test_simulation_engine.py`
+  - `tests/test_service_config.py`
+  - `tests/test_service_search_impl_switch.py`
+  - `tests/test_mcts_state_signature.py`
+  - `tests/test_reward_model.py`
+  - `tests/test_mcts_engine.py`
+  - `tests/test_response_transition_model.py`
+
 ## 近期更新：2026-05-07 新增论文实验与测试章节草稿
 
 ### 本次目标
