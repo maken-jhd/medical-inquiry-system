@@ -22,6 +22,8 @@ __pycache__/
 
 /test_outputs/
 *.docx
+docs/chapter*.md
+docs/abstract.md
 
 output_graph_test_errors.jsonl
 output_graph_test.jsonl

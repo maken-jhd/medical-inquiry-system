@@ -44,6 +44,42 @@
   - [docs/phase2_changelog.md](/Users/loki/Workspace/GraduationDesign/docs/phase2_changelog.md)
 - 本次为文档型改动，未涉及可执行代码逻辑，因此未新增单元测试或运行 batch replay
 
+## 近期更新：2026-05-07 将 pure LLM 外部基线全量结果整合进论文草稿
+
+### 本次目标
+
+- 把已完成的 pure LLM 外部 baseline 全量回放结果补进论文实验章节草稿
+- 让论文中的外部基线分析与最新 benchmark 输出保持一致
+
+### 本次改动
+
+- [docs/thesis_experiment_and_test_section_draft.md](/Users/loki/Workspace/GraduationDesign/docs/thesis_experiment_and_test_section_draft.md)
+  - 补充 pure LLM 外部基线结果小节
+  - 写入 full227 / eligible112 的核心指标：
+    - `top1_final_answer_hit_rate`
+    - `top3_hypothesis_hit_rate`
+    - `accepted_exact_accuracy`
+    - `average_turns`
+  - 增加机制层分析：
+    - 首问对 HIV / ART / CD4 的偏置
+    - 重复问句比例
+    - symptom / risk / lab / imaging / pathogen 的问法分布
+    - 高频错误塌缩到结核、HIV 感染、PCP、隐球菌等少数病种
+
+### 影响
+
+- 论文草稿中的实验叙事现在同时覆盖：
+  - 主系统内部消融结果
+  - pure LLM 外部弱基线结果
+- 后续补齐文本 RAG 后，可以直接在现有小节后继续追加，不需要重写主分析框架
+
+### 验证结果
+
+- 已核对以下输出文件，指标与草稿中写入的数值一致：
+  - [test_outputs/simulator_replay/benchmark_external_baselines/pure_llm_full227_20260507/benchmark_summary.json](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_replay/benchmark_external_baselines/pure_llm_full227_20260507/benchmark_summary.json)
+  - [test_outputs/simulator_replay/benchmark_external_baselines/pure_llm_full227_20260507/replay_results.jsonl](/Users/loki/Workspace/GraduationDesign/test_outputs/simulator_replay/benchmark_external_baselines/pure_llm_full227_20260507/replay_results.jsonl)
+- 本次为文档型改动，未涉及可执行代码逻辑，因此未新增单元测试
+
 ## 近期更新：2026-05-07 为 pure LLM baseline 注入 closed-set disease scope
 
 ### 本次目标
@@ -5756,3 +5792,212 @@ python -m py_compile brain/simulation_engine.py brain/trajectory_evaluator.py br
 
 - 逐段复查后，未再发现相邻重复段落
 - 第 `2` 章的小节结构已经恢复完整，章节衔接正常
+
+## 五十八、2026-05-07：重写第 4 章实验与测试草稿并压缩章节结构
+
+### 本次目标
+
+- 将“实验与测试”草稿从项目复盘口径收紧为论文正文口径
+- 压缩第 `4` 章一级小节数量，避免章节过碎
+- 强化结果分析中的学术表述，降低结论过满和工程说明过重的问题
+
+### 本次更新
+
+- 更新：
+  - [docs/thesis_experiment_and_test_section_draft.md](/Users/loki/Workspace/GraduationDesign/docs/thesis_experiment_and_test_section_draft.md)
+
+### 具体改动
+
+- 将原 `7` 个一级小节压缩为 `5` 个，重组为“实验目标与总体设计、实验条件与评测设置、主实验结果与分析、补充结果与系统测试、本章小结”
+- 删除“某基线仍在实现中”“后续补充实验”等不适合放入正文主叙述的口径
+- 弱化脚本路径、结果文件名等仓库实现细节，改为以实验流程、数据口径和评测输出为主的论文表达
+- 将 `repair`、`benchmark` 等术语统一改为中文主述或“中文 + 括号英文”的形式
+- 重写 `No-Tree Greedy` 与 `No-Repair` 的结果分析，突出“排序收益、接受可靠性与闭环完成能力”之间的差异，而不作过满结论
+- 收紧系统测试部分的模块名罗列，改为“核心算法单元测试、问诊闭环联调测试、前后端与配置适配测试”三层表述
+
+### 结果影响
+
+- 第 `4` 章结构更紧凑，更接近正式论文中的实验章写法
+- 主结果、补充基线与工程测试之间的边界更清晰
+- 结果分析更强调收益与代价的平衡，降低被追问“结论是否过强”的风险
+
+### 补充修订：2026-05-07 参考往届论文收紧实验设置写法
+
+### 本次更新
+
+- 更新：
+  - [docs/thesis_experiment_and_test_section_draft.md](/Users/loki/Workspace/GraduationDesign/docs/thesis_experiment_and_test_section_draft.md)
+
+### 具体改动
+
+- 删除单列的“实验平台与运行配置”小节，不再以工程环境说明作为实验章展开重点
+- 将统一基础模型、统一病例集、统一最大轮次以及四组对照实验的说明前移至 `4.1`，形成“实验目标 + 对照设置”的开篇结构
+- 将 `4.2` 收紧为“实验数据与评测指标”，更贴近正式论文中“实验设置”的常见写法
+- 根据章节裁剪结果，统一重排表号引用，避免删节后表 `4-1` 至表 `4-6` 编号错位
+
+### 结果影响
+
+- 第 `4` 章开头更聚焦于“比较什么、在什么统一口径下比较”，而不是“系统如何运行”
+- 实验章整体结构更接近往届论文中“实验设置—结果分析”的组织方式
+
+### 补充修订：2026-05-07 删除实验病例集内部命名
+
+### 本次更新
+
+- 更新：
+  - [docs/thesis_experiment_and_test_section_draft.md](/Users/loki/Workspace/GraduationDesign/docs/thesis_experiment_and_test_section_draft.md)
+
+### 具体改动
+
+- 删除 `full227`、`eligible112`、`weak_anchor`、`not_benchmark_eligible` 等实验内部病例集命名
+- 删除病例集分层表，仅保留病例总量、质量控制思路和病例类型分布
+- 将“全量病例集 / 主分析子集”统一改写为“全部病例 / 高质量病例”等论文正文口径
+- 同步重排后续表号与结果引用，保证章节内部表述一致
+
+### 结果影响
+
+- 第 `4` 章不再暴露实验脚本或内部数据集标签，整体更像正式论文正文
+- 数据集说明保留了必要的信息量，同时减少了读者对内部命名细节的注意力分散
+
+### 补充修订：2026-05-07 仅保留高质量病例分析口径
+
+### 本次更新
+
+- 更新：
+  - [docs/thesis_experiment_and_test_section_draft.md](/Users/loki/Workspace/GraduationDesign/docs/thesis_experiment_and_test_section_draft.md)
+
+### 具体改动
+
+- 删除“全部病例”相关结果表与对应分析，仅保留高质量病例这一套主实验结果
+- 删除病例类型分布表，仅保留高质量病例的构造原则与覆盖场景说明
+- 将外部纯大语言模型基线结果同步收口为高质量病例口径
+- 清理正文中残留的全量病例数字与相关表述，统一章节叙述焦点
+
+### 结果影响
+
+- 第 `4` 章实验结果更集中，主线更明确
+- 章节中不再同时并列两套病例统计口径，阅读负担更低
+
+### 补充修订：2026-05-07 删除系统测试小节并收拢纯大语言模型基线
+
+### 本次更新
+
+- 更新：
+  - [docs/thesis_experiment_and_test_section_draft.md](/Users/loki/Workspace/GraduationDesign/docs/thesis_experiment_and_test_section_draft.md)
+
+### 具体改动
+
+- 删除 `4.4.2 系统测试与工程验证` 整节内容
+- 将纯大语言模型基线并入 `4.3`，作为 `4.3.3 纯大语言模型基线补充结果`
+- 将原 `4.4` 重编号为 `4.4 本章小结`
+- 同步修正纯大语言模型基线表格列数，避免正文格式错误
+
+### 结果影响
+
+- 第 `4` 章更集中于实验对比与结果分析，不再混入工程测试叙述
+- 纯大语言模型基线作为补充对比被纳入主分析链路，整体叙述更连贯
+
+### 补充修订：2026-05-07 在纯大语言模型基线表中补入完整系统对比
+
+### 本次更新
+
+- 更新：
+  - [docs/thesis_experiment_and_test_section_draft.md](/Users/loki/Workspace/GraduationDesign/docs/thesis_experiment_and_test_section_draft.md)
+
+### 具体改动
+
+- 在纯大语言模型基线补充结果表中加入完整系统（MCTS）对应结果
+- 将正文说明同步改为“纯大语言模型基线明显低于完整系统（MCTS）”的并列表述
+
+### 结果影响
+
+- 对比关系更直观，读者无需回翻前文即可看出方法差距
+- 纯大语言模型基线这一小节更像正式论文中的补充对照分析
+
+## 五十九、2026-05-07：新增第 5 章结论与展望草稿
+
+### 本次目标
+
+- 按照“工作总结、不足分析、未来展望”三部分生成第 `5` 章草稿
+- 保持结论章语言简洁、克制，避免与前文实验分析重复
+
+### 本次更新
+
+- 新增：
+  - [docs/chapter5.md](/Users/loki/Workspace/GraduationDesign/docs/chapter5.md)
+
+### 具体改动
+
+- 在 `5.1` 中按“做了什么、实现了什么、验证了什么”三句话组织工作总结
+- 在 `5.2` 中补入算法原创性有限、场景集中、真实临床验证不足和大规模 benchmark 不充分等限制分析
+- 在 `5.3` 中围绕病种扩展、图谱质量优化、真实临床数据接入和问诊效率提升四个方向撰写未来展望
+
+### 结果影响
+
+- 第 `5` 章已有可直接继续精修的初稿
+- 结论、不足与展望三部分边界清晰，便于后续直接并入论文正文
+
+## 六十、2026-05-07：新增论文中英双语摘要草稿
+
+### 本次目标
+
+- 按项目内容生成论文用的中英双语摘要
+- 保持摘要简洁、完整，并可直接继续微调
+
+### 本次更新
+
+- 新增：
+  - [docs/abstract.md](/Users/loki/Workspace/GraduationDesign/docs/abstract.md)
+
+### 具体改动
+
+- 补写中文摘要，概括系统目标、核心方法、实验设置与主要结论
+- 补写英文摘要，对应翻译系统设计、实验口径和结果结论
+- 同步给出中英文关键词
+
+### 结果影响
+
+- 摘要草稿已具备论文可用的基础结构
+- 后续可直接按学校格式再做字数与措辞微调
+
+### 补充修订：2026-05-08 扩写摘要背景与研究现状
+
+### 本次更新
+
+- 更新：
+  - [docs/abstract.md](/Users/loki/Workspace/GraduationDesign/docs/abstract.md)
+
+### 具体改动
+
+- 在中文摘要开头补入 HIV/AIDS 场景下多轮问诊的任务背景
+- 增写现有方法在单轮生成、纯文本推理和离线评测可复现性方面的主要不足
+- 将同样的背景与现状信息同步补入英文摘要
+
+### 结果影响
+
+- 摘要信息更完整，更接近正式论文中“背景—问题—方法—结果”的写法
+- 中英文摘要的篇幅与信息密度更均衡
+
+## 六十一、2026-05-08：压缩第 2 章目录层级并收紧小标题结构
+
+### 本次目标
+
+- 去掉“相关技术与理论基础”中的三级标题，缩短目录占用
+- 在减少标题层级后保持正文衔接自然
+
+### 本次更新
+
+- 更新：
+  - [相关技术与理论基础.docx](/Users/loki/Workspace/GraduationDesign/相关技术与理论基础.docx)
+
+### 具体改动
+
+- 删除原 `2.1.1` 至 `2.4.2` 的三级标题行，并将其下沉为正文过渡句
+- 补入缺失的二级标题 `2.2 医疗知识图谱与图检索基础`
+- 同步收紧若干过渡句表述，避免删去三级标题后语句生硬或重复
+- 轻微调整 `2.5` 小结表述，使其与新的二级结构保持一致
+
+### 结果影响
+
+- 第 `2` 章目录层级明显收缩，不再被三级标题大量占据版面
+- 正文保留原有内容覆盖范围，但结构更紧凑，更适合作为“相关技术与理论基础”章节
