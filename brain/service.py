@@ -5911,6 +5911,18 @@ def build_default_brain(
                 min_branch_support_quality=float(
                     acceptance_calibration_config.get("min_branch_support_quality", 0.42)
                 ),
+                margin_relaxation_buffer=float(
+                    acceptance_calibration_config.get("margin_relaxation_buffer", 0.025)
+                ),
+                risk_relaxation_buffer=float(
+                    acceptance_calibration_config.get("risk_relaxation_buffer", 0.045)
+                ),
+                high_support_quality_override=float(
+                    acceptance_calibration_config.get("high_support_quality_override", 0.62)
+                ),
+                high_support_quality_risk_discount=float(
+                    acceptance_calibration_config.get("high_support_quality_risk_discount", 0.05)
+                ),
             )
         ),
         report_builder=ReportBuilder(),

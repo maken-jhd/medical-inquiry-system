@@ -18,6 +18,10 @@ class AcceptanceCalibrationConfig:
     min_belief_margin_proxy: float = 0.12
     max_acceptance_risk_proxy: float = 0.22
     min_branch_support_quality: float = 0.42
+    margin_relaxation_buffer: float = 0.025
+    risk_relaxation_buffer: float = 0.045
+    high_support_quality_override: float = 0.62
+    high_support_quality_risk_discount: float = 0.05
 
 
 class VerifierAcceptanceController:
@@ -48,8 +52,8 @@ class VerifierAcceptanceController:
             return StopDecision(False, "verifier_not_ready", answer_score.final_score, metadata)
 
         if bool(answer_score.metadata.get("verifier_should_accept", False)):
-            calibration_block = self._apply_acceptance_calibration(answer_score)
-            if calibration_block is not None:
+            calibration_assessment = self._evaluate_acceptance_calibration(answer_score)
+            if calibration_assessment is not None and calibration_assessment.get("acceptance_calibration_blocked", False):
                 return StopDecision(
                     False,
                     "verifier_rejected_stop",
@@ -58,10 +62,13 @@ class VerifierAcceptanceController:
                         **metadata,
                         "repair_reject_reason": "strong_alternative_not_ruled_out",
                         "path_control_reason": "strong_alternative_not_ruled_out",
-                        **calibration_block,
+                        **calibration_assessment,
                     },
                 )
-            return StopDecision(True, "final_answer_accepted", answer_score.final_score, metadata)
+            accept_metadata = dict(metadata)
+            if calibration_assessment is not None:
+                accept_metadata.update(calibration_assessment)
+            return StopDecision(True, "final_answer_accepted", answer_score.final_score, accept_metadata)
 
         reject_reason = str(answer_score.metadata.get("verifier_reject_reason") or "missing_key_support")
         return StopDecision(
@@ -128,8 +135,11 @@ class VerifierAcceptanceController:
         value = session_state.metadata.get(key)
         return list(value) if isinstance(value, list) else []
 
-    # 当 verifier 已愿意接受，但 reward-side proxy 提示 margin 仍弱且风险偏高时，做一次轻量拒停。
-    def _apply_acceptance_calibration(self, answer_score: FinalAnswerScore) -> dict | None:
+    # 当 verifier 已愿意接受时，再用 reward-side proxy 做一次轻量校准：
+    # - 极高风险仍然拦住
+    # - 接近阈值的边界值 case 给一点 buffer，避免过度错杀
+    # - support quality 很高时，允许抵消一小部分 risk proxy
+    def _evaluate_acceptance_calibration(self, answer_score: FinalAnswerScore) -> dict | None:
         if not self.config.enable_reward_confidence_proxy:
             return None
 
@@ -146,21 +156,77 @@ class VerifierAcceptanceController:
         normalized_margin = float(margin_proxy)
         normalized_risk = float(acceptance_risk_proxy)
         normalized_quality = float(branch_support_quality)
+        margin_floor = self.config.min_belief_margin_proxy
+        quality_floor = self.config.min_branch_support_quality
+        risk_ceiling = self.config.max_acceptance_risk_proxy
+        relaxed_margin_floor = max(0.0, margin_floor - self.config.margin_relaxation_buffer)
+        relaxed_risk_ceiling = risk_ceiling + self.config.risk_relaxation_buffer
+        high_support_override_active = normalized_quality >= self.config.high_support_quality_override
+        effective_risk = max(
+            0.0,
+            normalized_risk
+            - (
+                self.config.high_support_quality_risk_discount
+                if high_support_override_active
+                else 0.0
+            ),
+        )
 
-        if normalized_risk <= self.config.max_acceptance_risk_proxy:
-            return None
-
-        if (
-            normalized_margin >= self.config.min_belief_margin_proxy
-            and normalized_quality >= self.config.min_branch_support_quality
-        ):
-            return None
-
-        return {
-            "acceptance_calibration_blocked": True,
-            "acceptance_calibration_reason": "reward_confidence_proxy_guard",
+        assessment = {
+            "acceptance_calibration_applied": True,
+            "acceptance_calibration_blocked": False,
             "belief_margin_proxy": round(normalized_margin, 4),
             "acceptance_risk_proxy": round(normalized_risk, 4),
+            "effective_acceptance_risk_proxy": round(effective_risk, 4),
             "branch_support_quality": round(normalized_quality, 4),
+            "acceptance_calibration_margin_floor": round(margin_floor, 4),
+            "acceptance_calibration_relaxed_margin_floor": round(relaxed_margin_floor, 4),
+            "acceptance_calibration_risk_ceiling": round(risk_ceiling, 4),
+            "acceptance_calibration_relaxed_risk_ceiling": round(relaxed_risk_ceiling, 4),
+            "acceptance_calibration_high_support_override": high_support_override_active,
             "reward_confidence_proxy_source": str(answer_score.metadata.get("reward_confidence_proxy_source") or ""),
+        }
+
+        if effective_risk <= risk_ceiling:
+            return {
+                **assessment,
+                "acceptance_calibration_reason": "within_risk_limit",
+            }
+
+        if (
+            normalized_margin >= margin_floor
+            and normalized_quality >= quality_floor
+        ):
+            return {
+                **assessment,
+                "acceptance_calibration_reason": "baseline_proxy_pass",
+            }
+
+        # 如果 branch support 很强，则允许它抵消一小段 risk overshoot，
+        # 但仍要求 margin 至少接近阈值，避免彻底放开高风险 case。
+        if (
+            high_support_override_active
+            and effective_risk <= relaxed_risk_ceiling
+            and normalized_margin >= relaxed_margin_floor
+        ):
+            return {
+                **assessment,
+                "acceptance_calibration_reason": "high_support_quality_override",
+            }
+
+        # 风险只是略高于主阈值、support 也够强时，不要因为 margin 略低于线就一刀切拒停。
+        if (
+            effective_risk <= relaxed_risk_ceiling
+            and normalized_quality >= quality_floor
+            and normalized_margin >= relaxed_margin_floor
+        ):
+            return {
+                **assessment,
+                "acceptance_calibration_reason": "buffered_margin_pass",
+            }
+
+        return {
+            **assessment,
+            "acceptance_calibration_blocked": True,
+            "acceptance_calibration_reason": "reward_confidence_proxy_guard",
         }

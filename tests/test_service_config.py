@@ -101,6 +101,11 @@ def test_load_brain_config_reads_yaml_file(tmp_path: Path) -> None:
                 "  llm_verifier_min_turn_index: 2",
                 "  llm_verifier_min_trajectory_count: 2",
                 "  enable_dynamic_group_weights: true",
+                "acceptance_calibration:",
+                "  margin_relaxation_buffer: 0.03",
+                "  risk_relaxation_buffer: 0.05",
+                "  high_support_quality_override: 0.61",
+                "  high_support_quality_risk_discount: 0.04",
                 "llm:",
                 "  structured_retry_count: 1",
                 "a2:",
@@ -140,6 +145,10 @@ def test_load_brain_config_reads_yaml_file(tmp_path: Path) -> None:
     assert config["path_evaluation"]["llm_verifier_min_turn_index"] == 2
     assert config["path_evaluation"]["llm_verifier_min_trajectory_count"] == 2
     assert config["path_evaluation"]["enable_dynamic_group_weights"] is True
+    assert config["acceptance_calibration"]["margin_relaxation_buffer"] == 0.03
+    assert config["acceptance_calibration"]["risk_relaxation_buffer"] == 0.05
+    assert config["acceptance_calibration"]["high_support_quality_override"] == 0.61
+    assert config["acceptance_calibration"]["high_support_quality_risk_discount"] == 0.04
     assert config["llm"]["structured_retry_count"] == 1
     assert config["a2"]["enable_scope_cluster_rerank"] is True
     assert config["a2"]["scope_cluster_exact_bonus"] == 0.4
@@ -331,6 +340,10 @@ def test_build_default_brain_supports_belief_aware_reward_and_acceptance_calibra
                 "min_belief_margin_proxy": 0.1,
                 "max_acceptance_risk_proxy": 0.24,
                 "min_branch_support_quality": 0.45,
+                "margin_relaxation_buffer": 0.03,
+                "risk_relaxation_buffer": 0.055,
+                "high_support_quality_override": 0.64,
+                "high_support_quality_risk_discount": 0.06,
             },
         },
         llm_client=FakeAvailableLlmClient(),
@@ -340,6 +353,10 @@ def test_build_default_brain_supports_belief_aware_reward_and_acceptance_calibra
     assert isinstance(brain.deps.simulation_engine.reward_model, BeliefAwareRolloutRewardModel)
     assert brain.deps.simulation_engine.reward_model.config.margin_gain_weight == 0.41
     assert brain.deps.acceptance_controller.config.max_acceptance_risk_proxy == 0.24
+    assert brain.deps.acceptance_controller.config.margin_relaxation_buffer == 0.03
+    assert brain.deps.acceptance_controller.config.risk_relaxation_buffer == 0.055
+    assert brain.deps.acceptance_controller.config.high_support_quality_override == 0.64
+    assert brain.deps.acceptance_controller.config.high_support_quality_risk_discount == 0.06
 
 
 # 验证 service 层会按 search_policy 把根动作选择分发给 mcts 或 greedy selector。

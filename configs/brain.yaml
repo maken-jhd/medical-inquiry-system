@@ -61,11 +61,19 @@ reward_model:
 
 # acceptance calibration 只做 verifier 之后的轻量 proxy guard，
 # 不改 verifier / repair 的整体职责边界。
+# 当前策略允许：
+# - 对接近阈值的 case 给一个很窄的 buffer，减少错杀
+# - 当 branch support quality 很高时，对 risk proxy 做小幅折扣
+# - 但极高 risk case 仍然会被挡回 repair
 acceptance_calibration:
   enable_reward_confidence_proxy: true
   min_belief_margin_proxy: 0.12
   max_acceptance_risk_proxy: 0.22
   min_branch_support_quality: 0.42
+  margin_relaxation_buffer: 0.025
+  risk_relaxation_buffer: 0.045
+  high_support_quality_override: 0.62
+  high_support_quality_risk_discount: 0.05
 
 # belief signature 负责决定搜索树何时可复用、child state 如何近似表示。
 state_signature:

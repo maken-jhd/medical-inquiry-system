@@ -61,3 +61,46 @@ def test_acceptance_controller_keeps_low_risk_acceptance() -> None:
 
     assert decision.should_stop is True
     assert decision.reason == "final_answer_accepted"
+    assert decision.metadata["acceptance_calibration_reason"] == "within_risk_limit"
+
+
+# 当 risk 只是略高于阈值，但 support quality 很强且 margin 接近阈值时，应允许软放行。
+def test_acceptance_controller_allows_high_support_borderline_case() -> None:
+    controller = VerifierAcceptanceController()
+
+    decision = controller.should_accept_final_answer(
+        _answer(
+            verifier_mode="llm_verifier",
+            verifier_should_accept=True,
+            reward_confidence_proxy_source="trajectory_reward_proxy",
+            belief_margin_proxy=0.1,
+            acceptance_risk_proxy=0.29,
+            branch_support_quality=0.68,
+        )
+    )
+
+    assert decision.should_stop is True
+    assert decision.reason == "final_answer_accepted"
+    assert decision.metadata["acceptance_calibration_reason"] == "high_support_quality_override"
+    assert decision.metadata["acceptance_calibration_high_support_override"] is True
+
+
+# 即使 support quality 很高，若 risk 明显越过 relaxed buffer，仍应继续阻止过早接受。
+def test_acceptance_controller_still_blocks_very_high_risk_case() -> None:
+    controller = VerifierAcceptanceController()
+
+    decision = controller.should_accept_final_answer(
+        _answer(
+            verifier_mode="llm_verifier",
+            verifier_should_accept=True,
+            reward_confidence_proxy_source="trajectory_reward_proxy",
+            belief_margin_proxy=0.1,
+            acceptance_risk_proxy=0.36,
+            branch_support_quality=0.68,
+        )
+    )
+
+    assert decision.should_stop is False
+    assert decision.reason == "verifier_rejected_stop"
+    assert decision.metadata["acceptance_calibration_blocked"] is True
+    assert decision.metadata["acceptance_calibration_reason"] == "reward_confidence_proxy_guard"

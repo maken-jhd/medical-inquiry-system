@@ -1,0 +1,26 @@
+search_impl: modular_v2
+
+search_policy:
+  root_action_mode: mcts
+
+transition_model:
+  type: statistical
+  statistics_source_mode: auto
+  statistics_top_k_hypotheses: 3
+  enable_belief_mixture: true
+  fallback_to_heuristic: true
+  statistics_smoothing_alpha: 0.5
+  statistics_min_total_count: 1
+
+reward_model:
+  type: belief_aware_v1
+
+acceptance_calibration:
+  enable_reward_confidence_proxy: true
+  min_belief_margin_proxy: 0.12
+  max_acceptance_risk_proxy: 0.22
+  min_branch_support_quality: 0.42
+  margin_relaxation_buffer: 0.025
+  risk_relaxation_buffer: 0.045
+  high_support_quality_override: 0.62
+  high_support_quality_risk_discount: 0.05

@@ -728,6 +728,37 @@ NO_RESUME=1 \
 - 如有需要，再微调 `reward_model.margin_gain_weight / uncertainty_reduction_weight / acceptance_risk_weight`
 - acceptance 侧当前还支持轻量 `acceptance_calibration`，只会在 verifier 已想接受时再参考 `belief_margin_proxy / acceptance_risk_proxy / branch_support_quality` 做一次保守校准
 
+如果要直接跑 `statistical + belief-aware reward` 的 smoke60 对照，可使用：
+
+```bash
+./scripts/run_modular_v2_statistical_belief_aware_smoke60.sh
+```
+
+对应配置文件为：
+
+- [brain_benchmark_modular_v2_statistical_belief_aware.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain_benchmark_modular_v2_statistical_belief_aware.yaml)
+
+如果想专门观察“稍微放松 acceptance calibration 后，completion 能否恢复”的 A/B 对照，可再跑：
+
+```bash
+./scripts/run_modular_v2_statistical_belief_aware_relaxed_smoke60.sh
+```
+
+对应 relaxed 配置文件为：
+
+- [brain_benchmark_modular_v2_statistical_belief_aware_relaxed.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain_benchmark_modular_v2_statistical_belief_aware_relaxed.yaml)
+
+这两份配置都固定：
+
+- `search_impl = modular_v2`
+- `transition_model.type = statistical`
+- `reward_model.type = belief_aware_v1`
+
+差异只在 acceptance calibration 阈值：
+
+- 标准版保守保留 wrong accepted 护栏
+- relaxed 版额外放宽 buffer 和 high-support override，方便观察 completion / accepted hit 是否能回升
+
 真实 focused baseline ablation：
 
 ```bash

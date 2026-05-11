@@ -10,6 +10,60 @@
 - `phase2_execution_checklist.md` 更偏“路线设计与待办清单”
 - 本文更偏“已经发生过哪些阶段性变化、分别解决了什么问题”
 
+## 近期更新：2026-05-11 对 belief-aware reward 路径做 acceptance calibration 轻量放松
+
+### 本次目标
+
+- 不再改 `statistical transition model`
+- 不重写 `BeliefAwareRolloutRewardModel`
+- 只在现有 belief-aware 主线上微调 acceptance calibration
+- 尽量在不明显抬高 wrong accepted 的前提下，把 completion 与 accepted hit 拉回一些
+
+### 问题背景
+
+- 当前 benchmark 已显示：
+  - `statistical + belief-aware reward` 能把 wrong accepted 从 `8` 压到 `6`
+  - `accepted_exact_accuracy` 也从 `0.636` 提升到 `0.684`
+  - 但 `completion_rate` 又从 `0.367` 掉到 `0.317`
+  - `accepted_exact_hit_count` 也从 `14` 掉到 `13`
+- 这说明当前主问题不在搜索本身，而更像是 acceptance guard 略偏紧，错杀了一部分原本可接受的正确 case
+
+### 本次改动
+
+- [brain/acceptance_controller.py](/Users/loki/Workspace/GraduationDesign/brain/acceptance_controller.py)
+  - 保留原有 `reward confidence proxy guard`
+  - 但新增三层轻量放松机制：
+    - `margin_relaxation_buffer`：对接近 margin 阈值的 case 给一小段 buffer
+    - `risk_relaxation_buffer`：只对轻微超 risk 线的 case 放宽，不放过明显高 risk case
+    - `high_support_quality_override + high_support_quality_risk_discount`：当 branch support quality 很高时，允许抵消一小段 risk overshoot
+  - 同时把校准判断结果写回 acceptance metadata，方便后续从 replay 里直接区分：
+    - `within_risk_limit`
+    - `buffered_margin_pass`
+    - `high_support_quality_override`
+    - `reward_confidence_proxy_guard`
+- [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - 默认构造入口现已支持装配新的 calibration 参数
+- [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml)
+  - 补充新的 acceptance calibration 默认配置
+- 新增 benchmark 配置：
+  - [brain_benchmark_modular_v2_statistical_belief_aware.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain_benchmark_modular_v2_statistical_belief_aware.yaml)
+  - [brain_benchmark_modular_v2_statistical_belief_aware_relaxed.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain_benchmark_modular_v2_statistical_belief_aware_relaxed.yaml)
+- 新增脚本：
+  - [run_modular_v2_statistical_belief_aware_smoke60.sh](/Users/loki/Workspace/GraduationDesign/scripts/run_modular_v2_statistical_belief_aware_smoke60.sh)
+  - [run_modular_v2_statistical_belief_aware_relaxed_smoke60.sh](/Users/loki/Workspace/GraduationDesign/scripts/run_modular_v2_statistical_belief_aware_relaxed_smoke60.sh)
+- 测试：
+  - [tests/test_acceptance_calibration.py](/Users/loki/Workspace/GraduationDesign/tests/test_acceptance_calibration.py)
+  - [tests/test_service_config.py](/Users/loki/Workspace/GraduationDesign/tests/test_service_config.py)
+
+### 预期效果
+
+- 高 risk case 仍然会被拦回 repair
+- 但边界值附近、support quality 足够强的 case 不再被过度一刀切拒停
+- 下一轮 benchmark 建议并排比较：
+  - `statistical + heuristic reward`
+  - `statistical + belief-aware reward`
+  - `statistical + belief-aware reward + relaxed calibration`
+
 ## 近期更新：2026-05-11 为 modular_v2 statistical 路径补齐 belief-aware reward 与轻量 acceptance calibration
 
 ### 本次目标
@@ -6378,6 +6432,34 @@ python -m py_compile brain/simulation_engine.py brain/trajectory_evaluator.py br
 
 - 第 `4` 章整体语气较此前更加正式，更接近毕业论文正文的写作风格
 - 章节结构、图号和图注体系保持不变，可继续直接用于后续论文整合
+
+## 六十六、2026-05-11：按章节边界建议重构第 4 章，弱化方法复述并强化系统组织
+
+### 本次目标
+
+- 按“第 `3` 章讲方法、第 `4` 章讲系统组织与运行”的边界，进一步重构第 `4` 章
+- 减少对知识图谱构建方法、问诊方法链路和虚拟病人设计原理的重复复述
+
+### 本次更新
+
+- 更新：
+  - [docs/chapter4.md](/Users/loki/Workspace/GraduationDesign/docs/chapter4.md)
+  - [docs/chapter4_figure_prompts.md](/Users/loki/Workspace/GraduationDesign/docs/chapter4_figure_prompts.md)
+
+### 具体改动
+
+- 将第 `4` 章结构调整为“系统总体架构与运行模式、核心模块实现、系统运行流程与结果组织、本章小结”
+- 在 `4.1` 中保留总体架构和两类运行模式，但弱化前端展示的重要性，不再将其作为核心模块展开
+- 将原 `4.2` 收口为“搜索专用知识图谱服务实现”，重点转为说明图谱结果如何服务化并提供 `R1 / R2` 检索能力
+- 将原 `4.3` 收口为“问诊推理引擎实现”，重点转为统一状态对象、单轮运行主链和结果输出组织
+- 将原 `4.4` 收口为“虚拟病人与自动回放实现”，重点转为病例骨架、病人代理和回放控制器之间的协同
+- 新增“系统运行流程与结果组织”部分，集中说明实时问诊流程、自动回放流程以及日志与复盘信息的组织方式
+- 同步调整图 `4.1` 到图 `4.5` 的图题、图注、插图说明和出图提示词，使其与新的章节定位一致
+
+### 结果影响
+
+- 第 `4` 章与第 `3` 章的职责边界更加清晰，前者更偏系统组织与运行说明，后者继续承担方法定义
+- 第 `4` 章中对前端展示的强调明显减弱，整体内容更贴近“系统设计与实现”章节应有的重心
 
 ## 六十二、2026-05-11：并行落地 modular_v2 MCTS skeleton，保留 legacy 搜索基线
 
