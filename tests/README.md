@@ -16,7 +16,7 @@
 - 虚拟病人自动对战测试
 - 回放指标统计测试
 
-当前测试数量为 `27`。
+当前测试文件数量为 `46`。
 
 ## 当前文件说明
 
@@ -48,9 +48,21 @@
   - 测试 `brain/mcts_engine.py`
   - 主要验证 `UCT` 选择器是否会优先选择更高综合收益的动作，以及 tree policy 是否会沿树向下选择叶子
 
+- [test_mcts_state_signature.py](/Users/loki/Workspace/GraduationDesign/tests/test_mcts_state_signature.py)
+  - 测试 `brain/state_signature.py` 与 modular child signature
+  - 主要覆盖 belief signature 的稳定性、区分度，以及 `modular_v2` child 节点不再直接使用 path id
+
 - [test_simulation_engine.py](/Users/loki/Workspace/GraduationDesign/tests/test_simulation_engine.py)
   - 测试 `brain/simulation_engine.py`
   - 主要验证局部 simulation 对不同关系类型动作的收益估计是否合理，以及 rollout 是否会展开多步路径
+
+- [test_response_transition_model.py](/Users/loki/Workspace/GraduationDesign/tests/test_response_transition_model.py)
+  - 测试 `brain/response_transition_model.py`
+  - 主要覆盖回答分支概率是否归一化，以及 red flag / asked_before / relation_type 等启发是否仍生效
+
+- [test_reward_model.py](/Users/loki/Workspace/GraduationDesign/tests/test_reward_model.py)
+  - 测试 `brain/reward_model.py`
+  - 主要覆盖 reward breakdown、重复动作惩罚、高成本惩罚和不同分支 reward 差异
 
 - [test_evidence_parser.py](/Users/loki/Workspace/GraduationDesign/tests/test_evidence_parser.py)
   - 测试 `brain/evidence_parser.py`
@@ -62,7 +74,11 @@
 
 - [test_service_config.py](/Users/loki/Workspace/GraduationDesign/tests/test_service_config.py)
   - 测试 `brain/service.py`
-  - 当前已覆盖 `configs/brain.yaml` 的读取入口
+  - 当前已覆盖 `configs/brain.yaml` 的读取入口，以及 `search_impl / transition_model / reward_model / state_signature` 的默认装配
+
+- [test_service_search_impl_switch.py](/Users/loki/Workspace/GraduationDesign/tests/test_service_search_impl_switch.py)
+  - 测试 `brain/service.py` 在 `legacy / modular_v2` 间的切换
+  - 主要验证两条搜索骨架都可运行，并且 modular child signature 已切到 belief-state 近似表示
 
 - [test_report_builder.py](/Users/loki/Workspace/GraduationDesign/tests/test_report_builder.py)
   - 测试 `brain/report_builder.py`

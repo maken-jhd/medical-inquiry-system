@@ -148,6 +148,9 @@
     - `mcts`：完整树搜索
     - `greedy`：仍保留树搜索，但根动作只按 rollout 后的局部先验贪心选择
     - `no_tree_greedy`：完全跳过 select/expand/rollout/backprop，只按当前候选态动作先验选下一问
+  - 当前默认构造还支持顶层 `search_impl = legacy | modular_v2`：
+    - `legacy`：继续沿用旧版 inline heuristic MCTS
+    - `modular_v2`：启用新的 transition model / reward model / belief signature 骨架
   - 当前 `search_policy` 还支持三项 clean greedy benchmark 开关：
     - `disable_verifier_repair_for_greedy`
     - `disable_early_exam_context_rescue_for_greedy`
@@ -227,6 +230,7 @@
   - 负责按 `UCT` 公式在候选动作和树节点中做动态选择。
   - 当前已支持状态签名、tree policy、子节点扩展和 reward 回传。
   - 当前也支持 `select_root_action_greedy()`，用于在 benchmark 中隔离根动作的贪心选择策略。
+  - 当前在 `search_impl=modular_v2` 下会通过 `state_signature_builder` 为 root / child 构造更接近 belief state 的签名，而不是继续只用 action path id。
 
 - [simulation_engine.py](/Users/loki/Workspace/GraduationDesign/brain/simulation_engine.py)
   - 负责对候选动作做浅层局部预演。
@@ -234,6 +238,19 @@
   - 当前已支持从树节点出发做浅层多步 rollout。
   - rollout 内部的模拟证据反馈现在也复用多候选 fan-out 规则，避免路径评估只围绕当前 hypothesis 单点自嗨。
   - 当前第三批已支持 `multi-branch rollout`：同一个 child action 至少保留 `positive + negative/doubtful` 两类 seed，并在低真实锚点但正向分支垄断时施加 `anti_collapse_penalty`。
+  - 当前在 `search_impl=modular_v2` 下，`SimulationEngine` 会改为依赖可插拔 `transition model + reward model + branch selection mode`，legacy inline heuristic 仍保留为回归基线。
+
+- [response_transition_model.py](/Users/loki/Workspace/GraduationDesign/brain/response_transition_model.py)
+  - 负责把当前动作和会话状态映射成 rollout 分支概率分布。
+  - 当前默认实现 `HeuristicResponseTransitionModel` 复用了旧规则，但已经抽离成独立接口，后续可替换为条件化未来回答分类器。
+
+- [reward_model.py](/Users/loki/Workspace/GraduationDesign/brain/reward_model.py)
+  - 负责计算单个 rollout 分支的一步 reward。
+  - 当前默认实现 `HeuristicRolloutRewardModel` 已显式拆出 `information gain surrogate / turn cost / repeat penalty / high-cost penalty / uncertainty penalty`，便于后续换成 learned reward。
+
+- [state_signature.py](/Users/loki/Workspace/GraduationDesign/brain/state_signature.py)
+  - 负责把 `slots / asked nodes / active topics / exam context / top hypotheses / pending context` 压缩成稳定的 belief signature。
+  - 当前既服务 root reroot，也服务 modular_v2 child 节点的近似 post-action signature。
 
 - [trajectory_evaluator.py](/Users/loki/Workspace/GraduationDesign/brain/trajectory_evaluator.py)
   - 对齐论文最后的轨迹聚合器。

@@ -8,6 +8,7 @@ from math import log, sqrt
 from typing import Iterable, Optional, Sequence
 
 from .search_tree import SearchTree
+from .state_signature import BeliefStateSignatureBuilder
 from .types import MctsAction, SessionState, SimulationOutcome, TreeNode
 
 
@@ -15,6 +16,7 @@ from .types import MctsAction, SessionState, SimulationOutcome, TreeNode
 class MctsConfig:
     """保存 UCT 选择阶段的核心超参数。"""
 
+    search_impl: str = "legacy"
     exploration_constant: float = 2.0
     prior_weight: float = 0.35
     simulation_weight: float = 0.45
@@ -30,11 +32,39 @@ class MctsEngine:
     """根据历史统计和 simulation 结果选择下一步动作。"""
 
     # 初始化 UCT 选择器配置。
-    def __init__(self, config: MctsConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: MctsConfig | None = None,
+        state_signature_builder: BeliefStateSignatureBuilder | None = None,
+    ) -> None:
         self.config = config or MctsConfig()
+        self.state_signature_builder = state_signature_builder or BeliefStateSignatureBuilder()
 
     # 构造当前状态的稳定签名，供访问统计与缓存复用。
     def build_state_signature(
+        self,
+        session_state: SessionState,
+        hypothesis_id: Optional[str] = None,
+    ) -> str:
+        if self._uses_modular_v2():
+            return self.state_signature_builder.build(
+                session_state,
+                hypothesis_id=hypothesis_id,
+            )
+        return self._build_legacy_state_signature(session_state, hypothesis_id=hypothesis_id)
+
+    # 为 child action 构造近似 post-action belief signature，避免继续直接退回 path id。
+    def build_child_state_signature(
+        self,
+        session_state: SessionState,
+        action: MctsAction,
+    ) -> str:
+        if self._uses_modular_v2():
+            return self.state_signature_builder.build_post_action_signature(session_state, action)
+        return f"{action.action_id}"
+
+    # legacy 版本继续沿用最早的轻量状态签名逻辑，方便做回归对照。
+    def _build_legacy_state_signature(
         self,
         session_state: SessionState,
         hypothesis_id: Optional[str] = None,
@@ -66,6 +96,9 @@ class MctsEngine:
             ]
         )
         return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+    def _uses_modular_v2(self) -> bool:
+        return str(self.config.search_impl or "legacy").strip().lower() == "modular_v2"
 
     # 按照 UCT 对候选动作打分并返回当前最优动作。
     def select_action(
@@ -145,6 +178,7 @@ class MctsEngine:
         tree: SearchTree,
         parent_node_id: str,
         actions: Iterable[MctsAction],
+        session_state: SessionState | None = None,
     ) -> list[TreeNode]:
         parent = tree.get_node(parent_node_id)
         created: list[TreeNode] = []
@@ -158,14 +192,24 @@ class MctsEngine:
 
             if child_id in tree.nodes:
                 # 同一动作已经扩过时直接复用，避免重复创建节点打乱 visit/value 统计。
-                created.append(tree.get_node(child_id))
+                child = tree.get_node(child_id)
+                if self._uses_modular_v2() and session_state is not None:
+                    child.state_signature = self.build_child_state_signature(session_state, action)
+                    child.metadata["state_signature_source"] = "belief_state_post_action"
+                created.append(child)
                 continue
+
+            child_state_signature = child_id
+            state_signature_source = "action_path_id"
+            if self._uses_modular_v2() and session_state is not None:
+                child_state_signature = self.build_child_state_signature(session_state, action)
+                state_signature_source = "belief_state_post_action"
 
             # child 节点只保存继续搜索所需的最小元数据：
             # 动作本体、目标节点、prior 分数和当前 hypothesis 绑定关系。
             child = TreeNode(
                 node_id=child_id,
-                state_signature=child_id,
+                state_signature=child_state_signature,
                 parent_id=parent.node_id,
                 action_from_parent=action.action_id,
                 stage="A3",
@@ -177,6 +221,7 @@ class MctsEngine:
                     "target_node_id": action.target_node_id,
                     "target_node_name": action.target_node_name,
                     "prior_score": action.prior_score,
+                    "state_signature_source": state_signature_source,
                 },
             )
             tree.add_node(child)

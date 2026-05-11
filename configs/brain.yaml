@@ -1,6 +1,10 @@
 llm:
   structured_retry_count: 2
 
+# 当前默认仍保留 legacy MCTS，便于 benchmark / replay 做回归对照；
+# 如需启用新的可插拔骨架，可切到 modular_v2。
+search_impl: legacy
+
 search:
   num_rollouts: 8
   max_depth: 6
@@ -18,9 +22,31 @@ rollout_control:
   # 当前默认配置切到 batch2 + P4 + P5 + P7。
   # 也就是保留多分支 rollout / 防塌缩、动态权重、单答案封顶，
   # 并重新打开 scope-aware rerank 与 final score scope penalty。
+  # `branch_selection_mode` 目前支持：
+  # - greedy：沿用 weighted_reward 贪心选分支
+  # - sampled：按概率做确定性采样占位
+  # - expectation_ready：先按高概率分支保守推进，为后续 chance node 留接口
   enable_multi_branch_rollout: true
   branch_budget_per_action: 2
   enable_anti_collapse_penalty: true
+  branch_selection_mode: greedy
+
+# 回答转移模型负责输出 rollout 中 future answer 的条件概率分布。
+transition_model:
+  type: heuristic
+
+# reward model 负责把信息增益近似、成本和不确定性拆成可替换的组件。
+reward_model:
+  type: heuristic_v2
+
+# belief signature 负责决定搜索树何时可复用、child state 如何近似表示。
+state_signature:
+  include_exam_context: true
+  include_top_hypotheses: true
+  include_asked_node_ids: true
+  include_active_topics: true
+  include_pending_context: true
+  max_top_hypotheses: 3
 
 kg:
   entity_link_threshold: 0.72

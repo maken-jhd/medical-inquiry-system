@@ -28,6 +28,7 @@ def test_load_brain_config_reads_yaml_file(tmp_path: Path) -> None:
             [
                 "search:",
                 "  num_rollouts: 5",
+                "search_impl: modular_v2",
                 "search_policy:",
                 "  root_action_mode: no_tree_greedy",
                 "  disable_verifier_repair_for_greedy: true",
@@ -36,6 +37,14 @@ def test_load_brain_config_reads_yaml_file(tmp_path: Path) -> None:
                 "rollout_control:",
                 "  enable_multi_branch_rollout: true",
                 "  branch_budget_per_action: 2",
+                "  branch_selection_mode: expectation_ready",
+                "transition_model:",
+                "  type: heuristic",
+                "reward_model:",
+                "  type: heuristic_v2",
+                "state_signature:",
+                "  include_exam_context: true",
+                "  include_top_hypotheses: true",
                 "path_evaluation:",
                 "  agent_eval_mode: llm_verifier",
                 "  llm_verifier_min_turn_index: 2",
@@ -64,12 +73,18 @@ def test_load_brain_config_reads_yaml_file(tmp_path: Path) -> None:
     config = load_brain_config(config_path)
 
     assert config["search"]["num_rollouts"] == 5
+    assert config["search_impl"] == "modular_v2"
     assert config["search_policy"]["root_action_mode"] == "no_tree_greedy"
     assert config["search_policy"]["disable_verifier_repair_for_greedy"] is True
     assert config["search_policy"]["disable_early_exam_context_rescue_for_greedy"] is True
     assert config["search_policy"]["disable_low_cost_explorer_for_greedy"] is True
     assert config["rollout_control"]["enable_multi_branch_rollout"] is True
     assert config["rollout_control"]["branch_budget_per_action"] == 2
+    assert config["rollout_control"]["branch_selection_mode"] == "expectation_ready"
+    assert config["transition_model"]["type"] == "heuristic"
+    assert config["reward_model"]["type"] == "heuristic_v2"
+    assert config["state_signature"]["include_exam_context"] is True
+    assert config["state_signature"]["include_top_hypotheses"] is True
     assert config["path_evaluation"]["agent_eval_mode"] == "llm_verifier"
     assert config["path_evaluation"]["llm_verifier_min_turn_index"] == 2
     assert config["path_evaluation"]["llm_verifier_min_trajectory_count"] == 2
@@ -114,6 +129,7 @@ def test_build_default_brain_maps_a3_and_repair_config() -> None:
     brain = build_default_brain(
         client=object(),
         config_overrides={
+            "search_impl": "modular_v2",
             "search_policy": {
                 "root_action_mode": "no_tree_greedy",
                 "disable_verifier_repair_for_greedy": True,
@@ -138,6 +154,19 @@ def test_build_default_brain_maps_a3_and_repair_config() -> None:
                 "enable_multi_branch_rollout": True,
                 "branch_budget_per_action": 2,
                 "enable_anti_collapse_penalty": True,
+                "branch_selection_mode": "expectation_ready",
+            },
+            "transition_model": {
+                "type": "heuristic",
+            },
+            "reward_model": {
+                "type": "heuristic_v2",
+                "turn_cost": 0.08,
+            },
+            "state_signature": {
+                "include_exam_context": False,
+                "include_top_hypotheses": True,
+                "max_top_hypotheses": 2,
             },
             "path_evaluation": {
                 "enable_dynamic_group_weights": True,
@@ -159,6 +188,7 @@ def test_build_default_brain_maps_a3_and_repair_config() -> None:
         llm_client=FakeAvailableLlmClient(),
     )
 
+    assert brain.deps.mcts_engine.config.search_impl == "modular_v2"
     assert brain.deps.search_policy.root_action_mode == "no_tree_greedy"
     assert brain.deps.search_policy.disable_verifier_repair_for_greedy is True
     assert brain.deps.search_policy.disable_early_exam_context_rescue_for_greedy is True
@@ -173,9 +203,16 @@ def test_build_default_brain_maps_a3_and_repair_config() -> None:
     assert brain.deps.repair_policy.allow_low_cost_explorer_after_repair_if_unaskable_only is False
     assert brain.deps.repair_policy.enable_missing_key_support_competition_escalation is True
     assert brain.deps.repair_policy.missing_key_support_retry_threshold == 3
+    assert brain.deps.simulation_engine.config.search_impl == "modular_v2"
     assert brain.deps.simulation_engine.config.enable_multi_branch_rollout is True
     assert brain.deps.simulation_engine.config.branch_budget_per_action == 2
     assert brain.deps.simulation_engine.config.enable_anti_collapse_penalty is True
+    assert brain.deps.simulation_engine.config.branch_selection_mode == "expectation_ready"
+    assert brain.deps.simulation_engine.config.transition_model_type == "heuristic"
+    assert brain.deps.simulation_engine.config.reward_model_type == "heuristic_v2"
+    assert brain.deps.mcts_engine.state_signature_builder.config.include_exam_context is False
+    assert brain.deps.mcts_engine.state_signature_builder.config.max_top_hypotheses == 2
+    assert brain.deps.simulation_engine.reward_model.config.turn_cost == 0.08
     assert brain.deps.trajectory_evaluator.config.enable_dynamic_group_weights is True
     assert brain.deps.trajectory_evaluator.config.enable_single_answer_group_cap is True
     assert brain.deps.trajectory_evaluator.config.low_anchor_single_group_score_cap == 0.58

@@ -23,10 +23,16 @@ from .med_extractor import MedExtractor
 from .neo4j_client import Neo4jClient
 from .question_selector import QuestionSelector
 from .report_builder import ReportBuilder
+from .response_transition_model import (
+    HeuristicResponseTransitionModel,
+    ResponseTransitionModelConfig,
+)
+from .reward_model import HeuristicRolloutRewardModel, RolloutRewardModelConfig
 from .retriever import GraphRetriever, RetrievalConfig
 from .router import ReasoningRouter, RouterConfig
 from .search_tree import SearchTree
 from .simulation_engine import SimulationConfig, SimulationEngine
+from .state_signature import BeliefStateSignatureBuilder, StateSignatureConfig
 from .state_tracker import StateTracker
 from .trajectory_evaluator import TrajectoryEvaluator, TrajectoryEvaluatorConfig
 from .types import (
@@ -88,6 +94,7 @@ HIGH_COST_NO_RESULT_FALLBACK_STREAK = 2
 # - `greedy`：仍保留树搜索，但根动作只按 rollout 后的局部先验贪心选择
 # - `no_tree_greedy`：完全跳过 select/expand/rollout/backprop，只看当前候选态的动作先验
 SUPPORTED_ROOT_ACTION_MODES = {"mcts", "greedy", "no_tree_greedy"}
+SUPPORTED_SEARCH_IMPLS = {"legacy", "modular_v2"}
 
 # benchmark 经常需要在不改默认 brain.yaml 的前提下切换整套配置，
 # 因此这里额外支持通过环境变量指定配置文件路径。
@@ -97,6 +104,11 @@ BRAIN_CONFIG_PATH_ENV_VAR = "BRAIN_CONFIG_PATH"
 def _normalize_root_action_mode(value: object) -> str:
     mode = str(value or "mcts").strip().lower()
     return mode if mode in SUPPORTED_ROOT_ACTION_MODES else "mcts"
+
+
+def _normalize_search_impl(value: object) -> str:
+    search_impl = str(value or "legacy").strip().lower()
+    return search_impl if search_impl in SUPPORTED_SEARCH_IMPLS else "legacy"
 
 
 @dataclass
@@ -2235,7 +2247,12 @@ class ConsultationBrain:
 
             # expand_node 只负责把候选动作挂成树上的 child node；
             # 真正的收益估计和路径前瞻发生在下面的 rollout_from_tree_node()。
-            child_nodes = self.deps.mcts_engine.expand_node(tree, leaf.node_id, actions)
+            child_nodes = self.deps.mcts_engine.expand_node(
+                tree,
+                leaf.node_id,
+                actions,
+                session_state=rollout_context["state"],
+            )
 
             if len(child_nodes) == 0:
                 # 理论上很少发生，但如果 expand 失败，也要把叶子标 terminal，避免后续空转。
@@ -2365,6 +2382,9 @@ class ConsultationBrain:
                 "tree_node_count": len(tree.nodes),
                 "tree_refresh": dict(state.metadata.get("last_tree_refresh", {})),
                 "root_action_mode": _normalize_root_action_mode(self.deps.search_policy.root_action_mode),
+                "search_impl": self._current_search_impl(),
+                "transition_model_type": self._current_transition_model_type(),
+                "reward_model_type": self._current_reward_model_type(),
             },
         )
 
@@ -2429,6 +2449,9 @@ class ConsultationBrain:
                     "top_hypothesis_id": getattr(current_hypothesis, "node_id", None),
                 },
                 "root_action_mode": "no_tree_greedy",
+                "search_impl": self._current_search_impl(),
+                "transition_model_type": self._current_transition_model_type(),
+                "reward_model_type": self._current_reward_model_type(),
                 "no_tree_greedy": True,
                 "root_candidate_action_count": len(actions),
                 "candidate_state_answer_fallback": True,
@@ -2459,6 +2482,22 @@ class ConsultationBrain:
     # 当前 root action mode 会被多个 benchmark 小开关复用，集中封装避免分散判断。
     def _current_root_action_mode(self) -> str:
         return _normalize_root_action_mode(self.deps.search_policy.root_action_mode)
+
+    # search_impl 只控制 MCTS skeleton 版本，不影响外部 process_turn 调用契约。
+    def _current_search_impl(self) -> str:
+        engine = self.deps.mcts_engine
+        config = getattr(engine, "config", None)
+        return _normalize_search_impl(getattr(config, "search_impl", "legacy"))
+
+    def _current_transition_model_type(self) -> str:
+        simulation_engine = self.deps.simulation_engine
+        config = getattr(simulation_engine, "config", None)
+        return str(getattr(config, "transition_model_type", "legacy_inline"))
+
+    def _current_reward_model_type(self) -> str:
+        simulation_engine = self.deps.simulation_engine
+        config = getattr(simulation_engine, "config", None)
+        return str(getattr(config, "reward_model_type", "legacy_inline"))
 
     # clean greedy benchmark 可选择完全禁用 verifier repair，暴露 root policy 本身。
     def _should_disable_verifier_repair_for_current_policy(self) -> bool:
@@ -5686,6 +5725,7 @@ def build_default_brain(
 ) -> ConsultationBrain:
     config = _merge_brain_config(load_brain_config(), config_overrides)
     search_config = dict(config.get("search", {}))
+    search_impl = _normalize_search_impl(config.get("search_impl", search_config.get("search_impl", "legacy")))
     search_policy_config = dict(config.get("search_policy", {}))
     kg_config = dict(config.get("kg", {}))
     path_eval_config = dict(config.get("path_evaluation", {}))
@@ -5697,6 +5737,9 @@ def build_default_brain(
     candidate_feedback_config = dict(config.get("candidate_feedback", {}))
     fallback_config = dict(config.get("fallback", {}))
     repair_config = dict(config.get("repair", {}))
+    transition_model_config = dict(config.get("transition_model", {}))
+    reward_model_config = dict(config.get("reward_model", {}))
+    state_signature_config = dict(config.get("state_signature", {}))
     configured_retry_count = int(llm_config.get("structured_retry_count", 1))
     llm_client = llm_client or LlmClient(
         structured_retry_count=configured_retry_count,
@@ -5709,6 +5752,50 @@ def build_default_brain(
             prompt_name="brain_startup",
             message="当前配置要求走 LLM-first 主链路，但未检测到可用的大模型客户端。",
         )
+    state_signature_builder = BeliefStateSignatureBuilder(
+        StateSignatureConfig(
+            include_asked_node_ids=bool(state_signature_config.get("include_asked_node_ids", True)),
+            include_active_topics=bool(state_signature_config.get("include_active_topics", True)),
+            include_exam_context=bool(state_signature_config.get("include_exam_context", True)),
+            include_top_hypotheses=bool(state_signature_config.get("include_top_hypotheses", True)),
+            include_pending_context=bool(state_signature_config.get("include_pending_context", True)),
+            max_top_hypotheses=int(state_signature_config.get("max_top_hypotheses", 3)),
+        )
+    )
+    transition_model_type = str(transition_model_config.get("type", "heuristic"))
+    reward_model_type = str(reward_model_config.get("type", "heuristic_v2"))
+    transition_model = HeuristicResponseTransitionModel(
+        ResponseTransitionModelConfig(
+            model_type=transition_model_type,
+            base_positive_probability=float(transition_model_config.get("base_positive_probability", 0.6)),
+            base_doubtful_probability=float(transition_model_config.get("base_doubtful_probability", 0.15)),
+            red_flag_positive_bonus=float(transition_model_config.get("red_flag_positive_bonus", 0.1)),
+            asked_before_positive_penalty=float(
+                transition_model_config.get("asked_before_positive_penalty", 0.15)
+            ),
+            detail_positive_penalty=float(transition_model_config.get("detail_positive_penalty", 0.1)),
+            strong_relation_positive_bonus=float(
+                transition_model_config.get("strong_relation_positive_bonus", 0.05)
+            ),
+        )
+    )
+    reward_model = HeuristicRolloutRewardModel(
+        RolloutRewardModelConfig(
+            model_type=reward_model_type,
+            information_gain_weight=float(reward_model_config.get("information_gain_weight", 0.6)),
+            hypothesis_alignment_weight=float(reward_model_config.get("hypothesis_alignment_weight", 0.35)),
+            contradiction_signal_weight=float(reward_model_config.get("contradiction_signal_weight", 0.25)),
+            turn_cost=float(reward_model_config.get("turn_cost", 0.06)),
+            repeat_penalty=float(reward_model_config.get("repeat_penalty", 0.18)),
+            high_cost_penalty=float(reward_model_config.get("high_cost_penalty", 0.12)),
+            uncertainty_penalty=float(reward_model_config.get("uncertainty_penalty", 0.1)),
+            negative_resolution_penalty=float(
+                reward_model_config.get("negative_resolution_penalty", 0.08)
+            ),
+            context_match_bonus=float(reward_model_config.get("context_match_bonus", 0.1)),
+            risk_context_bonus=float(reward_model_config.get("risk_context_bonus", 0.05)),
+        )
+    )
     deps = BrainDependencies(
         state_tracker=StateTracker(),
         retriever=GraphRetriever(
@@ -5761,22 +5848,30 @@ def build_default_brain(
         ),
         mcts_engine=MctsEngine(
             MctsConfig(
+                search_impl=search_impl,
                 num_rollouts=int(search_config.get("num_rollouts", 8)),
                 max_depth=int(search_config.get("max_depth", 6)),
                 max_child_nodes=int(search_config.get("max_child_nodes", 4)),
                 exploration_constant=float(search_config.get("exploration_weight", 2.0)),
                 discount_factor=float(search_config.get("discount_factor", 1.0)),
                 max_kg_triplets=int(search_config.get("max_kg_triplets", 15)),
-            )
+            ),
+            state_signature_builder=state_signature_builder,
         ),
         simulation_engine=SimulationEngine(
             SimulationConfig(
+                search_impl=search_impl,
+                transition_model_type=transition_model_type,
+                reward_model_type=reward_model_type,
+                branch_selection_mode=str(rollout_config.get("branch_selection_mode", "greedy")),
                 rollout_max_depth=int(search_config.get("max_depth", 6)),
                 rollout_discount=float(search_config.get("discount_factor", 0.9)),
                 enable_multi_branch_rollout=bool(rollout_config.get("enable_multi_branch_rollout", True)),
                 branch_budget_per_action=int(rollout_config.get("branch_budget_per_action", 2)),
                 enable_anti_collapse_penalty=bool(rollout_config.get("enable_anti_collapse_penalty", True)),
-            )
+            ),
+            transition_model=transition_model,
+            reward_model=reward_model,
         ),
         trajectory_evaluator=TrajectoryEvaluator(
             TrajectoryEvaluatorConfig(

@@ -6001,3 +6001,54 @@ python -m py_compile brain/simulation_engine.py brain/trajectory_evaluator.py br
 
 - 第 `2` 章目录层级明显收缩，不再被三级标题大量占据版面
 - 正文保留原有内容覆盖范围，但结构更紧凑，更适合作为“相关技术与理论基础”章节
+
+## 六十二、2026-05-11：并行落地 modular_v2 MCTS skeleton，保留 legacy 搜索基线
+
+### 本次目标
+
+- 只重构 `brain/` 中的 MCTS 骨架，不改 `simulator/*`
+- 保留 legacy heuristic MCTS 路径，新增可切换的 modular v2 skeleton
+- 把 transition model、reward model 和 belief signature 从旧 inline rollout 中抽离
+
+### 本次更新
+
+- 新增：
+  - [brain/response_transition_model.py](/Users/loki/Workspace/GraduationDesign/brain/response_transition_model.py)
+  - [brain/reward_model.py](/Users/loki/Workspace/GraduationDesign/brain/reward_model.py)
+  - [brain/state_signature.py](/Users/loki/Workspace/GraduationDesign/brain/state_signature.py)
+  - [docs/mcts_refactor_plan.md](/Users/loki/Workspace/GraduationDesign/docs/mcts_refactor_plan.md)
+  - [tests/test_response_transition_model.py](/Users/loki/Workspace/GraduationDesign/tests/test_response_transition_model.py)
+  - [tests/test_reward_model.py](/Users/loki/Workspace/GraduationDesign/tests/test_reward_model.py)
+  - [tests/test_mcts_state_signature.py](/Users/loki/Workspace/GraduationDesign/tests/test_mcts_state_signature.py)
+  - [tests/test_service_search_impl_switch.py](/Users/loki/Workspace/GraduationDesign/tests/test_service_search_impl_switch.py)
+- 更新：
+  - [brain/mcts_engine.py](/Users/loki/Workspace/GraduationDesign/brain/mcts_engine.py)
+  - [brain/simulation_engine.py](/Users/loki/Workspace/GraduationDesign/brain/simulation_engine.py)
+  - [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml)
+  - [brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
+  - [tests/README.md](/Users/loki/Workspace/GraduationDesign/tests/README.md)
+  - [tests/test_service_config.py](/Users/loki/Workspace/GraduationDesign/tests/test_service_config.py)
+
+### 具体改动
+
+- 为 rollout 引入 `ResponseTransitionModel` 抽象，并提供默认 `HeuristicResponseTransitionModel`
+- 为 rollout 引入 `RolloutRewardModel` 抽象，并提供默认 `HeuristicRolloutRewardModel`
+- 新增 `BeliefStateSignatureBuilder`，把 `slots / asked nodes / active topics / exam context / top hypotheses / pending context` 压成稳定 signature
+- 在 `MctsEngine` 中保留 legacy path，同时支持 `search_impl=modular_v2` 下的 belief-state child signature
+- 在 `SimulationEngine` 中保留 legacy inline heuristic，同时支持 modular_v2 下的 `transition model -> reward model -> branch payload`
+- 在 `service.py` 默认构造入口新增 `search_impl / transition_model / reward_model / state_signature / branch_selection_mode` 配置装配
+- 新增 service runtime switch 测试，确保 legacy 与 modular_v2 都能跑通
+
+### 结果影响
+
+- 当前仓库已经具备“保留 legacy 基线 + 可切换 modular skeleton”的并行结构
+- 后续若要接 learned transition、learned reward 或更合理的 belief signature，不再需要继续把逻辑堆回 `SimulationEngine` 单文件
+- 本次未修改 `simulator/*`、`frontend/*`、`knowledge_graph/*` 的业务语义
+
+### 验证结果
+
+- `conda run -n GraduationDesign python -m pytest tests/test_response_transition_model.py tests/test_reward_model.py tests/test_mcts_state_signature.py tests/test_mcts_engine.py tests/test_simulation_engine.py tests/test_service_search_impl_switch.py tests/test_service_config.py tests/test_service_no_tree_greedy.py -q`
+  - `22 passed`
+- `conda run -n GraduationDesign python -m pytest tests/test_trajectory_evaluator.py tests/test_router_control_flow.py -q`
+  - `13 passed`
