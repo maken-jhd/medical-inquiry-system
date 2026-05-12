@@ -257,6 +257,7 @@
     - `top1_top3_separation_proxy`
     - `competitor_elimination_proxy`
     - `discriminative_support_quality`
+    - `alternative_preservation_proxy`
     供最终 acceptance 做轻量校准。
 
 - [response_transition_model.py](/Users/loki/Workspace/GraduationDesign/brain/response_transition_model.py)
@@ -281,7 +282,9 @@
     - `top1-top2 margin` 是否被拉开
     - `top1-top3 separation` 是否被拉开
     - 竞争诊断是否被有效压低
+    - 在拉开第一名的同时，是否仍保住健康的 `Top-3` 候选覆盖
     - 当前分支是否会提升 premature acceptance risk
+  - 当前 posterior surrogate 还支持 `prior` 与 `raw posterior` 的软插值更新，避免一轮统计 likelihood 就把边缘高质量候选过早压掉。
 
 - [transition_statistics.py](/Users/loki/Workspace/GraduationDesign/brain/transition_statistics.py)
   - 负责离线统计构建与在线 mixture 辅助。
@@ -312,6 +315,7 @@
   - 当前 trajectory 聚合会读取 `observed_anchor_index`，把 exact/family observed anchor 转成 `observed_anchor_agent_bonus`，并对“只有 rollout 模拟关键阳性、没有真实 anchor”的答案施加 `simulated_key_evidence_penalty`。
   - 当前第三批已支持动态 final score 权重：单答案且低真实锚点时，会下调 `consistency / diversity`、提高 `agent_evaluation` 比重，并对低锚点单答案触发 `single_answer_group_score_cap`。
   - 当前第三批也会把 `generic_scope_penalty / scope_requirement_missing_score / scope_cluster_bonus` 真正扣进 `final_score`，让部位漂移、IRIS 漂移和泛病名漂移更早在排序阶段暴露出来。
+  - 当前还会把 rollout 侧的 `alternative_preservation_proxy` 纳入 final answer discriminative bonus，避免排序只奖励“最尖锐”的单答案压缩。
   - 当前支持 `score_candidate_hypotheses_without_trajectories()`，用于在轨迹聚合断层时把现有候选疾病转成 answer score；该 fallback 会运行 observed-evidence final evaluator，接受结果会直接交给 `VerifierAcceptanceController`。
 
 ### 5. 辅助文件

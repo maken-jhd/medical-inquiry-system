@@ -4,12 +4,13 @@ search_policy:
   root_action_mode: mcts
 
 search:
-  discriminative_gain_weight: 0.14
+  # Top-1 导向版本过于偏爱极强区分问题，这里轻微回调，给 Top-3 留空间。
+  discriminative_gain_weight: 0.1
 
 transition_model:
   type: statistical
   statistics_source_mode: auto
-  statistics_top_k_hypotheses: 3
+  statistics_top_k_hypotheses: 5
   enable_belief_mixture: true
   fallback_to_heuristic: true
   statistics_smoothing_alpha: 0.5
@@ -17,14 +18,18 @@ transition_model:
 
 reward_model:
   type: belief_aware_v1
+  belief_top_k_hypotheses: 5
   enable_top3_separation_gain: true
   enable_competitor_elimination_bonus: true
   enable_discriminative_support_bonus: true
-  top3_separation_weight: 0.28
-  competitor_elimination_weight: 0.3
-  discriminative_support_weight: 0.2
+  enable_alternative_preservation_bonus: true
+  top3_separation_weight: 0.24
+  competitor_elimination_weight: 0.22
+  discriminative_support_weight: 0.16
+  alternative_preservation_weight: 0.14
   acceptance_risk_weight: 0.12
   detail_non_discriminative_penalty: 0.06
+  posterior_update_alpha: 0.65
 
 acceptance_calibration:
   enable_reward_confidence_proxy: true
@@ -38,7 +43,8 @@ acceptance_calibration:
 
 path_evaluation:
   enable_discriminative_answer_bonus: true
-  discriminative_answer_bonus_weight: 0.1
-  competitor_suppression_bonus_weight: 0.08
-  rank_stability_bonus_weight: 0.06
-  discriminative_support_bonus_weight: 0.06
+  discriminative_answer_bonus_weight: 0.07
+  competitor_suppression_bonus_weight: 0.05
+  rank_stability_bonus_weight: 0.04
+  discriminative_support_bonus_weight: 0.05
+  top3_coverage_stability_bonus_weight: 0.05

@@ -5790,7 +5790,7 @@ def build_default_brain(
             transition_model_config.get("strong_relation_positive_bonus", 0.05)
         ),
         statistics_source_mode=str(transition_model_config.get("statistics_source_mode", "auto")),
-        statistics_top_k_hypotheses=int(transition_model_config.get("statistics_top_k_hypotheses", 3)),
+        statistics_top_k_hypotheses=int(transition_model_config.get("statistics_top_k_hypotheses", 5)),
         enable_belief_mixture=bool(transition_model_config.get("enable_belief_mixture", True)),
         fallback_to_heuristic=bool(transition_model_config.get("fallback_to_heuristic", True)),
         statistics_smoothing_alpha=float(transition_model_config.get("statistics_smoothing_alpha", 0.5)),
@@ -5855,7 +5855,7 @@ def build_default_brain(
         ),
         context_match_bonus=float(reward_model_config.get("context_match_bonus", 0.1)),
         risk_context_bonus=float(reward_model_config.get("risk_context_bonus", 0.05)),
-        belief_top_k_hypotheses=int(reward_model_config.get("belief_top_k_hypotheses", 3)),
+        belief_top_k_hypotheses=int(reward_model_config.get("belief_top_k_hypotheses", 5)),
         enable_belief_margin_gain=bool(reward_model_config.get("enable_belief_margin_gain", True)),
         enable_top3_separation_gain=bool(reward_model_config.get("enable_top3_separation_gain", True)),
         enable_uncertainty_reduction=bool(reward_model_config.get("enable_uncertainty_reduction", True)),
@@ -5865,19 +5865,25 @@ def build_default_brain(
         enable_discriminative_support_bonus=bool(
             reward_model_config.get("enable_discriminative_support_bonus", True)
         ),
+        enable_alternative_preservation_bonus=bool(
+            reward_model_config.get("enable_alternative_preservation_bonus", True)
+        ),
         enable_acceptance_risk_penalty=bool(
             reward_model_config.get("enable_acceptance_risk_penalty", True)
         ),
         margin_gain_weight=float(reward_model_config.get("margin_gain_weight", 0.32)),
-        top3_separation_weight=float(reward_model_config.get("top3_separation_weight", 0.24)),
+        top3_separation_weight=float(reward_model_config.get("top3_separation_weight", 0.22)),
         uncertainty_reduction_weight=float(
             reward_model_config.get("uncertainty_reduction_weight", 0.28)
         ),
         competitor_elimination_weight=float(
-            reward_model_config.get("competitor_elimination_weight", 0.26)
+            reward_model_config.get("competitor_elimination_weight", 0.22)
         ),
         discriminative_support_weight=float(
-            reward_model_config.get("discriminative_support_weight", 0.18)
+            reward_model_config.get("discriminative_support_weight", 0.14)
+        ),
+        alternative_preservation_weight=float(
+            reward_model_config.get("alternative_preservation_weight", 0.12)
         ),
         acceptance_risk_weight=float(reward_model_config.get("acceptance_risk_weight", 0.16)),
         branch_likelihood_floor=float(reward_model_config.get("branch_likelihood_floor", 0.05)),
@@ -5888,6 +5894,7 @@ def build_default_brain(
         detail_non_discriminative_penalty=float(
             reward_model_config.get("detail_non_discriminative_penalty", 0.05)
         ),
+        posterior_update_alpha=float(reward_model_config.get("posterior_update_alpha", 0.65)),
     )
     if reward_model_type == "belief_aware_v1":
         reward_model = BeliefAwareRolloutRewardModel(reward_model_runtime_config)
@@ -5979,7 +5986,7 @@ def build_default_brain(
                 exploration_constant=float(search_config.get("exploration_weight", 2.0)),
                 discount_factor=float(search_config.get("discount_factor", 1.0)),
                 max_kg_triplets=int(search_config.get("max_kg_triplets", 15)),
-                discriminative_gain_weight=float(search_config.get("discriminative_gain_weight", 0.12)),
+                discriminative_gain_weight=float(search_config.get("discriminative_gain_weight", 0.1)),
             ),
             state_signature_builder=state_signature_builder,
         ),
@@ -6036,16 +6043,19 @@ def build_default_brain(
                     path_eval_config.get("enable_discriminative_answer_bonus", True)
                 ),
                 discriminative_answer_bonus_weight=float(
-                    path_eval_config.get("discriminative_answer_bonus_weight", 0.08)
+                    path_eval_config.get("discriminative_answer_bonus_weight", 0.06)
                 ),
                 competitor_suppression_bonus_weight=float(
-                    path_eval_config.get("competitor_suppression_bonus_weight", 0.07)
+                    path_eval_config.get("competitor_suppression_bonus_weight", 0.05)
                 ),
                 rank_stability_bonus_weight=float(
-                    path_eval_config.get("rank_stability_bonus_weight", 0.05)
+                    path_eval_config.get("rank_stability_bonus_weight", 0.04)
                 ),
                 discriminative_support_bonus_weight=float(
-                    path_eval_config.get("discriminative_support_bonus_weight", 0.05)
+                    path_eval_config.get("discriminative_support_bonus_weight", 0.04)
+                ),
+                top3_coverage_stability_bonus_weight=float(
+                    path_eval_config.get("top3_coverage_stability_bonus_weight", 0.04)
                 ),
             ),
             llm_client=llm_client,

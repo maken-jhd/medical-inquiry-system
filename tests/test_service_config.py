@@ -92,15 +92,20 @@ def test_load_brain_config_reads_yaml_file(tmp_path: Path) -> None:
                 "  branch_selection_mode: expectation_ready",
                 "transition_model:",
                 "  type: heuristic",
+                "  statistics_top_k_hypotheses: 5",
                 "reward_model:",
                 "  type: belief_aware_v1",
+                "  belief_top_k_hypotheses: 5",
                 "  enable_top3_separation_gain: true",
                 "  enable_competitor_elimination_bonus: true",
                 "  enable_discriminative_support_bonus: true",
+                "  enable_alternative_preservation_bonus: true",
                 "  top3_separation_weight: 0.29",
                 "  competitor_elimination_weight: 0.31",
                 "  discriminative_support_weight: 0.21",
+                "  alternative_preservation_weight: 0.14",
                 "  detail_non_discriminative_penalty: 0.07",
+                "  posterior_update_alpha: 0.63",
                 "state_signature:",
                 "  include_exam_context: true",
                 "  include_top_hypotheses: true",
@@ -114,6 +119,7 @@ def test_load_brain_config_reads_yaml_file(tmp_path: Path) -> None:
                 "  competitor_suppression_bonus_weight: 0.09",
                 "  rank_stability_bonus_weight: 0.07",
                 "  discriminative_support_bonus_weight: 0.06",
+                "  top3_coverage_stability_bonus_weight: 0.05",
                 "acceptance_calibration:",
                 "  margin_relaxation_buffer: 0.03",
                 "  risk_relaxation_buffer: 0.05",
@@ -152,11 +158,16 @@ def test_load_brain_config_reads_yaml_file(tmp_path: Path) -> None:
     assert config["rollout_control"]["branch_budget_per_action"] == 2
     assert config["rollout_control"]["branch_selection_mode"] == "expectation_ready"
     assert config["transition_model"]["type"] == "heuristic"
+    assert config["transition_model"]["statistics_top_k_hypotheses"] == 5
     assert config["reward_model"]["type"] == "belief_aware_v1"
+    assert config["reward_model"]["belief_top_k_hypotheses"] == 5
     assert config["reward_model"]["top3_separation_weight"] == 0.29
     assert config["reward_model"]["competitor_elimination_weight"] == 0.31
     assert config["reward_model"]["discriminative_support_weight"] == 0.21
+    assert config["reward_model"]["enable_alternative_preservation_bonus"] is True
+    assert config["reward_model"]["alternative_preservation_weight"] == 0.14
     assert config["reward_model"]["detail_non_discriminative_penalty"] == 0.07
+    assert config["reward_model"]["posterior_update_alpha"] == 0.63
     assert config["state_signature"]["include_exam_context"] is True
     assert config["state_signature"]["include_top_hypotheses"] is True
     assert config["path_evaluation"]["agent_eval_mode"] == "llm_verifier"
@@ -168,6 +179,7 @@ def test_load_brain_config_reads_yaml_file(tmp_path: Path) -> None:
     assert config["path_evaluation"]["competitor_suppression_bonus_weight"] == 0.09
     assert config["path_evaluation"]["rank_stability_bonus_weight"] == 0.07
     assert config["path_evaluation"]["discriminative_support_bonus_weight"] == 0.06
+    assert config["path_evaluation"]["top3_coverage_stability_bonus_weight"] == 0.05
     assert config["acceptance_calibration"]["margin_relaxation_buffer"] == 0.03
     assert config["acceptance_calibration"]["risk_relaxation_buffer"] == 0.05
     assert config["acceptance_calibration"]["high_support_quality_override"] == 0.61
@@ -352,16 +364,20 @@ def test_build_default_brain_supports_belief_aware_reward_and_acceptance_calibra
             "search_impl": "modular_v2",
             "reward_model": {
                 "type": "belief_aware_v1",
+                "belief_top_k_hypotheses": 5,
                 "enable_belief_margin_gain": True,
                 "enable_top3_separation_gain": True,
+                "enable_alternative_preservation_bonus": True,
                 "enable_acceptance_risk_penalty": True,
                 "margin_gain_weight": 0.41,
                 "top3_separation_weight": 0.27,
                 "uncertainty_reduction_weight": 0.27,
                 "competitor_elimination_weight": 0.29,
                 "discriminative_support_weight": 0.19,
+                "alternative_preservation_weight": 0.13,
                 "acceptance_risk_weight": 0.19,
                 "detail_non_discriminative_penalty": 0.06,
+                "posterior_update_alpha": 0.61,
             },
             "search": {
                 "discriminative_gain_weight": 0.17,
@@ -382,6 +398,7 @@ def test_build_default_brain_supports_belief_aware_reward_and_acceptance_calibra
                 "competitor_suppression_bonus_weight": 0.08,
                 "rank_stability_bonus_weight": 0.06,
                 "discriminative_support_bonus_weight": 0.05,
+                "top3_coverage_stability_bonus_weight": 0.04,
             },
         },
         llm_client=FakeAvailableLlmClient(),
@@ -389,11 +406,14 @@ def test_build_default_brain_supports_belief_aware_reward_and_acceptance_calibra
 
     assert brain.deps.simulation_engine.config.reward_model_type == "belief_aware_v1"
     assert isinstance(brain.deps.simulation_engine.reward_model, BeliefAwareRolloutRewardModel)
+    assert brain.deps.simulation_engine.reward_model.config.belief_top_k_hypotheses == 5
     assert brain.deps.simulation_engine.reward_model.config.margin_gain_weight == 0.41
     assert brain.deps.simulation_engine.reward_model.config.top3_separation_weight == 0.27
     assert brain.deps.simulation_engine.reward_model.config.competitor_elimination_weight == 0.29
     assert brain.deps.simulation_engine.reward_model.config.discriminative_support_weight == 0.19
+    assert brain.deps.simulation_engine.reward_model.config.alternative_preservation_weight == 0.13
     assert brain.deps.simulation_engine.reward_model.config.detail_non_discriminative_penalty == 0.06
+    assert brain.deps.simulation_engine.reward_model.config.posterior_update_alpha == 0.61
     assert brain.deps.mcts_engine.config.discriminative_gain_weight == 0.17
     assert brain.deps.acceptance_controller.config.max_acceptance_risk_proxy == 0.24
     assert brain.deps.acceptance_controller.config.margin_relaxation_buffer == 0.03
@@ -403,6 +423,7 @@ def test_build_default_brain_supports_belief_aware_reward_and_acceptance_calibra
     assert brain.deps.trajectory_evaluator.config.enable_discriminative_answer_bonus is True
     assert brain.deps.trajectory_evaluator.config.discriminative_answer_bonus_weight == 0.1
     assert brain.deps.trajectory_evaluator.config.competitor_suppression_bonus_weight == 0.08
+    assert brain.deps.trajectory_evaluator.config.top3_coverage_stability_bonus_weight == 0.04
 
 
 # 验证 service 层会按 search_policy 把根动作选择分发给 mcts 或 greedy selector。

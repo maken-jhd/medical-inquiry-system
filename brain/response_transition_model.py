@@ -39,7 +39,7 @@ class ResponseTransitionModelConfig:
     detail_positive_penalty: float = 0.1
     strong_relation_positive_bonus: float = 0.05
     statistics_source_mode: str = "auto"
-    statistics_top_k_hypotheses: int = 3
+    statistics_top_k_hypotheses: int = 5
     enable_belief_mixture: bool = True
     fallback_to_heuristic: bool = True
     statistics_smoothing_alpha: float = 0.5

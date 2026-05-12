@@ -74,6 +74,7 @@
 - [test_reward_model.py](/Users/loki/Workspace/GraduationDesign/tests/test_reward_model.py)
   - 测试 `brain/reward_model.py`
   - 主要覆盖 reward breakdown、重复动作惩罚、高成本惩罚和不同分支 reward 差异
+  - 当前也会覆盖 belief top-k 放宽、soft posterior surrogate 与 alternative preservation bonus
 
 - [test_evidence_parser.py](/Users/loki/Workspace/GraduationDesign/tests/test_evidence_parser.py)
   - 测试 `brain/evidence_parser.py`
@@ -86,6 +87,7 @@
 - [test_service_config.py](/Users/loki/Workspace/GraduationDesign/tests/test_service_config.py)
   - 测试 `brain/service.py`
   - 当前已覆盖 `configs/brain.yaml` 的读取入口，以及 `search_impl / transition_model / reward_model / state_signature` 的默认装配
+  - 当前也会覆盖 belief-aware reward / trajectory evaluator 的新增平衡型配置是否真正装配到 runtime
 
 - [test_service_search_impl_switch.py](/Users/loki/Workspace/GraduationDesign/tests/test_service_search_impl_switch.py)
   - 测试 `brain/service.py` 在 `legacy / modular_v2` 间的切换

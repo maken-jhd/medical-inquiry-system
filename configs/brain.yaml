@@ -12,7 +12,8 @@ search:
   exploration_weight: 2.0
   discount_factor: 1.0
   max_kg_triplets: 15
-  discriminative_gain_weight: 0.12
+  # 为了缓解 Top-1 / Top-3 trade-off，默认降低 root 动作层面对极强区分问题的过度偏好。
+  discriminative_gain_weight: 0.1
 
 search_policy:
   # 当前这轮 benchmark 先切到 No-Tree Greedy：
@@ -36,7 +37,8 @@ rollout_control:
 transition_model:
   type: heuristic
   statistics_source_mode: auto
-  statistics_top_k_hypotheses: 3
+  # statistical belief mixture 默认放宽到 top-5，减少正确候选在第 4/5 位时被过早裁掉。
+  statistics_top_k_hypotheses: 5
   enable_belief_mixture: true
   fallback_to_heuristic: true
   statistics_smoothing_alpha: 0.5
@@ -54,18 +56,23 @@ reward_model:
   enable_uncertainty_reduction: true
   enable_competitor_elimination_bonus: true
   enable_discriminative_support_bonus: true
+  enable_alternative_preservation_bonus: true
   enable_acceptance_risk_penalty: true
-  belief_top_k_hypotheses: 3
+  # belief-aware reward 也默认保留 top-5 belief，避免 surrogate posterior 过早塌缩。
+  belief_top_k_hypotheses: 5
   margin_gain_weight: 0.32
-  top3_separation_weight: 0.24
+  top3_separation_weight: 0.22
   uncertainty_reduction_weight: 0.28
-  competitor_elimination_weight: 0.26
-  discriminative_support_weight: 0.18
+  competitor_elimination_weight: 0.22
+  discriminative_support_weight: 0.14
+  alternative_preservation_weight: 0.12
   acceptance_risk_weight: 0.16
   branch_likelihood_floor: 0.05
   min_branch_support_count: 3.0
   low_value_high_cost_penalty_multiplier: 1.15
   detail_non_discriminative_penalty: 0.05
+  # posterior surrogate 使用 prior 与 raw posterior 的软插值，减少一轮更新直接压扁 Top-3。
+  posterior_update_alpha: 0.65
 
 # acceptance calibration 只做 verifier 之后的轻量 proxy guard，
 # 不改 verifier / repair 的整体职责边界。
@@ -111,10 +118,11 @@ path_evaluation:
   low_anchor_single_group_score_cap: 0.62
   enable_scope_penalty_in_final_score: true
   enable_discriminative_answer_bonus: true
-  discriminative_answer_bonus_weight: 0.08
-  competitor_suppression_bonus_weight: 0.07
-  rank_stability_bonus_weight: 0.05
-  discriminative_support_bonus_weight: 0.05
+  discriminative_answer_bonus_weight: 0.06
+  competitor_suppression_bonus_weight: 0.05
+  rank_stability_bonus_weight: 0.04
+  discriminative_support_bonus_weight: 0.04
+  top3_coverage_stability_bonus_weight: 0.04
 
 a1:
   use_llm_extractor: true

@@ -224,6 +224,7 @@ class SimulationEngine:
         branch_estimates: list[dict] = []
         expected_reward = 0.0
         discriminative_action_bonus = 0.0
+        alternative_preservation_action_bonus = 0.0
         positive_reward = 0.0
         negative_reward = 0.0
         doubtful_reward = 0.0
@@ -245,9 +246,15 @@ class SimulationEngine:
                 branch=branch,
                 reward_breakdown=reward_evaluation.metadata,
             )
-            selection_score = weighted_reward + discriminative_branch_bonus
+            alternative_preservation_branch_bonus = self._estimate_branch_alternative_preservation_bonus(
+                action=action,
+                branch=branch,
+                reward_breakdown=reward_evaluation.metadata,
+            )
+            selection_score = weighted_reward + discriminative_branch_bonus + alternative_preservation_branch_bonus
             expected_reward += weighted_reward
             discriminative_action_bonus += discriminative_branch_bonus
+            alternative_preservation_action_bonus += alternative_preservation_branch_bonus
             branch_estimates.append(
                 {
                     "branch": branch.branch_name,
@@ -256,6 +263,7 @@ class SimulationEngine:
                     "weighted_reward": weighted_reward,
                     "selection_score": selection_score,
                     "discriminative_branch_bonus": discriminative_branch_bonus,
+                    "alternative_preservation_branch_bonus": alternative_preservation_branch_bonus,
                     "polarity": branch.polarity,
                     "resolution": branch.resolution,
                     "transition_metadata": dict(branch.metadata),
@@ -269,7 +277,7 @@ class SimulationEngine:
             elif branch.branch_name == "doubtful":
                 doubtful_reward = reward
 
-        expected_reward += discriminative_action_bonus
+        expected_reward += discriminative_action_bonus + alternative_preservation_action_bonus
         probability_map = {
             str(item["branch"]): float(item["probability"])
             for item in branch_estimates
@@ -294,8 +302,15 @@ class SimulationEngine:
                 "doubtful_branch_reward": doubtful_reward,
                 "relation_type": str(action.metadata.get("relation_type", "")),
                 "branch_estimates": branch_estimates,
-                "expected_reward_raw": round(expected_reward - discriminative_action_bonus, 4),
+                "expected_reward_raw": round(
+                    expected_reward - discriminative_action_bonus - alternative_preservation_action_bonus,
+                    4,
+                ),
                 "discriminative_action_bonus": round(discriminative_action_bonus, 4),
+                "alternative_preservation_action_bonus": round(
+                    alternative_preservation_action_bonus,
+                    4,
+                ),
                 "competitor_coverage_bonus": round(competitor_coverage_bonus, 4),
                 "transition_model_type": self.config.transition_model_type,
                 "reward_model_type": self.config.reward_model_type,
@@ -672,6 +687,9 @@ class SimulationEngine:
                         "discriminative_branch_bonus": float(
                             item.get("discriminative_branch_bonus", 0.0) or 0.0
                         ),
+                        "alternative_preservation_branch_bonus": float(
+                            item.get("alternative_preservation_branch_bonus", 0.0) or 0.0
+                        ),
                         "pending_action_result": self._build_pending_action_result_from_branch(
                             action,
                             branch_name=branch_name,
@@ -818,6 +836,7 @@ class SimulationEngine:
         competitor_eliminations: list[float] = []
         discriminative_supports: list[float] = []
         competitor_coverages: list[float] = []
+        alternative_preservations: list[float] = []
 
         for payload in branch_payloads:
             breakdown = payload.get("reward_breakdown", {})
@@ -831,6 +850,7 @@ class SimulationEngine:
             competitor_elimination = breakdown.get("competitor_elimination_surrogate")
             discriminative_support = breakdown.get("discriminative_support_quality")
             competitor_coverage = breakdown.get("competitor_coverage_surrogate")
+            alternative_preservation = breakdown.get("alternative_preservation_quality")
             if isinstance(belief_margin, (int, float)):
                 belief_margins.append(float(belief_margin))
             if isinstance(uncertainty_reduction, (int, float)):
@@ -847,6 +867,8 @@ class SimulationEngine:
                 discriminative_supports.append(float(discriminative_support))
             if isinstance(competitor_coverage, (int, float)):
                 competitor_coverages.append(float(competitor_coverage))
+            if isinstance(alternative_preservation, (int, float)):
+                alternative_preservations.append(float(alternative_preservation))
 
         if (
             len(belief_margins) == 0
@@ -855,6 +877,7 @@ class SimulationEngine:
             and len(support_qualities) == 0
             and len(top3_separation_gains) == 0
             and len(competitor_eliminations) == 0
+            and len(alternative_preservations) == 0
         ):
             return {}
 
@@ -893,6 +916,10 @@ class SimulationEngine:
             ),
             "competitor_coverage_proxy": round(
                 sum(competitor_coverages) / max(len(competitor_coverages), 1),
+                4,
+            ),
+            "alternative_preservation_proxy": round(
+                sum(alternative_preservations) / max(len(alternative_preservations), 1),
                 4,
             ),
             "branch_consistency_score": round(branch_consistency_score, 4),
@@ -1013,6 +1040,28 @@ class SimulationEngine:
             and competitor_elimination < 0.03
         ):
             bonus -= probability * 0.045
+        return bonus
+
+    # 在 root / rollout 分支选择时，额外偏好“拉开差距但不过度清空高质量备选”的回答分支。
+    def _estimate_branch_alternative_preservation_bonus(
+        self,
+        *,
+        action: MctsAction,
+        branch: TransitionBranch,
+        reward_breakdown: dict,
+    ) -> float:
+        if not self._uses_modular_v2() or not isinstance(reward_breakdown, dict):
+            return 0.0
+
+        preservation_quality = float(reward_breakdown.get("alternative_preservation_quality", 0.0) or 0.0)
+        overcompression_penalty = float(
+            reward_breakdown.get("alternative_preservation_overcompression_penalty", 0.0) or 0.0
+        )
+        probability = max(float(branch.probability), 0.0)
+        question_type_hint = str(action.metadata.get("question_type_hint", "") or "")
+        bonus = probability * max(preservation_quality * 0.1 - overcompression_penalty * 0.06, 0.0)
+        if question_type_hint == "detail" and preservation_quality < 0.32:
+            bonus *= 0.7
         return bonus
 
     # 从树节点元数据中提取当前动作。

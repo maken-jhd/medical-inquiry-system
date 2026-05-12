@@ -26,7 +26,7 @@ class MctsConfig:
     max_child_nodes: int = 4
     discount_factor: float = 1.0
     max_kg_triplets: int = 15
-    discriminative_gain_weight: float = 0.12
+    discriminative_gain_weight: float = 0.1
 
 
 class MctsEngine:

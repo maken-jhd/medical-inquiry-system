@@ -35,23 +35,26 @@ class RolloutRewardModelConfig:
     negative_resolution_penalty: float = 0.08
     context_match_bonus: float = 0.1
     risk_context_bonus: float = 0.05
-    belief_top_k_hypotheses: int = 3
+    belief_top_k_hypotheses: int = 5
     enable_belief_margin_gain: bool = True
     enable_top3_separation_gain: bool = True
     enable_uncertainty_reduction: bool = True
     enable_competitor_elimination_bonus: bool = True
     enable_discriminative_support_bonus: bool = True
+    enable_alternative_preservation_bonus: bool = True
     enable_acceptance_risk_penalty: bool = True
     margin_gain_weight: float = 0.32
-    top3_separation_weight: float = 0.24
+    top3_separation_weight: float = 0.22
     uncertainty_reduction_weight: float = 0.28
-    competitor_elimination_weight: float = 0.26
-    discriminative_support_weight: float = 0.18
+    competitor_elimination_weight: float = 0.22
+    discriminative_support_weight: float = 0.14
+    alternative_preservation_weight: float = 0.12
     acceptance_risk_weight: float = 0.16
     branch_likelihood_floor: float = 0.05
     min_branch_support_count: float = 3.0
     low_value_high_cost_penalty_multiplier: float = 1.15
     detail_non_discriminative_penalty: float = 0.05
+    posterior_update_alpha: float = 0.65
 
     # 默认关系加成仍沿用 legacy heuristic 的基本分组。
     def __post_init__(self) -> None:
@@ -242,6 +245,11 @@ class BeliefAwareRolloutRewardModel(HeuristicRolloutRewardModel):
             if self.config.enable_discriminative_support_bonus
             else 0.0
         )
+        alternative_preservation_bonus = (
+            confidence_shift["alternative_preservation_quality"] * self.config.alternative_preservation_weight
+            if self.config.enable_alternative_preservation_bonus
+            else 0.0
+        )
         hypothesis_alignment = confidence_shift["hypothesis_alignment"] * self.config.hypothesis_alignment_weight
         contradiction_signal = contradiction_priority * self.config.contradiction_signal_weight
         if branch.polarity == "present":
@@ -281,6 +289,7 @@ class BeliefAwareRolloutRewardModel(HeuristicRolloutRewardModel):
             + uncertainty_reduction
             + competitor_elimination_bonus
             + discriminative_support_bonus
+            + alternative_preservation_bonus
             + hypothesis_alignment
             + contradiction_signal
             + context_bonus
@@ -313,6 +322,12 @@ class BeliefAwareRolloutRewardModel(HeuristicRolloutRewardModel):
                 "competitor_coverage_surrogate": round(confidence_shift["competitor_coverage"], 4),
                 "competitor_suppressed_ids": list(confidence_shift["suppressed_competitor_ids"]),
                 "discriminative_support_quality": round(confidence_shift["discriminative_support_quality"], 4),
+                "alternative_preservation_quality": round(confidence_shift["alternative_preservation_quality"], 4),
+                "alternative_preservation_overcompression_penalty": round(
+                    confidence_shift["alternative_overcompression_penalty"],
+                    4,
+                ),
+                "alternative_preservation_bonus": round(alternative_preservation_bonus, 4),
                 "hypothesis_alignment": round(hypothesis_alignment, 4),
                 "contradiction_signal": round(contradiction_signal, 4),
                 "turn_cost": round(turn_cost, 4),
@@ -333,6 +348,7 @@ class BeliefAwareRolloutRewardModel(HeuristicRolloutRewardModel):
                 "posterior_top1_weight": round(confidence_shift["posterior_top1_weight"], 4),
                 "posterior_top2_weight": round(confidence_shift["posterior_top2_weight"], 4),
                 "posterior_top3_weight": round(confidence_shift["posterior_top3_weight"], 4),
+                "prior_top3_weight": round(confidence_shift["prior_top3_weight"], 4),
                 "focus_disease_id": confidence_shift["focus_disease_id"],
                 "focus_disease_prior_weight": round(confidence_shift["focus_prior_weight"], 4),
                 "focus_disease_posterior_weight": round(confidence_shift["focus_posterior_weight"], 4),
@@ -400,6 +416,16 @@ class BeliefAwareRolloutRewardModel(HeuristicRolloutRewardModel):
             posterior_weights=posterior_weights,
             focus_disease_id=focus_disease_id,
         )
+        alternative_preservation_quality, alternative_overcompression_penalty = (
+            self._estimate_alternative_preservation_quality(
+                prior_top3_weight=prior_top3_weight,
+                posterior_top3_weight=posterior_top3_weight,
+                margin_gain=posterior_margin - prior_margin,
+                top3_separation_gain=posterior_top3_separation - prior_top3_separation,
+                competitor_elimination_gain=competitor_elimination_gain,
+                suppressed_competitor_ids=suppressed_competitor_ids,
+            )
+        )
         top1_confidence_gain = max(posterior_top1_weight - prior_top1_weight, 0.0)
         answer_switch_risk = (
             0.08
@@ -440,11 +466,14 @@ class BeliefAwareRolloutRewardModel(HeuristicRolloutRewardModel):
             "posterior_top1_weight": posterior_top1_weight,
             "posterior_top2_weight": posterior_top2_weight,
             "posterior_top3_weight": posterior_top3_weight,
+            "prior_top3_weight": prior_top3_weight,
             "branch_support_quality": branch_support_quality,
             "discriminative_support_quality": discriminative_support_quality,
             "competitor_elimination_gain": competitor_elimination_gain,
             "competitor_coverage": competitor_coverage,
             "suppressed_competitor_ids": suppressed_competitor_ids,
+            "alternative_preservation_quality": alternative_preservation_quality,
+            "alternative_overcompression_penalty": alternative_overcompression_penalty,
             "acceptance_risk_proxy": acceptance_risk_proxy,
         }
 
@@ -518,7 +547,11 @@ class BeliefAwareRolloutRewardModel(HeuristicRolloutRewardModel):
         action: MctsAction,
         branch: TransitionBranch,
     ) -> dict[str, float]:
-        posterior_weights: dict[str, float] = {}
+        prior_weights = {
+            item.disease_id: max(float(item.weight), 0.0)
+            for item in prior_belief
+        }
+        raw_posterior_weights: dict[str, float] = {}
 
         for belief_item in prior_belief:
             likelihood = self._resolve_branch_likelihood(
@@ -526,15 +559,27 @@ class BeliefAwareRolloutRewardModel(HeuristicRolloutRewardModel):
                 action=action,
                 branch=branch,
             )
-            posterior_weights[belief_item.disease_id] = max(float(belief_item.weight), 0.0) * likelihood
+            raw_posterior_weights[belief_item.disease_id] = max(float(belief_item.weight), 0.0) * likelihood
 
-        total = sum(posterior_weights.values())
+        total = sum(raw_posterior_weights.values())
         if total <= 0.0:
-            return {item.disease_id: float(item.weight) for item in prior_belief}
+            return prior_weights
 
-        return {
+        normalized_raw = {
             disease_id: weight / total
-            for disease_id, weight in posterior_weights.items()
+            for disease_id, weight in raw_posterior_weights.items()
+        }
+        alpha = max(min(float(self.config.posterior_update_alpha), 1.0), 0.0)
+        blended = {
+            disease_id: prior_weights.get(disease_id, 0.0) * (1.0 - alpha) + normalized_raw.get(disease_id, 0.0) * alpha
+            for disease_id in set(prior_weights) | set(normalized_raw)
+        }
+        blended_total = sum(max(weight, 0.0) for weight in blended.values())
+        if blended_total <= 0.0:
+            return prior_weights
+        return {
+            disease_id: max(weight, 0.0) / blended_total
+            for disease_id, weight in blended.items()
         }
 
     def _resolve_branch_likelihood(
@@ -737,6 +782,53 @@ class BeliefAwareRolloutRewardModel(HeuristicRolloutRewardModel):
             + max(float(confidence_shift["discriminative_support_quality"]), 0.0) * 0.22
         )
         return max(min(discriminative_pressure, 0.55), 0.0)
+
+    # 既奖励“第一名更清晰”，也避免一轮 surrogate 更新把高质量备选全部压没。
+    def _estimate_alternative_preservation_quality(
+        self,
+        *,
+        prior_top3_weight: float,
+        posterior_top3_weight: float,
+        margin_gain: float,
+        top3_separation_gain: float,
+        competitor_elimination_gain: float,
+        suppressed_competitor_ids: Sequence[str],
+    ) -> tuple[float, float]:
+        if prior_top3_weight <= 1e-6:
+            tail_retention_quality = 1.0
+        else:
+            tail_retention_quality = max(
+                min(posterior_top3_weight / prior_top3_weight, 1.0),
+                0.0,
+            )
+
+        margin_signal = max(margin_gain, 0.0) + max(top3_separation_gain, 0.0) * 0.75
+        margin_quality = max(min(margin_signal / 0.18, 1.0), 0.0)
+        moderated_elimination_quality = 1.0 - max(
+            min(max(competitor_elimination_gain - 0.28, 0.0) / 0.32, 1.0),
+            0.0,
+        )
+        multi_suppression_penalty = 0.12 if len(suppressed_competitor_ids) >= 2 else 0.0
+        alternative_overcompression_penalty = max(
+            min(
+                max(competitor_elimination_gain - 0.3, 0.0) * 0.8
+                + max(0.45 - tail_retention_quality, 0.0) * 0.55
+                + multi_suppression_penalty,
+                1.0,
+            ),
+            0.0,
+        )
+        alternative_preservation_quality = max(
+            min(
+                tail_retention_quality * 0.46
+                + margin_quality * 0.32
+                + moderated_elimination_quality * 0.22
+                - alternative_overcompression_penalty * 0.4,
+                1.0,
+            ),
+            0.0,
+        )
+        return alternative_preservation_quality, alternative_overcompression_penalty
 
 
 def _normalize_belief_weights(belief: Sequence[HypothesisBeliefWeight]) -> list[HypothesisBeliefWeight]:

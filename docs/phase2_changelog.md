@@ -6513,6 +6513,48 @@ python -m py_compile brain/simulation_engine.py brain/trajectory_evaluator.py br
 - 第 `4` 章整体语气较此前更加正式，更接近毕业论文正文的写作风格
 - 章节结构、图号和图注体系保持不变，可继续直接用于后续论文整合
 
+## 六十七、2026-05-12：缓解 belief-aware 主线的 Top-1 / Top-3 trade-off
+
+### 本次目标
+
+- 保持当前 `modular_v2 + statistical transition + belief-aware reward + relaxed calibration` 主线可运行
+- 不引入 learned transition model，也不继续扩大 acceptance 改造范围
+- 在尽量保住 Top-1 提升的前提下，恢复 `Top-3 hypothesis hit`
+
+### 本次更新
+
+- 更新：
+  - [brain/reward_model.py](/Users/loki/Workspace/GraduationDesign/brain/reward_model.py)
+  - [brain/simulation_engine.py](/Users/loki/Workspace/GraduationDesign/brain/simulation_engine.py)
+  - [brain/trajectory_evaluator.py](/Users/loki/Workspace/GraduationDesign/brain/trajectory_evaluator.py)
+  - [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - [brain/response_transition_model.py](/Users/loki/Workspace/GraduationDesign/brain/response_transition_model.py)
+  - [brain/mcts_engine.py](/Users/loki/Workspace/GraduationDesign/brain/mcts_engine.py)
+  - [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml)
+  - [configs/brain_benchmark_modular_v2_statistical_belief_aware_relaxed.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain_benchmark_modular_v2_statistical_belief_aware_relaxed.yaml)
+  - [brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
+  - [tests/README.md](/Users/loki/Workspace/GraduationDesign/tests/README.md)
+  - [tests/test_belief_aware_reward_model.py](/Users/loki/Workspace/GraduationDesign/tests/test_belief_aware_reward_model.py)
+  - [tests/test_simulation_engine.py](/Users/loki/Workspace/GraduationDesign/tests/test_simulation_engine.py)
+  - [tests/test_trajectory_evaluator.py](/Users/loki/Workspace/GraduationDesign/tests/test_trajectory_evaluator.py)
+  - [tests/test_service_config.py](/Users/loki/Workspace/GraduationDesign/tests/test_service_config.py)
+
+### 具体改动
+
+- 将 statistical / reward side 的 belief top-k 默认放宽到 `5`，减少正确候选在第 `4/5` 位时被过早截断
+- 为 belief-aware reward 增加 `posterior_update_alpha`，让 surrogate posterior 改为 `prior` 与 raw posterior 的软插值更新
+- 新增 `alternative_preservation_bonus` 与过压缩惩罚，奖励“拉开 Top-1 但仍保住健康 Top-3”的分支
+- 在 `SimulationEngine` 中把 preservation bonus 接入 branch selection score，并把对应 proxy 写入 trajectory metadata
+- 在 `TrajectoryEvaluator` 中下调过强的 suppressive bonus，同时加入 `top3_coverage_stability_bonus`
+- 更新默认配置与 relaxed benchmark 配置，显式开启 top-k=5、soft posterior 和 preservation-aware 平衡项
+- 补充针对 top-k、posterior alpha、preservation bonus 和 final answer 排序平衡的单元测试
+
+### 结果影响
+
+- 当前主线仍然保持 statistical transition + belief-aware reward 的轻量可解释结构
+- 本轮重点从“继续把第一名做尖”切换为“控制压缩强度，恢复高质量前三候选覆盖”
+- learned transition model 仍然保留为后续可选方向，而不是当前优先级
+
 ## 六十六、2026-05-11：按章节边界建议重构第 4 章，弱化方法复述并强化系统组织
 
 ### 本次目标

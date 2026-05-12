@@ -2,7 +2,11 @@
 
 from brain.action_builder import ActionBuilder
 from brain.hypothesis_manager import HypothesisManager
-from brain.response_transition_model import ResponseTransitionModelConfig, StatisticalResponseTransitionModel
+from brain.response_transition_model import (
+    ResponseTransitionModelConfig,
+    StatisticalResponseTransitionModel,
+    TransitionBranch,
+)
 from brain.reward_model import BeliefAwareRolloutRewardModel, HeuristicRolloutRewardModel, RolloutRewardModelConfig
 from brain.router import ReasoningRouter
 from brain.simulation_engine import SimulationConfig, SimulationEngine
@@ -379,8 +383,10 @@ def test_simulation_engine_supports_belief_aware_reward_with_statistical_transit
     assert "top1_top3_separation_gain_surrogate" in positive_branch["reward_breakdown"]
     assert "competitor_elimination_surrogate" in positive_branch["reward_breakdown"]
     assert "acceptance_risk_proxy" in positive_branch["reward_breakdown"]
+    assert "alternative_preservation_quality" in positive_branch["reward_breakdown"]
     assert "selection_score" in positive_branch
     assert belief_outcome.metadata["discriminative_action_bonus"] >= 0.0
+    assert belief_outcome.metadata["alternative_preservation_action_bonus"] >= 0.0
     assert belief_outcome.metadata["competitor_coverage_bonus"] >= 0.0
     assert belief_outcome.positive_branch_reward != heuristic_outcome.positive_branch_reward
 
@@ -529,3 +535,47 @@ def test_simulation_engine_prefers_more_discriminative_branch_when_selection_sco
     selected = engine._select_best_branch_payload(branch_payloads, "a_branch")
 
     assert selected["branch"] == "negative"
+
+
+# alternative preservation bonus 应真正参与分支选择，而不是只停留在 reward breakdown 里。
+def test_simulation_engine_alternative_preservation_bonus_prefers_healthier_top3_branch() -> None:
+    engine = SimulationEngine(
+        SimulationConfig(
+            search_impl="modular_v2",
+            branch_selection_mode="greedy",
+        )
+    )
+    action = MctsAction(
+        action_id="verify::preservation",
+        action_type="verify_evidence",
+        target_node_id="slot_cough",
+        target_node_label="ClinicalFinding",
+        target_node_name="干咳",
+        metadata={"question_type_hint": "symptom"},
+    )
+    branch = TransitionBranch(
+        branch_name="positive",
+        probability=0.58,
+        polarity="present",
+        resolution="clear",
+        metadata={},
+    )
+
+    healthy_bonus = engine._estimate_branch_alternative_preservation_bonus(
+        action=action,
+        branch=branch,
+        reward_breakdown={
+            "alternative_preservation_quality": 0.68,
+            "alternative_preservation_overcompression_penalty": 0.04,
+        },
+    )
+    collapsed_bonus = engine._estimate_branch_alternative_preservation_bonus(
+        action=action,
+        branch=branch,
+        reward_breakdown={
+            "alternative_preservation_quality": 0.14,
+            "alternative_preservation_overcompression_penalty": 0.42,
+        },
+    )
+
+    assert healthy_bonus > collapsed_bonus

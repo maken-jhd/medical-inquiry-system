@@ -68,6 +68,7 @@ def test_trajectory_evaluator_prefers_discriminative_answer_group_when_base_scor
                 "competitor_elimination_proxy": 0.01,
                 "discriminative_support_quality": 0.2,
                 "competitor_coverage_proxy": 0.0,
+                "alternative_preservation_proxy": 0.42,
             },
         ),
         ReasoningTrajectory(
@@ -87,6 +88,7 @@ def test_trajectory_evaluator_prefers_discriminative_answer_group_when_base_scor
                 "competitor_elimination_proxy": 0.26,
                 "discriminative_support_quality": 0.62,
                 "competitor_coverage_proxy": 0.5,
+                "alternative_preservation_proxy": 0.58,
             },
         ),
     ]
@@ -99,6 +101,72 @@ def test_trajectory_evaluator_prefers_discriminative_answer_group_when_base_scor
     assert best.answer_id == "d2"
     assert strong.metadata["discriminative_answer_bonus"] > 0.0
     assert strong.metadata["competitor_elimination_proxy"] > 0.0
+    assert strong.metadata["top3_coverage_stability_bonus"] > 0.0
+
+
+# final answer aggregation 不应永远偏好“最尖锐”的答案组；覆盖更健康的 Top-3 也应得到奖励。
+def test_trajectory_evaluator_does_not_always_prefer_sharpest_answer_group() -> None:
+    evaluator = TrajectoryEvaluator(
+        TrajectoryEvaluatorConfig(
+            enable_discriminative_answer_bonus=True,
+            discriminative_answer_bonus_weight=0.06,
+            competitor_suppression_bonus_weight=0.03,
+            rank_stability_bonus_weight=0.04,
+            discriminative_support_bonus_weight=0.04,
+            top3_coverage_stability_bonus_weight=0.08,
+        )
+    )
+    trajectories = [
+        ReasoningTrajectory(
+            trajectory_id="t_sharp",
+            final_answer_id="d1",
+            final_answer_name="尖锐候选",
+            steps=[{"action_name": "病原学阳性"}],
+            score=0.74,
+            metadata={
+                "reward_confidence_proxy_source": "trajectory_reward_proxy",
+                "belief_margin_proxy": 0.22,
+                "uncertainty_reduction_proxy": 0.14,
+                "acceptance_risk_proxy": 0.07,
+                "branch_support_quality": 0.59,
+                "branch_consistency_score": 0.72,
+                "top1_top3_separation_proxy": 0.23,
+                "competitor_elimination_proxy": 0.48,
+                "discriminative_support_quality": 0.64,
+                "competitor_coverage_proxy": 0.6,
+                "alternative_preservation_proxy": 0.08,
+            },
+        ),
+        ReasoningTrajectory(
+            trajectory_id="t_balanced",
+            final_answer_id="d2",
+            final_answer_name="平衡候选",
+            steps=[{"action_name": "低氧血症"}],
+            score=0.74,
+            metadata={
+                "reward_confidence_proxy_source": "trajectory_reward_proxy",
+                "belief_margin_proxy": 0.19,
+                "uncertainty_reduction_proxy": 0.13,
+                "acceptance_risk_proxy": 0.08,
+                "branch_support_quality": 0.58,
+                "branch_consistency_score": 0.76,
+                "top1_top3_separation_proxy": 0.16,
+                "competitor_elimination_proxy": 0.18,
+                "discriminative_support_quality": 0.58,
+                "competitor_coverage_proxy": 0.25,
+                "alternative_preservation_proxy": 0.66,
+            },
+        ),
+    ]
+
+    scores = evaluator.score_groups(evaluator.group_by_answer(trajectories))
+    best = evaluator.select_best_answer(scores)
+    balanced = next(item for item in scores if item.answer_id == "d2")
+    sharp = next(item for item in scores if item.answer_id == "d1")
+
+    assert best is not None
+    assert best.answer_id == "d2"
+    assert balanced.metadata["top3_coverage_stability_bonus"] > sharp.metadata["top3_coverage_stability_bonus"]
 
 
 # 真实 observed anchor 应该能修正 rollout 路径分数，避免只靠模拟阳性把错误答案顶到最前。

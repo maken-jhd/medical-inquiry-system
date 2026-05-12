@@ -30,6 +30,42 @@ def _candidate_hypotheses() -> list[HypothesisScore]:
     ]
 
 
+def _candidate_hypotheses_top5() -> list[HypothesisScore]:
+    return [
+        *_candidate_hypotheses(),
+        HypothesisScore(
+            node_id="cmv",
+            label="Disease",
+            name="巨细胞病毒肺炎",
+            score=0.29,
+            metadata={
+                "evidence_node_ids": ["lab_ldh", "path_cmv"],
+                "relation_types": ["HAS_LAB_FINDING", "HAS_PATHOGEN"],
+            },
+        ),
+        HypothesisScore(
+            node_id="crypto",
+            label="Disease",
+            name="隐球菌感染",
+            score=0.21,
+            metadata={
+                "evidence_node_ids": ["path_crypto"],
+                "relation_types": ["HAS_PATHOGEN"],
+            },
+        ),
+        HypothesisScore(
+            node_id="bacterial",
+            label="Disease",
+            name="细菌性肺炎",
+            score=0.15,
+            metadata={
+                "evidence_node_ids": ["slot_fever"],
+                "relation_types": ["MANIFESTS_AS"],
+            },
+        ),
+    ]
+
+
 def _verify_components() -> list[dict]:
     return [
         {
@@ -82,6 +118,76 @@ def _exam_components() -> list[dict]:
             "done_negative_probability": 0.33,
             "done_unclear_probability": 0.18,
             "not_done_probability": 0.27,
+        },
+    ]
+
+
+def _top3_preserved_components() -> list[dict]:
+    return [
+        {
+            "disease_id": "pcp",
+            "weight": 0.43,
+            "raw_score": 0.43,
+            "backoff_level": "disease_family_question_type",
+            "total_count": 12.0,
+            "present_probability": 0.84,
+            "absent_probability": 0.07,
+            "unclear_probability": 0.09,
+        },
+        {
+            "disease_id": "tb",
+            "weight": 0.29,
+            "raw_score": 0.29,
+            "backoff_level": "disease_family_question_type",
+            "total_count": 10.0,
+            "present_probability": 0.43,
+            "absent_probability": 0.37,
+            "unclear_probability": 0.20,
+        },
+        {
+            "disease_id": "cmv",
+            "weight": 0.18,
+            "raw_score": 0.18,
+            "backoff_level": "disease_family_question_type",
+            "total_count": 8.0,
+            "present_probability": 0.36,
+            "absent_probability": 0.38,
+            "unclear_probability": 0.26,
+        },
+    ]
+
+
+def _top3_collapsed_components() -> list[dict]:
+    return [
+        {
+            "disease_id": "pcp",
+            "weight": 0.43,
+            "raw_score": 0.43,
+            "backoff_level": "disease_family_question_type",
+            "total_count": 12.0,
+            "present_probability": 0.9,
+            "absent_probability": 0.04,
+            "unclear_probability": 0.06,
+        },
+        {
+            "disease_id": "tb",
+            "weight": 0.29,
+            "raw_score": 0.29,
+            "backoff_level": "disease_family_question_type",
+            "total_count": 10.0,
+            "present_probability": 0.08,
+            "absent_probability": 0.7,
+            "unclear_probability": 0.22,
+        },
+        {
+            "disease_id": "cmv",
+            "weight": 0.18,
+            "raw_score": 0.18,
+            "backoff_level": "disease_family_question_type",
+            "total_count": 8.0,
+            "present_probability": 0.05,
+            "absent_probability": 0.68,
+            "unclear_probability": 0.27,
         },
     ]
 
@@ -379,3 +485,153 @@ def test_belief_aware_reward_penalizes_non_discriminative_detail_action() -> Non
     assert symptom_result.reward > detail_result.reward
     assert detail_result.metadata["discriminative_support_quality"] < symptom_result.metadata["discriminative_support_quality"]
     assert symptom_result.metadata["competitor_elimination_surrogate"] >= 0.0
+
+
+# belief-aware reward 应支持用 top-5 prior belief 保留更多边缘候选，而不是默认截到 top-3。
+def test_belief_aware_reward_builds_top5_prior_belief() -> None:
+    model = BeliefAwareRolloutRewardModel(
+        RolloutRewardModelConfig(model_type="belief_aware_v1", belief_top_k_hypotheses=5)
+    )
+    action = MctsAction(
+        action_id="verify::top5",
+        action_type="verify_evidence",
+        target_node_id="slot_cough",
+        target_node_label="ClinicalFinding",
+        target_node_name="干咳",
+        prior_score=1.6,
+        metadata={"relation_type": "MANIFESTS_AS", "question_type_hint": "symptom"},
+    )
+    prior_belief = model._build_prior_belief(
+        branch=TransitionBranch(
+            branch_name="positive",
+            probability=0.6,
+            polarity="present",
+            resolution="clear",
+            metadata={},
+        ),
+        candidate_hypotheses=_candidate_hypotheses_top5(),
+        primary_hypothesis=None,
+        action=action,
+    )
+
+    assert len(prior_belief) == 5
+    assert abs(sum(item.weight for item in prior_belief) - 1.0) < 1e-6
+    assert prior_belief[-1].disease_id == "bacterial"
+
+
+# posterior_update_alpha 越高，belief 更新应越尖锐；越低则越保守。
+def test_belief_aware_reward_posterior_update_alpha_controls_sharpness() -> None:
+    action = MctsAction(
+        action_id="verify::alpha",
+        action_type="verify_evidence",
+        target_node_id="slot_cough",
+        target_node_label="ClinicalFinding",
+        target_node_name="干咳",
+        prior_score=1.7,
+        metadata={"relation_type": "MANIFESTS_AS", "question_type_hint": "symptom"},
+    )
+    branch = TransitionBranch(
+        branch_name="positive",
+        probability=0.62,
+        polarity="present",
+        resolution="clear",
+        metadata={
+            "source": "statistical",
+            "branch_schema": "verify",
+            "belief_components": _top3_collapsed_components(),
+        },
+    )
+    candidates = _candidate_hypotheses_top5()[:3]
+    conservative = BeliefAwareRolloutRewardModel(
+        RolloutRewardModelConfig(
+            model_type="belief_aware_v1",
+            belief_top_k_hypotheses=5,
+            posterior_update_alpha=0.35,
+        )
+    )
+    aggressive = BeliefAwareRolloutRewardModel(
+        RolloutRewardModelConfig(
+            model_type="belief_aware_v1",
+            belief_top_k_hypotheses=5,
+            posterior_update_alpha=0.9,
+        )
+    )
+
+    conservative_shift = conservative.estimate_branch_confidence_shift(
+        session_state=SessionState(session_id="s_alpha_lo"),
+        action=action,
+        branch=branch,
+        candidate_hypotheses=candidates,
+    )
+    aggressive_shift = aggressive.estimate_branch_confidence_shift(
+        session_state=SessionState(session_id="s_alpha_hi"),
+        action=action,
+        branch=branch,
+        candidate_hypotheses=candidates,
+    )
+
+    assert aggressive_shift["posterior_margin"] > conservative_shift["posterior_margin"]
+    assert aggressive_shift["posterior_top3_weight"] < conservative_shift["posterior_top3_weight"]
+
+
+# alternative preservation bonus 应偏好“拉开第一名但保留健康 Top-3”的分支，而不是只奖励把竞争者全部压没。
+def test_belief_aware_reward_rewards_alternative_preservation() -> None:
+    model = BeliefAwareRolloutRewardModel(
+        RolloutRewardModelConfig(
+            model_type="belief_aware_v1",
+            belief_top_k_hypotheses=5,
+            enable_alternative_preservation_bonus=True,
+            alternative_preservation_weight=0.16,
+        )
+    )
+    state = SessionState(session_id="s_preservation")
+    action = MctsAction(
+        action_id="verify::preservation",
+        action_type="verify_evidence",
+        target_node_id="slot_cough",
+        target_node_label="ClinicalFinding",
+        target_node_name="干咳",
+        prior_score=1.8,
+        metadata={
+            "relation_type": "MANIFESTS_AS",
+            "question_type_hint": "symptom",
+            "discriminative_gain": 0.9,
+        },
+    )
+    candidates = _candidate_hypotheses_top5()[:3]
+    preserved = model.evaluate_branch(
+        session_state=state,
+        action=action,
+        branch=TransitionBranch(
+            branch_name="positive",
+            probability=0.6,
+            polarity="present",
+            resolution="clear",
+            metadata={
+                "source": "statistical",
+                "branch_schema": "verify",
+                "belief_components": _top3_preserved_components(),
+            },
+        ),
+        candidate_hypotheses=candidates,
+    )
+    collapsed = model.evaluate_branch(
+        session_state=state,
+        action=action,
+        branch=TransitionBranch(
+            branch_name="positive",
+            probability=0.6,
+            polarity="present",
+            resolution="clear",
+            metadata={
+                "source": "statistical",
+                "branch_schema": "verify",
+                "belief_components": _top3_collapsed_components(),
+            },
+        ),
+        candidate_hypotheses=candidates,
+    )
+
+    assert preserved.metadata["alternative_preservation_quality"] > collapsed.metadata["alternative_preservation_quality"]
+    assert preserved.metadata["alternative_preservation_bonus"] > collapsed.metadata["alternative_preservation_bonus"]
+    assert collapsed.metadata["alternative_preservation_overcompression_penalty"] > 0.0
