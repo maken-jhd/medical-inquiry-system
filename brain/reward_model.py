@@ -55,6 +55,14 @@ class RolloutRewardModelConfig:
     low_value_high_cost_penalty_multiplier: float = 1.15
     detail_non_discriminative_penalty: float = 0.05
     posterior_update_alpha: float = 0.65
+    enable_stage_aware_coverage_control: bool = True
+    early_stage_turn_cutoff: int = 2
+    stage_aware_entropy_threshold: float = 0.62
+    stage_aware_margin_threshold: float = 0.14
+    early_narrow_evidence_penalty_weight: float = 0.08
+    early_broad_coverage_bonus_weight: float = 0.06
+    early_over_collapse_penalty_weight: float = 0.08
+    stage_aware_competitor_elimination_scale: float = 0.58
 
     # 默认关系加成仍沿用 legacy heuristic 的基本分组。
     def __post_init__(self) -> None:
@@ -213,6 +221,10 @@ class BeliefAwareRolloutRewardModel(HeuristicRolloutRewardModel):
             primary_hypothesis=primary_hypothesis,
             candidate_hypotheses=candidate_hypotheses,
         )
+        stage_awareness = self._estimate_stage_awareness(
+            session_state=session_state,
+            confidence_shift=confidence_shift,
+        )
 
         information_gain = (
             prior_signal
@@ -236,7 +248,9 @@ class BeliefAwareRolloutRewardModel(HeuristicRolloutRewardModel):
             else 0.0
         )
         competitor_elimination_bonus = (
-            confidence_shift["competitor_elimination_gain"] * self.config.competitor_elimination_weight
+            confidence_shift["competitor_elimination_gain"]
+            * self.config.competitor_elimination_weight
+            * float(stage_awareness["competitor_elimination_scale"])
             if self.config.enable_competitor_elimination_bonus
             else 0.0
         )
@@ -272,6 +286,21 @@ class BeliefAwareRolloutRewardModel(HeuristicRolloutRewardModel):
             action=action,
             confidence_shift=confidence_shift,
         )
+        early_narrow_evidence_penalty = self._estimate_early_narrow_evidence_penalty(
+            action=action,
+            confidence_shift=confidence_shift,
+            stage_awareness=stage_awareness,
+        )
+        early_broad_coverage_bonus = self._estimate_early_broad_coverage_bonus(
+            action=action,
+            confidence_shift=confidence_shift,
+            stage_awareness=stage_awareness,
+        )
+        early_over_collapse_penalty = self._estimate_early_over_collapse_penalty(
+            action=action,
+            confidence_shift=confidence_shift,
+            stage_awareness=stage_awareness,
+        )
         context_bonus = self._estimate_context_bonus(action, patient_context)
         acceptance_risk_proxy = confidence_shift["acceptance_risk_proxy"]
         raw_acceptance_risk_penalty = (
@@ -290,6 +319,7 @@ class BeliefAwareRolloutRewardModel(HeuristicRolloutRewardModel):
             + competitor_elimination_bonus
             + discriminative_support_bonus
             + alternative_preservation_bonus
+            + early_broad_coverage_bonus
             + hypothesis_alignment
             + contradiction_signal
             + context_bonus
@@ -299,6 +329,8 @@ class BeliefAwareRolloutRewardModel(HeuristicRolloutRewardModel):
             - uncertainty_penalty
             - negative_resolution_penalty
             - non_discriminative_detail_penalty
+            - early_narrow_evidence_penalty
+            - early_over_collapse_penalty
             - acceptance_risk_penalty,
             0.0,
         )
@@ -336,6 +368,18 @@ class BeliefAwareRolloutRewardModel(HeuristicRolloutRewardModel):
                 "uncertainty_penalty": round(uncertainty_penalty, 4),
                 "negative_resolution_penalty": round(negative_resolution_penalty, 4),
                 "non_discriminative_detail_penalty": round(non_discriminative_detail_penalty, 4),
+                "stage_aware_phase": str(stage_awareness["phase"]),
+                "stage_aware_coverage_pressure": round(float(stage_awareness["coverage_pressure"]), 4),
+                "stage_aware_turn_factor": round(float(stage_awareness["turn_factor"]), 4),
+                "stage_aware_entropy_factor": round(float(stage_awareness["entropy_factor"]), 4),
+                "stage_aware_margin_factor": round(float(stage_awareness["margin_factor"]), 4),
+                "stage_aware_competitor_elimination_scale": round(
+                    float(stage_awareness["competitor_elimination_scale"]),
+                    4,
+                ),
+                "early_narrow_evidence_penalty": round(early_narrow_evidence_penalty, 4),
+                "early_broad_coverage_bonus": round(early_broad_coverage_bonus, 4),
+                "early_over_collapse_penalty": round(early_over_collapse_penalty, 4),
                 "context_bonus": round(context_bonus, 4),
                 "branch_probability": round(float(branch.probability), 4),
                 "branch_support_quality": round(confidence_shift["branch_support_quality"], 4),
@@ -782,6 +826,175 @@ class BeliefAwareRolloutRewardModel(HeuristicRolloutRewardModel):
             + max(float(confidence_shift["discriminative_support_quality"]), 0.0) * 0.22
         )
         return max(min(discriminative_pressure, 0.55), 0.0)
+
+    # reward 侧只做轻量阶段感知：
+    # - 前期：优先保住候选覆盖，避免过早压扁 Top-3
+    # - 后期：再逐步恢复更强的排序/收缩偏好
+    def _estimate_stage_awareness(
+        self,
+        *,
+        session_state: SessionState,
+        confidence_shift: dict[str, Any],
+    ) -> dict[str, float | str]:
+        if not self.config.enable_stage_aware_coverage_control:
+            return {
+                "phase": "ranking_first",
+                "coverage_pressure": 0.0,
+                "turn_factor": 0.0,
+                "entropy_factor": 0.0,
+                "margin_factor": 0.0,
+                "competitor_elimination_scale": 1.0,
+            }
+
+        turn_cutoff = max(int(self.config.early_stage_turn_cutoff), 1)
+        turn_index = max(int(session_state.turn_index), 0)
+        turn_factor = max(1.0 - turn_index / turn_cutoff, 0.0)
+        prior_entropy = max(float(confidence_shift.get("prior_entropy", 0.0) or 0.0), 0.0)
+        prior_margin = max(float(confidence_shift.get("prior_margin", 0.0) or 0.0), 0.0)
+
+        entropy_threshold = min(max(float(self.config.stage_aware_entropy_threshold), 0.0), 0.95)
+        if prior_entropy <= entropy_threshold:
+            entropy_factor = 0.0
+        else:
+            entropy_factor = min(
+                (prior_entropy - entropy_threshold) / max(1.0 - entropy_threshold, 1e-6),
+                1.0,
+            )
+
+        margin_threshold = max(float(self.config.stage_aware_margin_threshold), 1e-6)
+        margin_factor = min(max((margin_threshold - prior_margin) / margin_threshold, 0.0), 1.0)
+        coverage_pressure = min(turn_factor * 0.46 + entropy_factor * 0.34 + margin_factor * 0.20, 1.0)
+        competitor_scale_floor = min(
+            max(float(self.config.stage_aware_competitor_elimination_scale), 0.0),
+            1.0,
+        )
+        competitor_elimination_scale = 1.0 - coverage_pressure * (1.0 - competitor_scale_floor)
+
+        return {
+            "phase": "coverage_first" if coverage_pressure >= 0.36 else "ranking_first",
+            "coverage_pressure": coverage_pressure,
+            "turn_factor": turn_factor,
+            "entropy_factor": entropy_factor,
+            "margin_factor": margin_factor,
+            "competitor_elimination_scale": competitor_elimination_scale,
+        }
+
+    # 当前 turn 还早、belief 也较分散时，对窄证据问题做轻量惩罚，减少早期 Top-3 被压掉。
+    def _estimate_early_narrow_evidence_penalty(
+        self,
+        *,
+        action: MctsAction,
+        confidence_shift: dict[str, Any],
+        stage_awareness: dict[str, float | str],
+    ) -> float:
+        if not self.config.enable_stage_aware_coverage_control:
+            return 0.0
+
+        coverage_pressure = float(stage_awareness.get("coverage_pressure", 0.0) or 0.0)
+        if coverage_pressure <= 0.0:
+            return 0.0
+
+        question_type_hint = str(action.metadata.get("question_type_hint", "") or "")
+        penalty_scale = {
+            "lab": 1.0,
+            "pathogen": 1.0,
+            "detail": 0.88,
+            "imaging": 0.76,
+        }.get(question_type_hint, 0.0)
+        if penalty_scale <= 0.0:
+            return 0.0
+
+        competitor_elimination = max(float(confidence_shift["competitor_elimination_gain"]), 0.0)
+        alternative_preservation = max(float(confidence_shift["alternative_preservation_quality"]), 0.0)
+        discriminative_support = max(float(confidence_shift["discriminative_support_quality"]), 0.0)
+        top3_separation_gain = max(float(confidence_shift["top3_separation_gain"]), 0.0)
+        branch_support_quality = max(float(confidence_shift["branch_support_quality"]), 0.0)
+        action_cost = str(action.metadata.get("evidence_cost") or "")
+
+        raw_penalty = (
+            coverage_pressure
+            * penalty_scale
+            * (
+                0.35
+                + competitor_elimination * 0.44
+                + max(0.42 - alternative_preservation, 0.0) * 0.36
+                - discriminative_support * 0.18
+            )
+        )
+        if action_cost == "high":
+            raw_penalty *= 1.08
+        if top3_separation_gain >= 0.08 and branch_support_quality >= 0.68:
+            raw_penalty *= 0.55
+        return max(raw_penalty * self.config.early_narrow_evidence_penalty_weight, 0.0)
+
+    # 对 symptom / exam_context 这类更适合前期保留候选覆盖的问题给一个很小的正向推动。
+    def _estimate_early_broad_coverage_bonus(
+        self,
+        *,
+        action: MctsAction,
+        confidence_shift: dict[str, Any],
+        stage_awareness: dict[str, float | str],
+    ) -> float:
+        if not self.config.enable_stage_aware_coverage_control:
+            return 0.0
+
+        coverage_pressure = float(stage_awareness.get("coverage_pressure", 0.0) or 0.0)
+        if coverage_pressure <= 0.0:
+            return 0.0
+
+        question_type_hint = str(action.metadata.get("question_type_hint", "") or "")
+        broad_scale = {
+            "symptom": 1.0,
+            "exam_context": 0.95,
+            "risk": 0.58,
+        }.get(question_type_hint, 0.0)
+        if broad_scale <= 0.0:
+            return 0.0
+
+        competitor_coverage = max(float(confidence_shift["competitor_coverage"]), 0.0)
+        alternative_preservation = max(float(confidence_shift["alternative_preservation_quality"]), 0.0)
+        branch_support_quality = max(float(confidence_shift["branch_support_quality"]), 0.0)
+        competitor_elimination = max(float(confidence_shift["competitor_elimination_gain"]), 0.0)
+
+        raw_bonus = coverage_pressure * broad_scale * (
+            competitor_coverage * 0.22
+            + alternative_preservation * 0.56
+            + branch_support_quality * 0.12
+            + max(0.28 - competitor_elimination, 0.0) * 0.1
+        )
+        return max(raw_bonus * self.config.early_broad_coverage_bonus_weight, 0.0)
+
+    # 如果 surrogate posterior 体现出“前期过强压缩”，单独追加一小段 collapse penalty。
+    def _estimate_early_over_collapse_penalty(
+        self,
+        *,
+        action: MctsAction,
+        confidence_shift: dict[str, Any],
+        stage_awareness: dict[str, float | str],
+    ) -> float:
+        if not self.config.enable_stage_aware_coverage_control:
+            return 0.0
+
+        coverage_pressure = float(stage_awareness.get("coverage_pressure", 0.0) or 0.0)
+        if coverage_pressure <= 0.0:
+            return 0.0
+
+        competitor_elimination = max(float(confidence_shift["competitor_elimination_gain"]), 0.0)
+        competitor_coverage = max(float(confidence_shift["competitor_coverage"]), 0.0)
+        alternative_preservation = max(float(confidence_shift["alternative_preservation_quality"]), 0.0)
+        posterior_top3_weight = max(float(confidence_shift["posterior_top3_weight"]), 0.0)
+        question_type_hint = str(action.metadata.get("question_type_hint", "") or "")
+
+        collapse_signal = max(
+            competitor_elimination * 0.55
+            + competitor_coverage * 0.25
+            + max(0.34 - alternative_preservation, 0.0) * 0.45
+            + max(0.08 - posterior_top3_weight, 0.0) * 1.8,
+            0.0,
+        )
+        if question_type_hint in {"lab", "pathogen", "detail"}:
+            collapse_signal *= 1.08
+        return max(collapse_signal * coverage_pressure * self.config.early_over_collapse_penalty_weight, 0.0)
 
     # 既奖励“第一名更清晰”，也避免一轮 surrogate 更新把高质量备选全部压没。
     def _estimate_alternative_preservation_quality(

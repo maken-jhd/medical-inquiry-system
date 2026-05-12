@@ -378,6 +378,14 @@ def test_build_default_brain_supports_belief_aware_reward_and_acceptance_calibra
                 "acceptance_risk_weight": 0.19,
                 "detail_non_discriminative_penalty": 0.06,
                 "posterior_update_alpha": 0.61,
+                "enable_stage_aware_coverage_control": True,
+                "early_stage_turn_cutoff": 2,
+                "stage_aware_entropy_threshold": 0.57,
+                "stage_aware_margin_threshold": 0.16,
+                "early_narrow_evidence_penalty_weight": 0.09,
+                "early_broad_coverage_bonus_weight": 0.07,
+                "early_over_collapse_penalty_weight": 0.11,
+                "stage_aware_competitor_elimination_scale": 0.49,
             },
             "search": {
                 "discriminative_gain_weight": 0.17,
@@ -399,6 +407,10 @@ def test_build_default_brain_supports_belief_aware_reward_and_acceptance_calibra
                 "rank_stability_bonus_weight": 0.06,
                 "discriminative_support_bonus_weight": 0.05,
                 "top3_coverage_stability_bonus_weight": 0.04,
+                "answer_specific_support_bonus_weight": 0.08,
+                "scope_consistency_bonus_weight": 0.07,
+                "multi_path_consensus_bonus_weight": 0.06,
+                "fragile_single_path_penalty_weight": 0.09,
             },
         },
         llm_client=FakeAvailableLlmClient(),
@@ -414,6 +426,13 @@ def test_build_default_brain_supports_belief_aware_reward_and_acceptance_calibra
     assert brain.deps.simulation_engine.reward_model.config.alternative_preservation_weight == 0.13
     assert brain.deps.simulation_engine.reward_model.config.detail_non_discriminative_penalty == 0.06
     assert brain.deps.simulation_engine.reward_model.config.posterior_update_alpha == 0.61
+    assert brain.deps.simulation_engine.reward_model.config.enable_stage_aware_coverage_control is True
+    assert brain.deps.simulation_engine.reward_model.config.stage_aware_entropy_threshold == 0.57
+    assert brain.deps.simulation_engine.reward_model.config.stage_aware_margin_threshold == 0.16
+    assert brain.deps.simulation_engine.reward_model.config.early_narrow_evidence_penalty_weight == 0.09
+    assert brain.deps.simulation_engine.reward_model.config.early_broad_coverage_bonus_weight == 0.07
+    assert brain.deps.simulation_engine.reward_model.config.early_over_collapse_penalty_weight == 0.11
+    assert brain.deps.simulation_engine.reward_model.config.stage_aware_competitor_elimination_scale == 0.49
     assert brain.deps.mcts_engine.config.discriminative_gain_weight == 0.17
     assert brain.deps.acceptance_controller.config.max_acceptance_risk_proxy == 0.24
     assert brain.deps.acceptance_controller.config.margin_relaxation_buffer == 0.03
@@ -424,6 +443,10 @@ def test_build_default_brain_supports_belief_aware_reward_and_acceptance_calibra
     assert brain.deps.trajectory_evaluator.config.discriminative_answer_bonus_weight == 0.1
     assert brain.deps.trajectory_evaluator.config.competitor_suppression_bonus_weight == 0.08
     assert brain.deps.trajectory_evaluator.config.top3_coverage_stability_bonus_weight == 0.04
+    assert brain.deps.trajectory_evaluator.config.answer_specific_support_bonus_weight == 0.08
+    assert brain.deps.trajectory_evaluator.config.scope_consistency_bonus_weight == 0.07
+    assert brain.deps.trajectory_evaluator.config.multi_path_consensus_bonus_weight == 0.06
+    assert brain.deps.trajectory_evaluator.config.fragile_single_path_penalty_weight == 0.09
 
 
 # 验证 service 层会按 search_policy 把根动作选择分发给 mcts 或 greedy selector。

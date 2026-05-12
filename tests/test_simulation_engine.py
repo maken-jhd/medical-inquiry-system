@@ -579,3 +579,60 @@ def test_simulation_engine_alternative_preservation_bonus_prefers_healthier_top3
     )
 
     assert healthy_bonus > collapsed_bonus
+
+
+# stage-aware coverage bonus 也应进入 rollout 分支选择，帮助前期更偏向宽覆盖问题。
+def test_simulation_engine_stage_aware_coverage_bonus_prefers_broad_branch() -> None:
+    engine = SimulationEngine(
+        SimulationConfig(
+            search_impl="modular_v2",
+            branch_selection_mode="greedy",
+        )
+    )
+    branch = TransitionBranch(
+        branch_name="positive",
+        probability=0.56,
+        polarity="present",
+        resolution="clear",
+        metadata={},
+    )
+    broad_action = MctsAction(
+        action_id="verify::broad",
+        action_type="verify_evidence",
+        target_node_id="slot_cough",
+        target_node_label="ClinicalFinding",
+        target_node_name="咳嗽",
+        metadata={"question_type_hint": "symptom"},
+    )
+    narrow_action = MctsAction(
+        action_id="verify::narrow",
+        action_type="verify_evidence",
+        target_node_id="path_cmv",
+        target_node_label="Pathogen",
+        target_node_name="CMV DNA",
+        metadata={"question_type_hint": "pathogen"},
+    )
+
+    broad_bonus = engine._estimate_branch_stage_aware_coverage_bonus(
+        action=broad_action,
+        branch=branch,
+        reward_breakdown={
+            "stage_aware_coverage_pressure": 0.82,
+            "early_broad_coverage_bonus": 0.06,
+            "early_narrow_evidence_penalty": 0.0,
+            "early_over_collapse_penalty": 0.0,
+        },
+    )
+    narrow_bonus = engine._estimate_branch_stage_aware_coverage_bonus(
+        action=narrow_action,
+        branch=branch,
+        reward_breakdown={
+            "stage_aware_coverage_pressure": 0.82,
+            "early_broad_coverage_bonus": 0.0,
+            "early_narrow_evidence_penalty": 0.08,
+            "early_over_collapse_penalty": 0.07,
+        },
+    )
+
+    assert broad_bonus > 0.0
+    assert narrow_bonus < broad_bonus

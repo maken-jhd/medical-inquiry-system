@@ -225,6 +225,7 @@ class SimulationEngine:
         expected_reward = 0.0
         discriminative_action_bonus = 0.0
         alternative_preservation_action_bonus = 0.0
+        stage_aware_coverage_action_bonus = 0.0
         positive_reward = 0.0
         negative_reward = 0.0
         doubtful_reward = 0.0
@@ -251,10 +252,21 @@ class SimulationEngine:
                 branch=branch,
                 reward_breakdown=reward_evaluation.metadata,
             )
-            selection_score = weighted_reward + discriminative_branch_bonus + alternative_preservation_branch_bonus
+            stage_aware_coverage_branch_bonus = self._estimate_branch_stage_aware_coverage_bonus(
+                action=action,
+                branch=branch,
+                reward_breakdown=reward_evaluation.metadata,
+            )
+            selection_score = (
+                weighted_reward
+                + discriminative_branch_bonus
+                + alternative_preservation_branch_bonus
+                + stage_aware_coverage_branch_bonus
+            )
             expected_reward += weighted_reward
             discriminative_action_bonus += discriminative_branch_bonus
             alternative_preservation_action_bonus += alternative_preservation_branch_bonus
+            stage_aware_coverage_action_bonus += stage_aware_coverage_branch_bonus
             branch_estimates.append(
                 {
                     "branch": branch.branch_name,
@@ -264,6 +276,7 @@ class SimulationEngine:
                     "selection_score": selection_score,
                     "discriminative_branch_bonus": discriminative_branch_bonus,
                     "alternative_preservation_branch_bonus": alternative_preservation_branch_bonus,
+                    "stage_aware_coverage_branch_bonus": stage_aware_coverage_branch_bonus,
                     "polarity": branch.polarity,
                     "resolution": branch.resolution,
                     "transition_metadata": dict(branch.metadata),
@@ -277,7 +290,11 @@ class SimulationEngine:
             elif branch.branch_name == "doubtful":
                 doubtful_reward = reward
 
-        expected_reward += discriminative_action_bonus + alternative_preservation_action_bonus
+        expected_reward += (
+            discriminative_action_bonus
+            + alternative_preservation_action_bonus
+            + stage_aware_coverage_action_bonus
+        )
         probability_map = {
             str(item["branch"]): float(item["probability"])
             for item in branch_estimates
@@ -303,7 +320,10 @@ class SimulationEngine:
                 "relation_type": str(action.metadata.get("relation_type", "")),
                 "branch_estimates": branch_estimates,
                 "expected_reward_raw": round(
-                    expected_reward - discriminative_action_bonus - alternative_preservation_action_bonus,
+                    expected_reward
+                    - discriminative_action_bonus
+                    - alternative_preservation_action_bonus
+                    - stage_aware_coverage_action_bonus,
                     4,
                 ),
                 "discriminative_action_bonus": round(discriminative_action_bonus, 4),
@@ -311,6 +331,7 @@ class SimulationEngine:
                     alternative_preservation_action_bonus,
                     4,
                 ),
+                "stage_aware_coverage_action_bonus": round(stage_aware_coverage_action_bonus, 4),
                 "competitor_coverage_bonus": round(competitor_coverage_bonus, 4),
                 "transition_model_type": self.config.transition_model_type,
                 "reward_model_type": self.config.reward_model_type,
@@ -837,6 +858,10 @@ class SimulationEngine:
         discriminative_supports: list[float] = []
         competitor_coverages: list[float] = []
         alternative_preservations: list[float] = []
+        stage_aware_pressures: list[float] = []
+        early_narrow_penalties: list[float] = []
+        early_broad_bonuses: list[float] = []
+        early_over_collapse_penalties: list[float] = []
 
         for payload in branch_payloads:
             breakdown = payload.get("reward_breakdown", {})
@@ -851,6 +876,10 @@ class SimulationEngine:
             discriminative_support = breakdown.get("discriminative_support_quality")
             competitor_coverage = breakdown.get("competitor_coverage_surrogate")
             alternative_preservation = breakdown.get("alternative_preservation_quality")
+            stage_aware_pressure = breakdown.get("stage_aware_coverage_pressure")
+            early_narrow_penalty = breakdown.get("early_narrow_evidence_penalty")
+            early_broad_bonus = breakdown.get("early_broad_coverage_bonus")
+            early_over_collapse_penalty = breakdown.get("early_over_collapse_penalty")
             if isinstance(belief_margin, (int, float)):
                 belief_margins.append(float(belief_margin))
             if isinstance(uncertainty_reduction, (int, float)):
@@ -869,6 +898,14 @@ class SimulationEngine:
                 competitor_coverages.append(float(competitor_coverage))
             if isinstance(alternative_preservation, (int, float)):
                 alternative_preservations.append(float(alternative_preservation))
+            if isinstance(stage_aware_pressure, (int, float)):
+                stage_aware_pressures.append(float(stage_aware_pressure))
+            if isinstance(early_narrow_penalty, (int, float)):
+                early_narrow_penalties.append(float(early_narrow_penalty))
+            if isinstance(early_broad_bonus, (int, float)):
+                early_broad_bonuses.append(float(early_broad_bonus))
+            if isinstance(early_over_collapse_penalty, (int, float)):
+                early_over_collapse_penalties.append(float(early_over_collapse_penalty))
 
         if (
             len(belief_margins) == 0
@@ -923,6 +960,22 @@ class SimulationEngine:
                 4,
             ),
             "branch_consistency_score": round(branch_consistency_score, 4),
+            "stage_aware_coverage_pressure_proxy": round(
+                sum(stage_aware_pressures) / max(len(stage_aware_pressures), 1),
+                4,
+            ),
+            "early_narrow_evidence_penalty_proxy": round(
+                sum(early_narrow_penalties) / max(len(early_narrow_penalties), 1),
+                4,
+            ),
+            "early_broad_coverage_bonus_proxy": round(
+                sum(early_broad_bonuses) / max(len(early_broad_bonuses), 1),
+                4,
+            ),
+            "early_over_collapse_penalty_proxy": round(
+                sum(early_over_collapse_penalties) / max(len(early_over_collapse_penalties), 1),
+                4,
+            ),
         }
 
     def _select_best_branch_payload(self, branch_payloads: list[dict], action_id: str) -> dict:
@@ -1062,6 +1115,32 @@ class SimulationEngine:
         bonus = probability * max(preservation_quality * 0.1 - overcompression_penalty * 0.06, 0.0)
         if question_type_hint == "detail" and preservation_quality < 0.32:
             bonus *= 0.7
+        return bonus
+
+    # rollout 选分支时，把 early-stage coverage control 的正负号也并入 selection score。
+    def _estimate_branch_stage_aware_coverage_bonus(
+        self,
+        *,
+        action: MctsAction,
+        branch: TransitionBranch,
+        reward_breakdown: dict,
+    ) -> float:
+        if not self._uses_modular_v2() or not isinstance(reward_breakdown, dict):
+            return 0.0
+
+        coverage_pressure = float(reward_breakdown.get("stage_aware_coverage_pressure", 0.0) or 0.0)
+        if coverage_pressure <= 0.0:
+            return 0.0
+
+        probability = max(float(branch.probability), 0.0)
+        broad_bonus = float(reward_breakdown.get("early_broad_coverage_bonus", 0.0) or 0.0)
+        narrow_penalty = float(reward_breakdown.get("early_narrow_evidence_penalty", 0.0) or 0.0)
+        overcollapse_penalty = float(reward_breakdown.get("early_over_collapse_penalty", 0.0) or 0.0)
+        question_type_hint = str(action.metadata.get("question_type_hint", "") or "")
+
+        bonus = probability * (broad_bonus * 0.35 - narrow_penalty * 0.42 - overcollapse_penalty * 0.48)
+        if question_type_hint in {"symptom", "exam_context"} and broad_bonus > 0.0:
+            bonus += probability * min(coverage_pressure * 0.02, 0.012)
         return bonus
 
     # 从树节点元数据中提取当前动作。

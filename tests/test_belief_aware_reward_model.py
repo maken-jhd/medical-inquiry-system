@@ -635,3 +635,167 @@ def test_belief_aware_reward_rewards_alternative_preservation() -> None:
     assert preserved.metadata["alternative_preservation_quality"] > collapsed.metadata["alternative_preservation_quality"]
     assert preserved.metadata["alternative_preservation_bonus"] > collapsed.metadata["alternative_preservation_bonus"]
     assert collapsed.metadata["alternative_preservation_overcompression_penalty"] > 0.0
+
+
+# 候选仍分散的前期，lab/pathogen/detail 这类窄证据不应因为局部高分被过度偏好。
+def test_belief_aware_reward_applies_early_stage_coverage_control() -> None:
+    model = BeliefAwareRolloutRewardModel(
+        RolloutRewardModelConfig(
+            model_type="belief_aware_v1",
+            enable_stage_aware_coverage_control=True,
+            early_narrow_evidence_penalty_weight=0.1,
+            early_broad_coverage_bonus_weight=0.08,
+            early_over_collapse_penalty_weight=0.1,
+            stage_aware_competitor_elimination_scale=0.5,
+        )
+    )
+    baseline_model = BeliefAwareRolloutRewardModel(
+        RolloutRewardModelConfig(
+            model_type="belief_aware_v1",
+            enable_stage_aware_coverage_control=False,
+        )
+    )
+    early_state = SessionState(session_id="s_stage_early", turn_index=0)
+    candidates = _candidate_hypotheses_top5()[:3]
+
+    broad_action = MctsAction(
+        action_id="verify::cough::broad",
+        action_type="verify_evidence",
+        target_node_id="slot_cough",
+        target_node_label="ClinicalFinding",
+        target_node_name="咳嗽",
+        prior_score=1.65,
+        metadata={
+            "relation_type": "MANIFESTS_AS",
+            "question_type_hint": "symptom",
+            "evidence_cost": "low",
+            "discriminative_gain": 0.7,
+        },
+    )
+    narrow_action = MctsAction(
+        action_id="verify::cmv_dna::narrow",
+        action_type="verify_evidence",
+        target_node_id="path_cmv",
+        target_node_label="Pathogen",
+        target_node_name="CMV DNA",
+        prior_score=1.7,
+        metadata={
+            "relation_type": "HAS_PATHOGEN",
+            "question_type_hint": "pathogen",
+            "evidence_cost": "high",
+            "discriminative_gain": 0.92,
+        },
+    )
+
+    broad_result = model.evaluate_branch(
+        session_state=early_state,
+        action=broad_action,
+        branch=TransitionBranch(
+            branch_name="positive",
+            probability=0.58,
+            polarity="present",
+            resolution="clear",
+            metadata={
+                "source": "statistical",
+                "branch_schema": "verify",
+                "belief_components": _top3_preserved_components(),
+            },
+        ),
+        candidate_hypotheses=candidates,
+    )
+    narrow_result = model.evaluate_branch(
+        session_state=early_state,
+        action=narrow_action,
+        branch=TransitionBranch(
+            branch_name="positive",
+            probability=0.58,
+            polarity="present",
+            resolution="clear",
+            metadata={
+                "source": "statistical",
+                "branch_schema": "verify",
+                "belief_components": _top3_collapsed_components(),
+            },
+        ),
+        candidate_hypotheses=candidates,
+    )
+    narrow_baseline = baseline_model.evaluate_branch(
+        session_state=early_state,
+        action=narrow_action,
+        branch=TransitionBranch(
+            branch_name="positive",
+            probability=0.58,
+            polarity="present",
+            resolution="clear",
+            metadata={
+                "source": "statistical",
+                "branch_schema": "verify",
+                "belief_components": _top3_collapsed_components(),
+            },
+        ),
+        candidate_hypotheses=candidates,
+    )
+
+    assert broad_result.metadata["stage_aware_phase"] == "coverage_first"
+    assert broad_result.metadata["early_broad_coverage_bonus"] > 0.0
+    assert narrow_result.metadata["early_narrow_evidence_penalty"] > 0.0
+    assert narrow_result.metadata["early_over_collapse_penalty"] > 0.0
+    assert narrow_result.metadata["stage_aware_competitor_elimination_scale"] < 1.0
+    assert narrow_result.reward < narrow_baseline.reward
+
+
+# 到后期后，区分性强的窄证据仍然可以保留优势，不会被 coverage control 永久压死。
+def test_belief_aware_reward_restores_discriminative_preference_late_stage() -> None:
+    model = BeliefAwareRolloutRewardModel(
+        RolloutRewardModelConfig(
+            model_type="belief_aware_v1",
+            enable_stage_aware_coverage_control=True,
+            early_narrow_evidence_penalty_weight=0.1,
+            early_broad_coverage_bonus_weight=0.08,
+            early_over_collapse_penalty_weight=0.1,
+            stage_aware_competitor_elimination_scale=0.5,
+        )
+    )
+    action = MctsAction(
+        action_id="verify::cmv_dna::late",
+        action_type="verify_evidence",
+        target_node_id="path_cmv",
+        target_node_label="Pathogen",
+        target_node_name="CMV DNA",
+        prior_score=1.7,
+        metadata={
+            "relation_type": "HAS_PATHOGEN",
+            "question_type_hint": "pathogen",
+            "evidence_cost": "high",
+            "discriminative_gain": 0.92,
+        },
+    )
+    candidates = _candidate_hypotheses_top5()[:3]
+    branch = TransitionBranch(
+        branch_name="positive",
+        probability=0.58,
+        polarity="present",
+        resolution="clear",
+        metadata={
+            "source": "statistical",
+            "branch_schema": "verify",
+            "belief_components": _top3_collapsed_components(),
+        },
+    )
+
+    early_result = model.evaluate_branch(
+        session_state=SessionState(session_id="s_stage_early_2", turn_index=0),
+        action=action,
+        branch=branch,
+        candidate_hypotheses=candidates,
+    )
+    late_result = model.evaluate_branch(
+        session_state=SessionState(session_id="s_stage_late", turn_index=3),
+        action=action,
+        branch=branch,
+        candidate_hypotheses=candidates,
+    )
+
+    assert late_result.reward > early_result.reward
+    assert late_result.metadata["stage_aware_coverage_pressure"] < early_result.metadata["stage_aware_coverage_pressure"]
+    assert late_result.metadata["stage_aware_competitor_elimination_scale"] > early_result.metadata["stage_aware_competitor_elimination_scale"]

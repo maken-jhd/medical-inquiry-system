@@ -23,6 +23,7 @@ reward_model:
   enable_competitor_elimination_bonus: true
   enable_discriminative_support_bonus: true
   enable_alternative_preservation_bonus: true
+  enable_stage_aware_coverage_control: true
   top3_separation_weight: 0.24
   competitor_elimination_weight: 0.22
   discriminative_support_weight: 0.16
@@ -30,6 +31,13 @@ reward_model:
   acceptance_risk_weight: 0.12
   detail_non_discriminative_penalty: 0.06
   posterior_update_alpha: 0.65
+  early_stage_turn_cutoff: 2
+  stage_aware_entropy_threshold: 0.58
+  stage_aware_margin_threshold: 0.16
+  early_narrow_evidence_penalty_weight: 0.09
+  early_broad_coverage_bonus_weight: 0.07
+  early_over_collapse_penalty_weight: 0.1
+  stage_aware_competitor_elimination_scale: 0.52
 
 acceptance_calibration:
   enable_reward_confidence_proxy: true
@@ -48,3 +56,7 @@ path_evaluation:
   rank_stability_bonus_weight: 0.04
   discriminative_support_bonus_weight: 0.05
   top3_coverage_stability_bonus_weight: 0.05
+  answer_specific_support_bonus_weight: 0.06
+  scope_consistency_bonus_weight: 0.06
+  multi_path_consensus_bonus_weight: 0.05
+  fragile_single_path_penalty_weight: 0.07

@@ -45,6 +45,24 @@
 - `search`：论文风格的局部树搜索模式，围绕多个候选假设做 rollout
 - `fallback`：当 KG 或搜索不可靠时退回启发式选择器
 
+## 当前主线的近期校准重点
+
+当前 `modular_v2 + statistical transition + belief-aware reward + relaxed calibration` 主线，最近一轮没有继续扩展新的搜索策略，而是集中修两类已定位的问题：
+
+- `ranking-stage flip`
+  - 正确答案已经进入 Top-3，但 final answer aggregation 把 Top-1 排错
+- `Top-3 coverage loss`
+  - 候选还分散时，前 1~2 轮对 `lab / pathogen / detail` 的偏好略强，导致 gold 被过早挤出 Top-3
+
+因此当前实现里可以重点关注两层轻量校准：
+
+- [reward_model.py](/Users/loki/Workspace/GraduationDesign/brain/reward_model.py)
+  - belief-aware reward 新增 stage-aware coverage control
+  - 前期更偏向 coverage preservation，后期再恢复更强的区分性收缩
+- [trajectory_evaluator.py](/Users/loki/Workspace/GraduationDesign/brain/trajectory_evaluator.py)
+  - final ranking 新增 answer-specific support / scope consistency / multi-path consensus 等稳定化项
+  - 同时限制只靠单条尖锐路径抬高的脆弱答案组
+
 ## 目录职责
 
 `brain/` 当前主要负责以下几类工作：

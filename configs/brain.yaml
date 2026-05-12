@@ -73,6 +73,17 @@ reward_model:
   detail_non_discriminative_penalty: 0.05
   # posterior surrogate 使用 prior 与 raw posterior 的软插值，减少一轮更新直接压扁 Top-3。
   posterior_update_alpha: 0.65
+  # 这组 stage-aware 参数只做轻量 gating：
+  # - 前 1~2 轮更强调 coverage preservation
+  # - 后期再恢复更强的 competitor elimination / ranking 收缩
+  enable_stage_aware_coverage_control: true
+  early_stage_turn_cutoff: 2
+  stage_aware_entropy_threshold: 0.62
+  stage_aware_margin_threshold: 0.14
+  early_narrow_evidence_penalty_weight: 0.08
+  early_broad_coverage_bonus_weight: 0.06
+  early_over_collapse_penalty_weight: 0.08
+  stage_aware_competitor_elimination_scale: 0.58
 
 # acceptance calibration 只做 verifier 之后的轻量 proxy guard，
 # 不改 verifier / repair 的整体职责边界。
@@ -123,6 +134,12 @@ path_evaluation:
   rank_stability_bonus_weight: 0.04
   discriminative_support_bonus_weight: 0.04
   top3_coverage_stability_bonus_weight: 0.04
+  # final ranking 额外补“具体答案支撑 / scope 一致 / 多路径共识”；
+  # 同时限制靠单条尖锐路径抬起来的脆弱答案组。
+  answer_specific_support_bonus_weight: 0.05
+  scope_consistency_bonus_weight: 0.05
+  multi_path_consensus_bonus_weight: 0.04
+  fragile_single_path_penalty_weight: 0.06
 
 a1:
   use_llm_extractor: true

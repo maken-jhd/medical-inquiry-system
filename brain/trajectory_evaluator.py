@@ -48,6 +48,10 @@ class TrajectoryEvaluatorConfig:
     rank_stability_bonus_weight: float = 0.04
     discriminative_support_bonus_weight: float = 0.04
     top3_coverage_stability_bonus_weight: float = 0.04
+    answer_specific_support_bonus_weight: float = 0.05
+    scope_consistency_bonus_weight: float = 0.05
+    multi_path_consensus_bonus_weight: float = 0.04
+    fragile_single_path_penalty_weight: float = 0.06
 
 
 class TrajectoryEvaluator:
@@ -130,6 +134,13 @@ class TrajectoryEvaluator:
                 reward_proxy_summary=reward_proxy_summary,
                 candidate_rank_position=candidate_rank_position,
             )
+            ranking_stability_adjustment, ranking_stability_metadata = self._final_answer_ranking_stability_adjustment(
+                trajectories=trajectories,
+                anchor_profile=anchor_profile,
+                reward_proxy_summary=reward_proxy_summary,
+                consistency=consistency,
+                diversity=diversity,
+            )
             final_agent_component = max(min(agent_evaluation + candidate_rank_prior, 1.0), 0.0)
             agent_metadata.update(
                 {
@@ -144,6 +155,7 @@ class TrajectoryEvaluator:
                     "agent_eval_weight": round(agent_eval_weight, 4),
                     "final_agent_component": round(final_agent_component, 4),
                     **discriminative_metadata,
+                    **ranking_stability_metadata,
                     **scope_metadata,
                     **simulated_metadata,
                     **reward_proxy_summary,
@@ -154,6 +166,7 @@ class TrajectoryEvaluator:
                 + diversity * diversity_weight
                 + final_agent_component * agent_eval_weight
                 + discriminative_answer_bonus
+                + ranking_stability_adjustment
             )
             final_score = max(final_score - scope_penalty, 0.0)
             if self.config.enable_single_answer_group_cap and answer_group_count == 1 and self._is_low_anchor_profile(anchor_profile):
@@ -671,6 +684,10 @@ class TrajectoryEvaluator:
         discriminative_support_scores: list[float] = []
         competitor_coverage_scores: list[float] = []
         alternative_preservation_scores: list[float] = []
+        stage_aware_coverage_pressures: list[float] = []
+        early_narrow_penalties: list[float] = []
+        early_broad_bonuses: list[float] = []
+        early_over_collapse_penalties: list[float] = []
 
         for trajectory in trajectories:
             metadata = dict(trajectory.metadata or {})
@@ -686,6 +703,10 @@ class TrajectoryEvaluator:
             discriminative_support = metadata.get("discriminative_support_quality")
             competitor_coverage = metadata.get("competitor_coverage_proxy")
             alternative_preservation = metadata.get("alternative_preservation_proxy")
+            stage_aware_coverage_pressure = metadata.get("stage_aware_coverage_pressure_proxy")
+            early_narrow_penalty = metadata.get("early_narrow_evidence_penalty_proxy")
+            early_broad_bonus = metadata.get("early_broad_coverage_bonus_proxy")
+            early_over_collapse_penalty = metadata.get("early_over_collapse_penalty_proxy")
             if isinstance(belief_margin, (int, float)):
                 belief_margins.append(float(belief_margin))
             if isinstance(uncertainty_reduction, (int, float)):
@@ -706,6 +727,14 @@ class TrajectoryEvaluator:
                 competitor_coverage_scores.append(float(competitor_coverage))
             if isinstance(alternative_preservation, (int, float)):
                 alternative_preservation_scores.append(float(alternative_preservation))
+            if isinstance(stage_aware_coverage_pressure, (int, float)):
+                stage_aware_coverage_pressures.append(float(stage_aware_coverage_pressure))
+            if isinstance(early_narrow_penalty, (int, float)):
+                early_narrow_penalties.append(float(early_narrow_penalty))
+            if isinstance(early_broad_bonus, (int, float)):
+                early_broad_bonuses.append(float(early_broad_bonus))
+            if isinstance(early_over_collapse_penalty, (int, float)):
+                early_over_collapse_penalties.append(float(early_over_collapse_penalty))
 
         if (
             len(belief_margins) == 0
@@ -751,6 +780,22 @@ class TrajectoryEvaluator:
                 sum(alternative_preservation_scores) / max(len(alternative_preservation_scores), 1),
                 4,
             ),
+            "stage_aware_coverage_pressure_proxy": round(
+                sum(stage_aware_coverage_pressures) / max(len(stage_aware_coverage_pressures), 1),
+                4,
+            ),
+            "early_narrow_evidence_penalty_proxy": round(
+                sum(early_narrow_penalties) / max(len(early_narrow_penalties), 1),
+                4,
+            ),
+            "early_broad_coverage_bonus_proxy": round(
+                sum(early_broad_bonuses) / max(len(early_broad_bonuses), 1),
+                4,
+            ),
+            "early_over_collapse_penalty_proxy": round(
+                sum(early_over_collapse_penalties) / max(len(early_over_collapse_penalties), 1),
+                4,
+            ),
             "reward_proxy_trajectory_count": len(acceptance_risks) or len(trajectories),
         }
 
@@ -774,15 +819,26 @@ class TrajectoryEvaluator:
         branch_consistency = float(reward_proxy_summary.get("branch_consistency_score", 0.0) or 0.0)
 
         top3_bonus = max(top3_separation, 0.0) * self.config.discriminative_answer_bonus_weight
+        competitor_stability_scale = max(
+            min(
+                0.42
+                + alternative_preservation * 0.28
+                + branch_consistency * 0.18
+                - max(0.32 - competitor_coverage, 0.0) * 0.22,
+                1.0,
+            ),
+            0.2,
+        )
         competitor_bonus = max(
-            competitor_elimination * 0.68 + competitor_coverage * 0.12,
+            competitor_elimination * competitor_stability_scale + competitor_coverage * 0.14,
             0.0,
         ) * self.config.competitor_suppression_bonus_weight
         support_bonus = max(discriminative_support, 0.0) * self.config.discriminative_support_bonus_weight
         coverage_stability_signal = max(
-            alternative_preservation * 0.74
-            + min(max(top3_separation, 0.0) / 0.18, 1.0) * 0.18
-            - max(competitor_elimination - alternative_preservation, 0.0) * 0.28,
+            alternative_preservation * 0.58
+            + min(max(top3_separation, 0.0) / 0.18, 1.0) * 0.16
+            + branch_consistency * 0.14
+            - max(competitor_elimination - alternative_preservation, 0.0) * 0.26,
             0.0,
         )
         coverage_stability_bonus = coverage_stability_signal * self.config.top3_coverage_stability_bonus_weight
@@ -811,12 +867,159 @@ class TrajectoryEvaluator:
             "discriminative_answer_bonus": round(bonus, 4),
             "discriminative_answer_top3_component": round(top3_bonus, 4),
             "discriminative_answer_competitor_component": round(competitor_bonus, 4),
+            "discriminative_answer_competitor_stability_scale": round(competitor_stability_scale, 4),
             "discriminative_answer_support_component": round(support_bonus, 4),
             "discriminative_answer_coverage_component": round(coverage_stability_bonus, 4),
             "discriminative_answer_rank_stability_component": round(rank_stability_bonus, 4),
             "topk_rank_stability_bonus": round(rank_stability_bonus, 4),
             "top3_coverage_stability_bonus": round(coverage_stability_bonus, 4),
         }
+
+    # final ranking 需要额外偏向“具体答案支撑更强、scope 更对齐、且不是靠单条尖锐路径翻盘”的答案组。
+    def _final_answer_ranking_stability_adjustment(
+        self,
+        *,
+        trajectories: Sequence[ReasoningTrajectory],
+        anchor_profile: dict,
+        reward_proxy_summary: dict[str, Any],
+        consistency: float,
+        diversity: float,
+    ) -> tuple[float, dict[str, Any]]:
+        if not isinstance(anchor_profile, dict):
+            anchor_profile = {}
+
+        exact_scope_anchor_score = float(anchor_profile.get("exact_scope_anchor_score", 0.0) or 0.0)
+        definition_anchor_score = float(anchor_profile.get("definition_anchor_score", 0.0) or 0.0)
+        family_scope_anchor_score = float(anchor_profile.get("family_scope_anchor_score", 0.0) or 0.0)
+        scope_specificity_score = float(anchor_profile.get("scope_specificity_score", 0.0) or 0.0)
+        scope_cluster_bonus = float(anchor_profile.get("scope_cluster_bonus", 0.0) or 0.0)
+        scope_mismatch_score = float(anchor_profile.get("scope_mismatch_score", 0.0) or 0.0)
+        generic_scope_penalty = float(anchor_profile.get("generic_scope_penalty", 0.0) or 0.0)
+        scope_requirement_missing_score = float(anchor_profile.get("scope_requirement_missing_score", 0.0) or 0.0)
+        branch_consistency = float(reward_proxy_summary.get("branch_consistency_score", 0.0) or 0.0)
+        alternative_preservation = float(reward_proxy_summary.get("alternative_preservation_proxy", 0.0) or 0.0)
+        competitor_elimination = float(reward_proxy_summary.get("competitor_elimination_proxy", 0.0) or 0.0)
+
+        observed_support = self._observed_support_from_anchor_profile(anchor_profile)
+        observed_support_count = len(observed_support)
+        answer_specific_support_signal = min(
+            exact_scope_anchor_score * 0.48
+            + definition_anchor_score * 0.44
+            + min(observed_support_count * 0.14, 0.32)
+            + family_scope_anchor_score * 0.12,
+            1.0,
+        )
+        answer_specific_support_bonus = (
+            answer_specific_support_signal * self.config.answer_specific_support_bonus_weight
+        )
+
+        scope_consistency_signal = max(
+            exact_scope_anchor_score * 0.42
+            + scope_specificity_score * 0.24
+            + scope_cluster_bonus * 0.18
+            - scope_mismatch_score * 0.34
+            - generic_scope_penalty * 0.24
+            - scope_requirement_missing_score * 0.28,
+            0.0,
+        )
+        scope_consistency_bonus = min(
+            scope_consistency_signal,
+            1.0,
+        ) * self.config.scope_consistency_bonus_weight
+
+        unique_path_signatures = {
+            self._trajectory_path_signature(trajectory)
+            for trajectory in trajectories
+            if len(self._trajectory_path_signature(trajectory)) > 0
+        }
+        trajectory_count = len(trajectories)
+        path_count_signal = min(max(trajectory_count - 1, 0) / 2.0, 1.0)
+        path_diversity_signal = min(len(unique_path_signatures) / max(trajectory_count, 1), 1.0)
+        multi_path_consensus_signal = max(
+            min(
+                path_count_signal * 0.46
+                + path_diversity_signal * 0.18
+                + branch_consistency * 0.26
+                + consistency * 0.22
+                - max(diversity - 0.82, 0.0) * 0.1,
+                1.0,
+            ),
+            0.0,
+        )
+        multi_path_consensus_bonus = (
+            multi_path_consensus_signal * self.config.multi_path_consensus_bonus_weight
+        )
+
+        total_trajectory_score = sum(max(float(item.score), 0.0) for item in trajectories)
+        best_trajectory_score = max((max(float(item.score), 0.0) for item in trajectories), default=0.0)
+        top_path_share = (
+            best_trajectory_score / total_trajectory_score
+            if total_trajectory_score > 1e-6
+            else (1.0 if trajectory_count > 0 else 0.0)
+        )
+        single_path_risk = 0.0
+        if trajectory_count <= 1:
+            single_path_risk = 1.0
+        elif trajectory_count == 2:
+            single_path_risk = min(top_path_share * 0.7, 1.0)
+        else:
+            single_path_risk = min(top_path_share * 0.45, 1.0)
+        fragility_signal = max(
+            single_path_risk * 0.38
+            + max(competitor_elimination - alternative_preservation * 0.85, 0.0) * 0.42
+            + max(0.34 - answer_specific_support_signal, 0.0) * 0.26
+            + max(0.28 - scope_consistency_signal, 0.0) * 0.22
+            - multi_path_consensus_signal * 0.24,
+            0.0,
+        )
+        fragile_single_path_penalty = min(
+            fragility_signal,
+            1.0,
+        ) * self.config.fragile_single_path_penalty_weight
+
+        adjustment = max(
+            min(
+                answer_specific_support_bonus
+                + scope_consistency_bonus
+                + multi_path_consensus_bonus
+                - fragile_single_path_penalty,
+                0.18,
+            ),
+            -0.14,
+        )
+        return adjustment, {
+            "final_answer_ranking_stability_adjustment": round(adjustment, 4),
+            "answer_specific_support_bonus": round(answer_specific_support_bonus, 4),
+            "answer_specific_support_signal": round(answer_specific_support_signal, 4),
+            "answer_specific_support_count": observed_support_count,
+            "scope_consistency_bonus": round(scope_consistency_bonus, 4),
+            "scope_consistency_signal": round(min(scope_consistency_signal, 1.0), 4),
+            "multi_path_consensus_bonus": round(multi_path_consensus_bonus, 4),
+            "multi_path_consensus_signal": round(multi_path_consensus_signal, 4),
+            "trajectory_path_signature_count": len(unique_path_signatures),
+            "fragile_single_path_penalty": round(fragile_single_path_penalty, 4),
+            "fragile_single_path_signal": round(min(fragility_signal, 1.0), 4),
+            "trajectory_top_path_share": round(top_path_share, 4),
+        }
+
+    # 轨迹签名只服务“多路径共识”判断，不需要覆盖所有 metadata。
+    def _trajectory_path_signature(self, trajectory: ReasoningTrajectory) -> str:
+        tokens: list[str] = []
+
+        for step in trajectory.steps:
+            if not isinstance(step, dict):
+                continue
+            stage = str(step.get("stage") or "").strip()
+            if stage == "A3":
+                tokens.append(
+                    f"A3:{step.get('target_node_id') or step.get('action_id') or step.get('action_name') or ''}"
+                )
+            elif stage == "PENDING_ACTION":
+                tokens.append(
+                    f"P:{step.get('answer_branch') or step.get('branch_answer') or step.get('polarity') or ''}"
+                )
+
+        return "|".join(token for token in tokens if len(str(token).strip()) > 0)
 
     # 估计同一答案下轨迹的多样性。
     def _compute_diversity(self, trajectories: List[ReasoningTrajectory]) -> float:

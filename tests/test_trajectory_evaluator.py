@@ -169,6 +169,228 @@ def test_trajectory_evaluator_does_not_always_prefer_sharpest_answer_group() -> 
     assert balanced.metadata["top3_coverage_stability_bonus"] > sharp.metadata["top3_coverage_stability_bonus"]
 
 
+# 当正确答案已经在 Top-3 内时，final ranking 应更偏向具体答案支撑更强、scope 更一致且多路径共识更好的答案。
+def test_trajectory_evaluator_prefers_answer_with_stronger_specific_support_and_scope_consistency() -> None:
+    evaluator = TrajectoryEvaluator(
+        TrajectoryEvaluatorConfig(
+            enable_discriminative_answer_bonus=True,
+            discriminative_answer_bonus_weight=0.06,
+            competitor_suppression_bonus_weight=0.04,
+            answer_specific_support_bonus_weight=0.09,
+            scope_consistency_bonus_weight=0.08,
+            multi_path_consensus_bonus_weight=0.07,
+            fragile_single_path_penalty_weight=0.08,
+        )
+    )
+    trajectories = [
+        ReasoningTrajectory(
+            trajectory_id="t_correct_1",
+            final_answer_id="cmv_pneumonia",
+            final_answer_name="巨细胞病毒(CMV)肺炎",
+            steps=[
+                {"stage": "A3", "action_id": "a1", "target_node_id": "symptom_dyspnea", "action_name": "呼吸困难"},
+                {"stage": "PENDING_ACTION", "answer_branch": "positive"},
+            ],
+            score=0.74,
+            metadata={
+                "reward_confidence_proxy_source": "trajectory_reward_proxy",
+                "branch_consistency_score": 0.82,
+                "top1_top3_separation_proxy": 0.13,
+                "competitor_elimination_proxy": 0.16,
+                "discriminative_support_quality": 0.58,
+                "competitor_coverage_proxy": 0.22,
+                "alternative_preservation_proxy": 0.6,
+            },
+        ),
+        ReasoningTrajectory(
+            trajectory_id="t_correct_2",
+            final_answer_id="cmv_pneumonia",
+            final_answer_name="巨细胞病毒(CMV)肺炎",
+            steps=[
+                {"stage": "A3", "action_id": "a2", "target_node_id": "lab_hypoxemia", "action_name": "低氧血症"},
+                {"stage": "PENDING_ACTION", "answer_branch": "positive"},
+            ],
+            score=0.73,
+            metadata={
+                "reward_confidence_proxy_source": "trajectory_reward_proxy",
+                "branch_consistency_score": 0.8,
+                "top1_top3_separation_proxy": 0.12,
+                "competitor_elimination_proxy": 0.15,
+                "discriminative_support_quality": 0.56,
+                "competitor_coverage_proxy": 0.2,
+                "alternative_preservation_proxy": 0.58,
+            },
+        ),
+        ReasoningTrajectory(
+            trajectory_id="t_wrong_sharp",
+            final_answer_id="cmv_encephalitis",
+            final_answer_name="巨细胞病毒脑炎",
+            steps=[
+                {"stage": "A3", "action_id": "a3", "target_node_id": "symptom_fever", "action_name": "发热"},
+                {"stage": "PENDING_ACTION", "answer_branch": "positive"},
+            ],
+            score=0.76,
+            metadata={
+                "reward_confidence_proxy_source": "trajectory_reward_proxy",
+                "branch_consistency_score": 0.42,
+                "top1_top3_separation_proxy": 0.22,
+                "competitor_elimination_proxy": 0.44,
+                "discriminative_support_quality": 0.61,
+                "competitor_coverage_proxy": 0.54,
+                "alternative_preservation_proxy": 0.12,
+            },
+        ),
+    ]
+    patient_context = PatientContext(
+        raw_text="发热伴呼吸困难，检查提示低氧血症。",
+        metadata={
+            "observed_anchor_index": {
+                "candidate_anchor_summary": [
+                    {
+                        "candidate_id": "cmv_pneumonia",
+                        "observed_anchor_score": 0.96,
+                        "exact_scope_anchor_score": 0.78,
+                        "definition_anchor_score": 0.54,
+                        "family_scope_anchor_score": 0.22,
+                        "scope_specificity_score": 0.74,
+                        "scope_cluster_bonus": 0.32,
+                        "anchor_supporting_evidence": [{"name": "呼吸困难"}, {"name": "低氧血症"}],
+                    },
+                    {
+                        "candidate_id": "cmv_encephalitis",
+                        "observed_anchor_score": 0.28,
+                        "family_scope_anchor_score": 0.32,
+                        "scope_specificity_score": 0.2,
+                        "scope_mismatch_score": 0.36,
+                        "generic_scope_penalty": 0.18,
+                        "anchor_supporting_evidence": [{"name": "发热"}],
+                    },
+                ]
+            }
+        },
+    )
+
+    scores = evaluator.score_groups(evaluator.group_by_answer(trajectories), patient_context=patient_context)
+    best = evaluator.select_best_answer(scores)
+    correct = next(item for item in scores if item.answer_id == "cmv_pneumonia")
+    wrong = next(item for item in scores if item.answer_id == "cmv_encephalitis")
+
+    assert best is not None
+    assert best.answer_id == "cmv_pneumonia"
+    assert correct.metadata["answer_specific_support_bonus"] > wrong.metadata["answer_specific_support_bonus"]
+    assert correct.metadata["scope_consistency_bonus"] > wrong.metadata["scope_consistency_bonus"]
+    assert correct.metadata["multi_path_consensus_bonus"] > wrong.metadata["multi_path_consensus_bonus"]
+    assert wrong.metadata["fragile_single_path_penalty"] > correct.metadata["fragile_single_path_penalty"]
+
+
+# 单条尖锐但脆弱的路径不应无条件把答案抬到第一，尤其当 competitor elimination 明显高于 preservation 时。
+def test_trajectory_evaluator_penalizes_fragile_single_path_answer_group() -> None:
+    evaluator = TrajectoryEvaluator(
+        TrajectoryEvaluatorConfig(
+            enable_discriminative_answer_bonus=True,
+            answer_specific_support_bonus_weight=0.07,
+            scope_consistency_bonus_weight=0.07,
+            multi_path_consensus_bonus_weight=0.06,
+            fragile_single_path_penalty_weight=0.1,
+        )
+    )
+    trajectories = [
+        ReasoningTrajectory(
+            trajectory_id="t_fragile",
+            final_answer_id="wrong",
+            final_answer_name="巨细胞病毒脑炎",
+            steps=[
+                {"stage": "A3", "action_id": "a1", "target_node_id": "lab_cmv", "action_name": "CMV DNA"},
+                {"stage": "PENDING_ACTION", "answer_branch": "positive"},
+            ],
+            score=0.82,
+            metadata={
+                "reward_confidence_proxy_source": "trajectory_reward_proxy",
+                "branch_consistency_score": 0.36,
+                "top1_top3_separation_proxy": 0.2,
+                "competitor_elimination_proxy": 0.5,
+                "discriminative_support_quality": 0.62,
+                "competitor_coverage_proxy": 0.58,
+                "alternative_preservation_proxy": 0.08,
+            },
+        ),
+        ReasoningTrajectory(
+            trajectory_id="t_stable_1",
+            final_answer_id="correct",
+            final_answer_name="巨细胞病毒(CMV)肺炎",
+            steps=[
+                {"stage": "A3", "action_id": "a2", "target_node_id": "symptom_dyspnea", "action_name": "呼吸困难"},
+                {"stage": "PENDING_ACTION", "answer_branch": "positive"},
+            ],
+            score=0.74,
+            metadata={
+                "reward_confidence_proxy_source": "trajectory_reward_proxy",
+                "branch_consistency_score": 0.84,
+                "top1_top3_separation_proxy": 0.14,
+                "competitor_elimination_proxy": 0.18,
+                "discriminative_support_quality": 0.56,
+                "competitor_coverage_proxy": 0.18,
+                "alternative_preservation_proxy": 0.62,
+            },
+        ),
+        ReasoningTrajectory(
+            trajectory_id="t_stable_2",
+            final_answer_id="correct",
+            final_answer_name="巨细胞病毒(CMV)肺炎",
+            steps=[
+                {"stage": "A3", "action_id": "a3", "target_node_id": "lab_hypoxemia", "action_name": "低氧血症"},
+                {"stage": "PENDING_ACTION", "answer_branch": "positive"},
+            ],
+            score=0.73,
+            metadata={
+                "reward_confidence_proxy_source": "trajectory_reward_proxy",
+                "branch_consistency_score": 0.8,
+                "top1_top3_separation_proxy": 0.13,
+                "competitor_elimination_proxy": 0.17,
+                "discriminative_support_quality": 0.55,
+                "competitor_coverage_proxy": 0.16,
+                "alternative_preservation_proxy": 0.6,
+            },
+        ),
+    ]
+    patient_context = PatientContext(
+        raw_text="呼吸困难并低氧血症。",
+        metadata={
+            "observed_anchor_index": {
+                "candidate_anchor_summary": [
+                    {
+                        "candidate_id": "correct",
+                        "observed_anchor_score": 0.92,
+                        "exact_scope_anchor_score": 0.72,
+                        "definition_anchor_score": 0.42,
+                        "scope_specificity_score": 0.68,
+                        "scope_cluster_bonus": 0.28,
+                        "anchor_supporting_evidence": [{"name": "呼吸困难"}, {"name": "低氧血症"}],
+                    },
+                    {
+                        "candidate_id": "wrong",
+                        "observed_anchor_score": 0.18,
+                        "family_scope_anchor_score": 0.26,
+                        "scope_mismatch_score": 0.34,
+                        "generic_scope_penalty": 0.14,
+                        "anchor_supporting_evidence": [{"name": "CMV DNA"}],
+                    },
+                ]
+            }
+        },
+    )
+
+    scores = evaluator.score_groups(evaluator.group_by_answer(trajectories), patient_context=patient_context)
+    best = evaluator.select_best_answer(scores)
+    stable = next(item for item in scores if item.answer_id == "correct")
+    fragile = next(item for item in scores if item.answer_id == "wrong")
+
+    assert best is not None
+    assert best.answer_id == "correct"
+    assert fragile.metadata["fragile_single_path_penalty"] > 0.0
+    assert fragile.metadata["fragile_single_path_penalty"] > stable.metadata["fragile_single_path_penalty"]
+
+
 # 真实 observed anchor 应该能修正 rollout 路径分数，避免只靠模拟阳性把错误答案顶到最前。
 def test_trajectory_evaluator_uses_observed_anchor_before_simulated_key_evidence() -> None:
     evaluator = TrajectoryEvaluator()

@@ -5895,6 +5895,28 @@ def build_default_brain(
             reward_model_config.get("detail_non_discriminative_penalty", 0.05)
         ),
         posterior_update_alpha=float(reward_model_config.get("posterior_update_alpha", 0.65)),
+        enable_stage_aware_coverage_control=bool(
+            reward_model_config.get("enable_stage_aware_coverage_control", True)
+        ),
+        early_stage_turn_cutoff=int(reward_model_config.get("early_stage_turn_cutoff", 2)),
+        stage_aware_entropy_threshold=float(
+            reward_model_config.get("stage_aware_entropy_threshold", 0.62)
+        ),
+        stage_aware_margin_threshold=float(
+            reward_model_config.get("stage_aware_margin_threshold", 0.14)
+        ),
+        early_narrow_evidence_penalty_weight=float(
+            reward_model_config.get("early_narrow_evidence_penalty_weight", 0.08)
+        ),
+        early_broad_coverage_bonus_weight=float(
+            reward_model_config.get("early_broad_coverage_bonus_weight", 0.06)
+        ),
+        early_over_collapse_penalty_weight=float(
+            reward_model_config.get("early_over_collapse_penalty_weight", 0.08)
+        ),
+        stage_aware_competitor_elimination_scale=float(
+            reward_model_config.get("stage_aware_competitor_elimination_scale", 0.58)
+        ),
     )
     if reward_model_type == "belief_aware_v1":
         reward_model = BeliefAwareRolloutRewardModel(reward_model_runtime_config)
@@ -6056,6 +6078,18 @@ def build_default_brain(
                 ),
                 top3_coverage_stability_bonus_weight=float(
                     path_eval_config.get("top3_coverage_stability_bonus_weight", 0.04)
+                ),
+                answer_specific_support_bonus_weight=float(
+                    path_eval_config.get("answer_specific_support_bonus_weight", 0.05)
+                ),
+                scope_consistency_bonus_weight=float(
+                    path_eval_config.get("scope_consistency_bonus_weight", 0.05)
+                ),
+                multi_path_consensus_bonus_weight=float(
+                    path_eval_config.get("multi_path_consensus_bonus_weight", 0.04)
+                ),
+                fragile_single_path_penalty_weight=float(
+                    path_eval_config.get("fragile_single_path_penalty_weight", 0.06)
                 ),
             ),
             llm_client=llm_client,

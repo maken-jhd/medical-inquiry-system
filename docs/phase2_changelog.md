@@ -10,7 +10,86 @@
 - `phase2_execution_checklist.md` 更偏“路线设计与待办清单”
 - 本文更偏“已经发生过哪些阶段性变化、分别解决了什么问题”
 
-## 近期更新：2026-05-12 继续把 modular_v2 statistical 主线对齐到 Top-1 / Top-3 排序指标
+## 近期更新：2026-05-12 针对 ranking-stage flip 与 Top-3 coverage loss 做轻量修复
+
+### 本次目标
+
+- 保持当前主线不变：
+  - `search_impl = modular_v2`
+  - `transition_model.type = statistical`
+  - `reward_model.type = belief_aware_v1`
+  - relaxed calibration 继续保留
+- 不做 greedy-anchor root rerank
+- 不引入 learned transition model
+- 本轮只针对两类已经定位出来的问题做轻量修复：
+  - `ranking-stage flip`
+  - `Top-3 coverage loss`
+
+### 问题背景
+
+- 前一轮对比分析已经表明，当前 MCTS 并不是“root 第一问普遍比 greedy 差”
+- 更主要的误差模式是：
+  - 正确答案已经进入 Top-3，但 final ranking 把 Top-1 排错
+  - 前 1~2 轮对 `lab / pathogen / detail` 的偏好略强，导致候选池过早收缩，gold 被挤出 Top-3
+- 因此这轮不继续扩展 acceptance / verifier，也不去做新的 search 策略，而是优先：
+  - 稳定 final answer aggregation
+  - 保护 early-stage 的候选覆盖
+
+### 本次改动
+
+- [brain/trajectory_evaluator.py](/Users/loki/Workspace/GraduationDesign/brain/trajectory_evaluator.py)
+  - 在原有 `discriminative_answer_bonus` 基础上，新增 final ranking 稳定化项：
+    - `answer_specific_support_bonus`
+    - `scope_consistency_bonus`
+    - `multi_path_consensus_bonus`
+    - `fragile_single_path_penalty`
+  - 当前 final ranking 会更偏向：
+    - 具体答案本身已有直接支撑的答案组
+    - scope / organ / syndrome 更一致的答案组
+    - 来自多条较优路径一致支持的答案组
+  - 同时抑制：
+    - 只靠单条尖锐路径抬起来
+    - competitor elimination 很强但 preservation 很差
+    - 与真实证据作用域不对齐的脆弱答案组
+- [brain/reward_model.py](/Users/loki/Workspace/GraduationDesign/brain/reward_model.py)
+  - belief-aware reward 新增轻量 stage-aware coverage control：
+    - `early_narrow_evidence_penalty`
+    - `early_broad_coverage_bonus`
+    - `early_over_collapse_penalty`
+    - `stage_aware_competitor_elimination_scale`
+  - 当前前 1~2 轮、且 belief 仍分散时，会降低对窄而硬证据的偏好，减少过早压缩 Top-3
+  - 到后期 turn / belief 已收缩后，上述保护会自动减弱，保留区分性强动作的优势
+- [brain/simulation_engine.py](/Users/loki/Workspace/GraduationDesign/brain/simulation_engine.py)
+  - rollout branch `selection_score` 新增 `stage_aware_coverage_branch_bonus`
+  - 让 early-stage coverage control 不只停留在 reward breakdown 中，也能真正影响分支选择
+  - 同时把这些 proxy 压回 trajectory metadata，便于后续 benchmark 复盘
+- [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - 新增 reward / path evaluation 对应配置装配
+- 配置更新：
+  - [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml)
+  - [configs/brain_benchmark_modular_v2_statistical_belief_aware_relaxed.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain_benchmark_modular_v2_statistical_belief_aware_relaxed.yaml)
+- 测试更新：
+  - [tests/test_belief_aware_reward_model.py](/Users/loki/Workspace/GraduationDesign/tests/test_belief_aware_reward_model.py)
+  - [tests/test_simulation_engine.py](/Users/loki/Workspace/GraduationDesign/tests/test_simulation_engine.py)
+  - [tests/test_trajectory_evaluator.py](/Users/loki/Workspace/GraduationDesign/tests/test_trajectory_evaluator.py)
+  - [tests/test_service_config.py](/Users/loki/Workspace/GraduationDesign/tests/test_service_config.py)
+
+### 设计取舍
+
+- 这一步优先级高于 learned transition model
+- 原因不是 learned transition 没价值，而是：
+  - 当前误差已经明确收敛到排序与 early-stage coverage 两处
+  - 这两处仍属于现有 statistical + belief-aware 管线内部可解释、可回归的校准问题
+  - 先把已定位的问题修稳，再考虑上更重的 learned transition，实验解释性和论文叙事都会更清楚
+
+### 当前结论
+
+- 本轮仍没有引入 learned transition model
+- 本轮也没有把 greedy-anchor 作为主方案
+- 下一轮 benchmark 应重点观察：
+  - `mcts_top3_hit_but_top1_miss` 是否下降
+  - `mcts_root_disagree_and_top3_drop` 是否下降
+  - `Top-1 final answer hit` 是否在不明显伤害 `Top-3 hypothesis hit` 的前提下保持
 
 ### 本次目标
 
