@@ -26,6 +26,7 @@ class MctsConfig:
     max_child_nodes: int = 4
     discount_factor: float = 1.0
     max_kg_triplets: int = 15
+    discriminative_gain_weight: float = 0.12
 
 
 class MctsEngine:
@@ -221,6 +222,7 @@ class MctsEngine:
                     "target_node_id": action.target_node_id,
                     "target_node_name": action.target_node_name,
                     "prior_score": action.prior_score,
+                    "discriminative_gain": float(action.metadata.get("discriminative_gain", 0.0) or 0.0),
                     "state_signature_source": state_signature_source,
                 },
             )
@@ -247,8 +249,9 @@ class MctsEngine:
         visit_count = stats.visit_count if stats is not None else 0
         simulation_reward = simulation_outcome.expected_reward if simulation_outcome is not None else 0.0
         prior_score = action.prior_score * self.config.prior_weight
+        discriminative_bonus = self._action_discriminative_gain(action) * self.config.discriminative_gain_weight
 
-        blended_value = q_value + simulation_reward * self.config.simulation_weight + prior_score
+        blended_value = q_value + simulation_reward * self.config.simulation_weight + prior_score + discriminative_bonus
 
         if visit_count == 0:
             exploration = self.config.exploration_constant * sqrt(log(parent_visit_count + 2))
@@ -262,15 +265,16 @@ class MctsEngine:
     # 按树节点访问统计计算用于 tree policy 的 UCT 分数。
     def score_tree_node(self, node: TreeNode, parent_visit_count: int) -> float:
         prior_score = float(node.metadata.get("prior_score", 0.0)) * self.config.prior_weight
+        discriminative_bonus = self._node_discriminative_gain(node) * self.config.discriminative_gain_weight
 
         if node.visit_count == 0:
             exploration = self.config.exploration_constant * sqrt(log(parent_visit_count + 2))
-            return prior_score + exploration + self.config.unvisited_bonus
+            return prior_score + discriminative_bonus + exploration + self.config.unvisited_bonus
 
         exploration = self.config.exploration_constant * sqrt(
             log(parent_visit_count + 2) / node.visit_count
         )
-        return node.average_value + prior_score + exploration
+        return node.average_value + prior_score + discriminative_bonus + exploration
 
     # 收集根节点下仍可用于真实下一问选择的孩子，统一处理“已问过目标”的过滤。
     def _collect_selectable_root_children(
@@ -320,6 +324,7 @@ class MctsEngine:
             key=lambda item: (
                 -item.average_value,
                 -item.visit_count,
+                -self._node_discriminative_gain(item),
                 -float(item.metadata.get("prior_score", 0.0)),
                 item.node_id,
             ),
@@ -343,6 +348,8 @@ class MctsEngine:
         best_child = sorted(
             children,
             key=lambda item: (
+                -(float(item.metadata.get("prior_score", 0.0)) + self._node_discriminative_gain(item) * self.config.discriminative_gain_weight),
+                -self._node_discriminative_gain(item),
                 -float(item.metadata.get("prior_score", 0.0)),
                 -item.visit_count,
                 item.node_id,
@@ -350,3 +357,11 @@ class MctsEngine:
         )[0]
         action = best_child.metadata.get("action")
         return action if isinstance(action, MctsAction) else None
+
+    # 将动作里的区分性增益压成一个轻量 bonus，避免 root action 长期偏向“看起来安全但不拉开差距”的问题。
+    def _action_discriminative_gain(self, action: MctsAction) -> float:
+        raw_value = float(action.metadata.get("discriminative_gain", 0.0) or 0.0)
+        return max(min(raw_value, 1.5), 0.0)
+
+    def _node_discriminative_gain(self, node: TreeNode) -> float:
+        return max(min(float(node.metadata.get("discriminative_gain", 0.0) or 0.0), 1.5), 0.0)

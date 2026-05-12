@@ -5857,19 +5857,36 @@ def build_default_brain(
         risk_context_bonus=float(reward_model_config.get("risk_context_bonus", 0.05)),
         belief_top_k_hypotheses=int(reward_model_config.get("belief_top_k_hypotheses", 3)),
         enable_belief_margin_gain=bool(reward_model_config.get("enable_belief_margin_gain", True)),
+        enable_top3_separation_gain=bool(reward_model_config.get("enable_top3_separation_gain", True)),
         enable_uncertainty_reduction=bool(reward_model_config.get("enable_uncertainty_reduction", True)),
+        enable_competitor_elimination_bonus=bool(
+            reward_model_config.get("enable_competitor_elimination_bonus", True)
+        ),
+        enable_discriminative_support_bonus=bool(
+            reward_model_config.get("enable_discriminative_support_bonus", True)
+        ),
         enable_acceptance_risk_penalty=bool(
             reward_model_config.get("enable_acceptance_risk_penalty", True)
         ),
         margin_gain_weight=float(reward_model_config.get("margin_gain_weight", 0.32)),
+        top3_separation_weight=float(reward_model_config.get("top3_separation_weight", 0.24)),
         uncertainty_reduction_weight=float(
             reward_model_config.get("uncertainty_reduction_weight", 0.28)
         ),
-        acceptance_risk_weight=float(reward_model_config.get("acceptance_risk_weight", 0.22)),
+        competitor_elimination_weight=float(
+            reward_model_config.get("competitor_elimination_weight", 0.26)
+        ),
+        discriminative_support_weight=float(
+            reward_model_config.get("discriminative_support_weight", 0.18)
+        ),
+        acceptance_risk_weight=float(reward_model_config.get("acceptance_risk_weight", 0.16)),
         branch_likelihood_floor=float(reward_model_config.get("branch_likelihood_floor", 0.05)),
         min_branch_support_count=float(reward_model_config.get("min_branch_support_count", 3.0)),
         low_value_high_cost_penalty_multiplier=float(
             reward_model_config.get("low_value_high_cost_penalty_multiplier", 1.15)
+        ),
+        detail_non_discriminative_penalty=float(
+            reward_model_config.get("detail_non_discriminative_penalty", 0.05)
         ),
     )
     if reward_model_type == "belief_aware_v1":
@@ -5962,6 +5979,7 @@ def build_default_brain(
                 exploration_constant=float(search_config.get("exploration_weight", 2.0)),
                 discount_factor=float(search_config.get("discount_factor", 1.0)),
                 max_kg_triplets=int(search_config.get("max_kg_triplets", 15)),
+                discriminative_gain_weight=float(search_config.get("discriminative_gain_weight", 0.12)),
             ),
             state_signature_builder=state_signature_builder,
         ),
@@ -6013,6 +6031,21 @@ def build_default_brain(
                 ),
                 enable_scope_penalty_in_final_score=bool(
                     path_eval_config.get("enable_scope_penalty_in_final_score", True)
+                ),
+                enable_discriminative_answer_bonus=bool(
+                    path_eval_config.get("enable_discriminative_answer_bonus", True)
+                ),
+                discriminative_answer_bonus_weight=float(
+                    path_eval_config.get("discriminative_answer_bonus_weight", 0.08)
+                ),
+                competitor_suppression_bonus_weight=float(
+                    path_eval_config.get("competitor_suppression_bonus_weight", 0.07)
+                ),
+                rank_stability_bonus_weight=float(
+                    path_eval_config.get("rank_stability_bonus_weight", 0.05)
+                ),
+                discriminative_support_bonus_weight=float(
+                    path_eval_config.get("discriminative_support_bonus_weight", 0.05)
                 ),
             ),
             llm_client=llm_client,

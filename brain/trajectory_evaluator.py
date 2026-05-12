@@ -42,6 +42,11 @@ class TrajectoryEvaluatorConfig:
     enable_single_answer_group_cap: bool = True
     low_anchor_single_group_score_cap: float = 0.62
     enable_scope_penalty_in_final_score: bool = True
+    enable_discriminative_answer_bonus: bool = True
+    discriminative_answer_bonus_weight: float = 0.08
+    competitor_suppression_bonus_weight: float = 0.07
+    rank_stability_bonus_weight: float = 0.05
+    discriminative_support_bonus_weight: float = 0.05
 
 
 class TrajectoryEvaluator:
@@ -120,6 +125,10 @@ class TrajectoryEvaluator:
                 anchor_profile=anchor_profile,
             )
             scope_penalty, scope_metadata = self._final_scope_penalty(anchor_profile)
+            discriminative_answer_bonus, discriminative_metadata = self._final_discriminative_answer_bonus(
+                reward_proxy_summary=reward_proxy_summary,
+                candidate_rank_position=candidate_rank_position,
+            )
             final_agent_component = max(min(agent_evaluation + candidate_rank_prior, 1.0), 0.0)
             agent_metadata.update(
                 {
@@ -133,6 +142,7 @@ class TrajectoryEvaluator:
                     "diversity_weight": round(diversity_weight, 4),
                     "agent_eval_weight": round(agent_eval_weight, 4),
                     "final_agent_component": round(final_agent_component, 4),
+                    **discriminative_metadata,
                     **scope_metadata,
                     **simulated_metadata,
                     **reward_proxy_summary,
@@ -142,6 +152,7 @@ class TrajectoryEvaluator:
                 consistency * consistency_weight
                 + diversity * diversity_weight
                 + final_agent_component * agent_eval_weight
+                + discriminative_answer_bonus
             )
             final_score = max(final_score - scope_penalty, 0.0)
             if self.config.enable_single_answer_group_cap and answer_group_count == 1 and self._is_low_anchor_profile(anchor_profile):
@@ -654,6 +665,10 @@ class TrajectoryEvaluator:
         acceptance_risks: list[float] = []
         support_qualities: list[float] = []
         branch_consistency_scores: list[float] = []
+        top3_separation_scores: list[float] = []
+        competitor_elimination_scores: list[float] = []
+        discriminative_support_scores: list[float] = []
+        competitor_coverage_scores: list[float] = []
 
         for trajectory in trajectories:
             metadata = dict(trajectory.metadata or {})
@@ -664,6 +679,10 @@ class TrajectoryEvaluator:
             acceptance_risk = metadata.get("acceptance_risk_proxy")
             support_quality = metadata.get("branch_support_quality")
             branch_consistency = metadata.get("branch_consistency_score")
+            top3_separation = metadata.get("top1_top3_separation_proxy")
+            competitor_elimination = metadata.get("competitor_elimination_proxy")
+            discriminative_support = metadata.get("discriminative_support_quality")
+            competitor_coverage = metadata.get("competitor_coverage_proxy")
             if isinstance(belief_margin, (int, float)):
                 belief_margins.append(float(belief_margin))
             if isinstance(uncertainty_reduction, (int, float)):
@@ -674,12 +693,22 @@ class TrajectoryEvaluator:
                 support_qualities.append(float(support_quality))
             if isinstance(branch_consistency, (int, float)):
                 branch_consistency_scores.append(float(branch_consistency))
+            if isinstance(top3_separation, (int, float)):
+                top3_separation_scores.append(float(top3_separation))
+            if isinstance(competitor_elimination, (int, float)):
+                competitor_elimination_scores.append(float(competitor_elimination))
+            if isinstance(discriminative_support, (int, float)):
+                discriminative_support_scores.append(float(discriminative_support))
+            if isinstance(competitor_coverage, (int, float)):
+                competitor_coverage_scores.append(float(competitor_coverage))
 
         if (
             len(belief_margins) == 0
             and len(uncertainty_reductions) == 0
             and len(acceptance_risks) == 0
             and len(support_qualities) == 0
+            and len(top3_separation_scores) == 0
+            and len(competitor_elimination_scores) == 0
         ):
             return {}
 
@@ -696,7 +725,65 @@ class TrajectoryEvaluator:
                 sum(branch_consistency_scores) / max(len(branch_consistency_scores), 1),
                 4,
             ),
+            "top1_top3_separation_proxy": round(
+                sum(top3_separation_scores) / max(len(top3_separation_scores), 1),
+                4,
+            ),
+            "competitor_elimination_proxy": round(
+                sum(competitor_elimination_scores) / max(len(competitor_elimination_scores), 1),
+                4,
+            ),
+            "discriminative_support_quality": round(
+                sum(discriminative_support_scores) / max(len(discriminative_support_scores), 1),
+                4,
+            ),
+            "competitor_coverage_proxy": round(
+                sum(competitor_coverage_scores) / max(len(competitor_coverage_scores), 1),
+                4,
+            ),
             "reward_proxy_trajectory_count": len(acceptance_risks) or len(trajectories),
+        }
+
+    # 将 rollout 侧的区分性 proxy 转成最终答案层面的轻量 bonus，重点奖励“能稳定压制竞争对手”的答案组。
+    def _final_discriminative_answer_bonus(
+        self,
+        *,
+        reward_proxy_summary: dict[str, Any],
+        candidate_rank_position: int | None,
+    ) -> tuple[float, dict[str, Any]]:
+        if not self.config.enable_discriminative_answer_bonus or len(reward_proxy_summary) == 0:
+            return 0.0, {"discriminative_answer_bonus": 0.0}
+
+        top3_separation = float(reward_proxy_summary.get("top1_top3_separation_proxy", 0.0) or 0.0)
+        competitor_elimination = float(reward_proxy_summary.get("competitor_elimination_proxy", 0.0) or 0.0)
+        discriminative_support = float(reward_proxy_summary.get("discriminative_support_quality", 0.0) or 0.0)
+        competitor_coverage = float(reward_proxy_summary.get("competitor_coverage_proxy", 0.0) or 0.0)
+        branch_consistency = float(reward_proxy_summary.get("branch_consistency_score", 0.0) or 0.0)
+
+        top3_bonus = max(top3_separation, 0.0) * self.config.discriminative_answer_bonus_weight
+        competitor_bonus = max(
+            competitor_elimination * 0.82 + competitor_coverage * 0.18,
+            0.0,
+        ) * self.config.competitor_suppression_bonus_weight
+        support_bonus = max(discriminative_support, 0.0) * self.config.discriminative_support_bonus_weight
+
+        rank_stability_signal = 0.0
+        if candidate_rank_position == 1:
+            rank_stability_signal = branch_consistency
+        elif candidate_rank_position == 2:
+            rank_stability_signal = branch_consistency * 0.72
+        elif candidate_rank_position == 3:
+            rank_stability_signal = branch_consistency * 0.45
+        rank_stability_bonus = rank_stability_signal * self.config.rank_stability_bonus_weight
+
+        bonus = max(min(top3_bonus + competitor_bonus + support_bonus + rank_stability_bonus, 0.22), 0.0)
+        return bonus, {
+            "discriminative_answer_bonus": round(bonus, 4),
+            "discriminative_answer_top3_component": round(top3_bonus, 4),
+            "discriminative_answer_competitor_component": round(competitor_bonus, 4),
+            "discriminative_answer_support_component": round(support_bonus, 4),
+            "discriminative_answer_rank_stability_component": round(rank_stability_bonus, 4),
+            "topk_rank_stability_bonus": round(rank_stability_bonus, 4),
         }
 
     # 估计同一答案下轨迹的多样性。

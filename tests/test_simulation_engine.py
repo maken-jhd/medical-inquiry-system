@@ -376,7 +376,12 @@ def test_simulation_engine_supports_belief_aware_reward_with_statistical_transit
 
     assert belief_outcome.metadata["reward_model_type"] == "belief_aware_v1"
     assert "top1_top2_margin_gain_surrogate" in positive_branch["reward_breakdown"]
+    assert "top1_top3_separation_gain_surrogate" in positive_branch["reward_breakdown"]
+    assert "competitor_elimination_surrogate" in positive_branch["reward_breakdown"]
     assert "acceptance_risk_proxy" in positive_branch["reward_breakdown"]
+    assert "selection_score" in positive_branch
+    assert belief_outcome.metadata["discriminative_action_bonus"] >= 0.0
+    assert belief_outcome.metadata["competitor_coverage_bonus"] >= 0.0
     assert belief_outcome.positive_branch_reward != heuristic_outcome.positive_branch_reward
 
 
@@ -438,3 +443,89 @@ def test_simulation_engine_modular_v2_uses_statistical_transition_model() -> Non
     assert outcome.metadata["transition_model_type"] == "statistical"
     assert by_branch["positive"]["transition_metadata"]["source"] == "statistical"
     assert by_branch["positive"]["probability"] > by_branch["negative"]["probability"]
+
+
+# 当动作没有显式 evidence_family 时，statistical transition 也应能从 evidence_tags 回退到可区分 family。
+def test_simulation_engine_statistical_transition_uses_evidence_tags_family_fallback() -> None:
+    statistics = TransitionStatistics(smoothing_alpha=0.05, min_total_count=1)
+    for _ in range(7):
+        statistics.record_verify_observation(
+            disease_id="d1",
+            evidence_family="respiratory_symptom",
+            question_type="symptom",
+            outcome="present",
+        )
+    for _ in range(2):
+        statistics.record_verify_observation(
+            disease_id="d1",
+            evidence_family="respiratory_symptom",
+            question_type="symptom",
+            outcome="absent",
+        )
+
+    engine = SimulationEngine(
+        SimulationConfig(
+            search_impl="modular_v2",
+            transition_model_type="statistical",
+        ),
+        transition_model=StatisticalResponseTransitionModel(
+            ResponseTransitionModelConfig(model_type="statistical"),
+            statistics=statistics,
+        ),
+    )
+    state = SessionState(
+        session_id="s_stat_tags",
+        candidate_hypotheses=[HypothesisScore(node_id="d1", label="Disease", name="PCP", score=1.0)],
+    )
+    action = MctsAction(
+        action_id="a_stat_tags",
+        action_type="verify_evidence",
+        target_node_id="slot_cough",
+        target_node_label="ClinicalFinding",
+        target_node_name="干咳",
+        metadata={
+            "question_type_hint": "symptom",
+            "evidence_tags": ["respiratory", "type:symptom"],
+        },
+    )
+
+    outcome = engine.simulate_action(
+        action,
+        state,
+        primary_hypothesis=state.candidate_hypotheses[0],
+        candidate_hypotheses=state.candidate_hypotheses,
+    )
+    positive_branch = next(item for item in outcome.metadata["branch_estimates"] if item["branch"] == "positive")
+
+    assert positive_branch["transition_metadata"]["source"] == "statistical"
+    assert positive_branch["probability"] > 0.5
+
+
+# rollout 选分支时应允许区分性 bonus 轻量改写 weighted_reward 的排序，而不是永远只看概率乘 reward。
+def test_simulation_engine_prefers_more_discriminative_branch_when_selection_score_higher() -> None:
+    engine = SimulationEngine(
+        SimulationConfig(
+            search_impl="modular_v2",
+            branch_selection_mode="greedy",
+        )
+    )
+    branch_payloads = [
+        {
+            "branch": "positive",
+            "probability": 0.6,
+            "reward": 0.3,
+            "weighted_reward": 0.18,
+            "selection_score": 0.19,
+        },
+        {
+            "branch": "negative",
+            "probability": 0.42,
+            "reward": 0.4,
+            "weighted_reward": 0.168,
+            "selection_score": 0.24,
+        },
+    ]
+
+    selected = engine._select_best_branch_payload(branch_payloads, "a_branch")
+
+    assert selected["branch"] == "negative"

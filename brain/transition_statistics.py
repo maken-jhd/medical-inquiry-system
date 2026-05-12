@@ -33,6 +33,27 @@ DEFAULT_FAMILY_BY_QUESTION_TYPE = {
     "exam_context": "general_exam_context",
 }
 
+# evidence_tags 在 action builder / service 侧被大量使用，这里把它们压回统计可消费的 family。
+EVIDENCE_TAG_TO_FAMILY = {
+    "respiratory": "respiratory_symptom",
+    "respiratory_symptom": "respiratory_symptom",
+    "constitutional": "constitutional_symptom",
+    "systemic": "constitutional_symptom",
+    "constitutional_symptom": "constitutional_symptom",
+    "phenotype": "general_symptom",
+    "risk": "general_risk",
+    "general_risk": "general_risk",
+    "detail": "general_detail",
+    "general_detail": "general_detail",
+    "lab": "general_lab",
+    "general_lab": "general_lab",
+    "imaging": "imaging",
+    "pathogen": "pathogen",
+    "immune_status": "immune_status",
+    "oxygenation": "oxygenation",
+    "blood_count": "blood_count",
+}
+
 EXAM_NOT_DONE_HINTS = (
     "没做过",
     "没有做过",
@@ -964,6 +985,9 @@ def _extract_families_from_action_metadata(metadata: dict[str, Any]) -> tuple[st
         normalized = tuple(_normalize_family_list(metadata.get(key)))
         if len(normalized) > 0:
             return normalized
+    normalized_tags = tuple(_normalize_evidence_tag_families(metadata.get("evidence_tags")))
+    if len(normalized_tags) > 0:
+        return normalized_tags
     return ()
 
 
@@ -979,6 +1003,21 @@ def _normalize_family_list(value: Any) -> list[str]:
         if len(normalized) == 0 or normalized in deduped:
             continue
         deduped.append(normalized)
+    return deduped
+
+
+def _normalize_evidence_tag_families(value: Any) -> list[str]:
+    deduped: list[str] = []
+    for tag in _normalize_family_list(value):
+        normalized_tag = str(tag or "").strip()
+        if len(normalized_tag) == 0 or normalized_tag.startswith("type:"):
+            continue
+        if normalized_tag in {"exam_context", "recommended"}:
+            continue
+        family = EVIDENCE_TAG_TO_FAMILY.get(normalized_tag, normalized_tag)
+        if len(family) == 0 or family in deduped:
+            continue
+        deduped.append(family)
     return deduped
 
 

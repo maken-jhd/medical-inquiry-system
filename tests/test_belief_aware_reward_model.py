@@ -140,7 +140,10 @@ def test_belief_aware_reward_prefers_margin_separating_branch() -> None:
 
     assert positive.reward > doubtful.reward
     assert positive.metadata["top1_top2_margin_gain_surrogate"] > doubtful.metadata["top1_top2_margin_gain_surrogate"]
+    assert positive.metadata["top1_top3_separation_gain_surrogate"] > doubtful.metadata["top1_top3_separation_gain_surrogate"]
     assert positive.metadata["uncertainty_reduction_surrogate"] > doubtful.metadata["uncertainty_reduction_surrogate"]
+    assert "competitor_elimination_surrogate" in positive.metadata
+    assert "discriminative_support_quality" in positive.metadata
 
 
 # unclear / not_done 分支应被合理惩罚，避免高成本检查的模糊回答被误当成高价值收敛信号。
@@ -290,3 +293,89 @@ def test_belief_aware_reward_penalizes_high_cost_low_value_action() -> None:
     assert low_cost_result.reward > high_cost_result.reward
     assert "belief_entropy_surrogate" in low_cost_result.metadata
     assert "acceptance_risk_proxy" in high_cost_result.metadata
+
+
+# 非关键 detail 问题即使有同样的基础分支，也不应因为 rollout bonus 被抬得比高区分问题还高。
+def test_belief_aware_reward_penalizes_non_discriminative_detail_action() -> None:
+    model = BeliefAwareRolloutRewardModel(RolloutRewardModelConfig(model_type="belief_aware_v1"))
+    state = SessionState(session_id="s_reward_detail")
+    candidates = _candidate_hypotheses()
+    symptom_action = MctsAction(
+        action_id="verify::oxygenation",
+        action_type="verify_evidence",
+        target_node_id="lab_oxygen",
+        target_node_label="LabFinding",
+        target_node_name="低氧血症",
+        prior_score=1.7,
+        metadata={
+            "relation_type": "HAS_LAB_FINDING",
+            "question_type_hint": "lab",
+            "evidence_cost": "high",
+            "discriminative_gain": 1.1,
+        },
+    )
+    detail_action = MctsAction(
+        action_id="detail::cough::duration",
+        action_type="verify_evidence",
+        target_node_id="detail_cough_duration",
+        target_node_label="ClinicalAttribute",
+        target_node_name="咳嗽持续时间",
+        prior_score=1.7,
+        metadata={
+            "relation_type": "REQUIRES_DETAIL",
+            "question_type_hint": "detail",
+            "evidence_cost": "low",
+            "discriminative_gain": 0.05,
+        },
+    )
+
+    weak_detail_components = [
+        {
+            "disease_id": "pcp",
+            "weight": 0.62,
+            "raw_score": 0.62,
+            "backoff_level": "global",
+            "total_count": 1.0,
+            "present_probability": 0.51,
+            "absent_probability": 0.25,
+            "unclear_probability": 0.24,
+        },
+        {
+            "disease_id": "tb",
+            "weight": 0.38,
+            "raw_score": 0.38,
+            "backoff_level": "global",
+            "total_count": 1.0,
+            "present_probability": 0.47,
+            "absent_probability": 0.28,
+            "unclear_probability": 0.25,
+        },
+    ]
+    branch = TransitionBranch(
+        branch_name="positive",
+        probability=0.58,
+        polarity="present",
+        resolution="clear",
+        metadata={
+            "source": "statistical",
+            "branch_schema": "verify",
+            "belief_components": weak_detail_components,
+        },
+    )
+
+    symptom_result = model.evaluate_branch(
+        session_state=state,
+        action=symptom_action,
+        branch=branch,
+        candidate_hypotheses=candidates,
+    )
+    detail_result = model.evaluate_branch(
+        session_state=state,
+        action=detail_action,
+        branch=branch,
+        candidate_hypotheses=candidates,
+    )
+
+    assert symptom_result.reward > detail_result.reward
+    assert detail_result.metadata["discriminative_support_quality"] < symptom_result.metadata["discriminative_support_quality"]
+    assert symptom_result.metadata["competitor_elimination_surrogate"] >= 0.0

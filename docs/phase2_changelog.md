@@ -10,6 +10,86 @@
 - `phase2_execution_checklist.md` 更偏“路线设计与待办清单”
 - 本文更偏“已经发生过哪些阶段性变化、分别解决了什么问题”
 
+## 近期更新：2026-05-12 继续把 modular_v2 statistical 主线对齐到 Top-1 / Top-3 排序指标
+
+### 本次目标
+
+- 保持当前主线不变：
+  - `search_impl = modular_v2`
+  - `transition_model.type = statistical`
+  - `reward_model.type = belief_aware_v1`
+  - relaxed calibration 仍可用
+- 本轮不再以 completion / acceptance 作为主优化目标
+- 重点改为提升：
+  - `Top-1 final answer hit`
+  - `Top-3 hypothesis hit`
+
+### 问题背景
+
+- 当前 benchmark 已显示 relaxed calibration 对 Top-1 / Top-3 有帮助
+- 但 reward / rollout / final answer aggregation 里，很多“区分性”信号仍只是 metadata，没有真正进入 root action 和最终答案排序
+- 因此这轮优先做的是：
+  - 让正确答案更稳定进入 Top-3
+  - 让强区分证据更容易把正确答案推到 Top-1
+
+### 本次改动
+
+- [brain/reward_model.py](/Users/loki/Workspace/GraduationDesign/brain/reward_model.py)
+  - 在保留 `BeliefAwareRolloutRewardModel` 主体结构的前提下，新增更直接面向排序的 surrogate：
+    - `top1_top3_separation_gain_surrogate`
+    - `competitor_elimination_surrogate`
+    - `discriminative_support_quality`
+  - 同时降低 acceptance risk 在 reward 内的主导性，避免它继续压制高区分度分支
+- [brain/simulation_engine.py](/Users/loki/Workspace/GraduationDesign/brain/simulation_engine.py)
+  - 将 `selection_score` 从纯 `weighted_reward` 扩展为“weighted reward + discriminative branch bonus”
+  - rollout 分支选择与 trajectory proxy 汇总都会显式保留：
+    - `top1_top3_separation_proxy`
+    - `competitor_elimination_proxy`
+    - `discriminative_support_quality`
+- [brain/mcts_engine.py](/Users/loki/Workspace/GraduationDesign/brain/mcts_engine.py)
+  - root action / tree node 评分新增轻量 `discriminative_gain` bonus
+  - 在平均价值接近时，优先选择更能拉开候选差距的动作，而不是只看 prior
+- [brain/transition_statistics.py](/Users/loki/Workspace/GraduationDesign/brain/transition_statistics.py)
+  - 动作 family 抽取新增 `evidence_tags` 回退与轻量 canonical family 映射
+- [brain/response_transition_model.py](/Users/loki/Workspace/GraduationDesign/brain/response_transition_model.py)
+  - verify 分支不再只吃单一 family，而是会在多 family 候选中优先选择“更具体、统计更扎实”的分布
+- [brain/trajectory_evaluator.py](/Users/loki/Workspace/GraduationDesign/brain/trajectory_evaluator.py)
+  - final answer aggregation 新增轻量区分性 bonus：
+    - `discriminative_answer_bonus`
+    - `competitor suppression bonus`
+    - `top-k rank stability bonus`
+  - 让“轨迹质量一般但数量多”的答案不再天然压过“真正压制竞争对手”的答案
+- [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - 新增上述 reward / mcts / path evaluation 参数装配
+- 配置更新：
+  - [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml)
+  - [configs/brain_benchmark_modular_v2_statistical_belief_aware.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain_benchmark_modular_v2_statistical_belief_aware.yaml)
+  - [configs/brain_benchmark_modular_v2_statistical_belief_aware_relaxed.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain_benchmark_modular_v2_statistical_belief_aware_relaxed.yaml)
+- 测试更新：
+  - [tests/test_belief_aware_reward_model.py](/Users/loki/Workspace/GraduationDesign/tests/test_belief_aware_reward_model.py)
+  - [tests/test_simulation_engine.py](/Users/loki/Workspace/GraduationDesign/tests/test_simulation_engine.py)
+  - [tests/test_mcts_engine.py](/Users/loki/Workspace/GraduationDesign/tests/test_mcts_engine.py)
+  - [tests/test_trajectory_evaluator.py](/Users/loki/Workspace/GraduationDesign/tests/test_trajectory_evaluator.py)
+  - [tests/test_service_config.py](/Users/loki/Workspace/GraduationDesign/tests/test_service_config.py)
+
+### 设计取舍
+
+- 本轮没有引入 learned transition model
+- 原因不是它不重要，而是当前 statistical 主线还有明显的“排序信号未完全贯通”问题
+- 在这一层先做轻量、可解释、可回归的校准，成本更低，也更利于 benchmark 对比和论文分析
+
+### 下一轮 benchmark 建议
+
+- `statistical + heuristic reward`
+- `statistical + belief-aware reward`
+- `statistical + belief-aware reward + relaxed calibration`
+
+重点优先看：
+
+- `Top-1 final answer hit`
+- `Top-3 hypothesis hit`
+- `family hit`
+
 ## 近期更新：2026-05-11 对 belief-aware reward 路径做 acceptance calibration 轻量放松
 
 ### 本次目标

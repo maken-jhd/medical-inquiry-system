@@ -725,7 +725,19 @@ NO_RESUME=1 \
 如果要继续观察新的 belief-aware reward，可在任一 modular_v2 benchmark 配置上额外覆写：
 
 - `reward_model.type = belief_aware_v1`
-- 如有需要，再微调 `reward_model.margin_gain_weight / uncertainty_reduction_weight / acceptance_risk_weight`
+- 如有需要，再微调：
+  - `reward_model.top3_separation_weight`
+  - `reward_model.competitor_elimination_weight`
+  - `reward_model.discriminative_support_weight`
+  - `reward_model.acceptance_risk_weight`
+- 当前这条主线的论文主指标更偏：
+  - `Top-1 final answer hit`
+  - `Top-3 hypothesis hit`
+- 因此当前默认配置会显式打开：
+  - `enable_top3_separation_gain`
+  - `enable_competitor_elimination_bonus`
+  - `enable_discriminative_support_bonus`
+  - `path_evaluation.enable_discriminative_answer_bonus`
 - acceptance 侧当前还支持轻量 `acceptance_calibration`，只会在 verifier 已想接受时再参考 `belief_margin_proxy / acceptance_risk_proxy / branch_support_quality` 做一次保守校准
 
 如果要直接跑 `statistical + belief-aware reward` 的 smoke60 对照，可使用：
@@ -754,10 +766,13 @@ NO_RESUME=1 \
 - `transition_model.type = statistical`
 - `reward_model.type = belief_aware_v1`
 
-差异只在 acceptance calibration 阈值：
+差异主要在 acceptance calibration 阈值与 Top-1 / Top-3 导向权重：
 
 - 标准版保守保留 wrong accepted 护栏
-- relaxed 版额外放宽 buffer 和 high-support override，方便观察 completion / accepted hit 是否能回升
+- relaxed 版额外放宽 buffer 和 high-support override，并进一步强调：
+  - `top3 separation`
+  - `competitor elimination`
+  - `discriminative answer bonus`
 
 真实 focused baseline ablation：
 

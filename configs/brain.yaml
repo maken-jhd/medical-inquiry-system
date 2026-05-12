@@ -12,6 +12,7 @@ search:
   exploration_weight: 2.0
   discount_factor: 1.0
   max_kg_triplets: 15
+  discriminative_gain_weight: 0.12
 
 search_policy:
   # 当前这轮 benchmark 先切到 No-Tree Greedy：
@@ -49,15 +50,22 @@ transition_model:
 reward_model:
   type: heuristic_v2
   enable_belief_margin_gain: true
+  enable_top3_separation_gain: true
   enable_uncertainty_reduction: true
+  enable_competitor_elimination_bonus: true
+  enable_discriminative_support_bonus: true
   enable_acceptance_risk_penalty: true
   belief_top_k_hypotheses: 3
   margin_gain_weight: 0.32
+  top3_separation_weight: 0.24
   uncertainty_reduction_weight: 0.28
-  acceptance_risk_weight: 0.22
+  competitor_elimination_weight: 0.26
+  discriminative_support_weight: 0.18
+  acceptance_risk_weight: 0.16
   branch_likelihood_floor: 0.05
   min_branch_support_count: 3.0
   low_value_high_cost_penalty_multiplier: 1.15
+  detail_non_discriminative_penalty: 0.05
 
 # acceptance calibration 只做 verifier 之后的轻量 proxy guard，
 # 不改 verifier / repair 的整体职责边界。
@@ -102,6 +110,11 @@ path_evaluation:
   enable_single_answer_group_cap: true
   low_anchor_single_group_score_cap: 0.62
   enable_scope_penalty_in_final_score: true
+  enable_discriminative_answer_bonus: true
+  discriminative_answer_bonus_weight: 0.08
+  competitor_suppression_bonus_weight: 0.07
+  rank_stability_bonus_weight: 0.05
+  discriminative_support_bonus_weight: 0.05
 
 a1:
   use_llm_extractor: true

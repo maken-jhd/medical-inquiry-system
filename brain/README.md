@@ -254,6 +254,9 @@
     - `uncertainty_reduction_proxy`
     - `acceptance_risk_proxy`
     - `branch_support_quality`
+    - `top1_top3_separation_proxy`
+    - `competitor_elimination_proxy`
+    - `discriminative_support_quality`
     供最终 acceptance 做轻量校准。
 
 - [response_transition_model.py](/Users/loki/Workspace/GraduationDesign/brain/response_transition_model.py)
@@ -264,6 +267,7 @@
     - `LearnedResponseTransitionModel` 占位接口
   - `StatisticalResponseTransitionModel` 当前会先从 graph cases / replay 构建粗粒度条件统计，再用 top-k hypothesis belief mixture 计算 `P(y | s, a)`。
   - 当前 statistical branch metadata 还会额外暴露 disease-conditioned branch likelihood，供 belief-aware reward 近似构造 branch posterior。
+  - 当动作同时带多个 family tag 时，当前会优先选“更具体、统计更扎实”的 verify 分布，而不是只消费第一个 family。
   - 对普通问诊动作，当前输出 `positive / negative / doubtful`。
   - 对 `collect_exam_context` 动作，当前内部先估计 `done / not_done` 与结果分布，再映射成 `done_positive / done_negative / done_unclear / not_done`。
 
@@ -275,6 +279,8 @@
   - `BeliefAwareRolloutRewardModel` 当前不会重跑统计表，而是直接复用 transition branch metadata 中的 `belief_components`，近似估计：
     - branch 后 `belief entropy` 是否下降
     - `top1-top2 margin` 是否被拉开
+    - `top1-top3 separation` 是否被拉开
+    - 竞争诊断是否被有效压低
     - 当前分支是否会提升 premature acceptance risk
 
 - [transition_statistics.py](/Users/loki/Workspace/GraduationDesign/brain/transition_statistics.py)
@@ -283,6 +289,7 @@
     - graph case / replay 统计加载
     - `disease + evidence_family + question_type` 的普通问诊分布
     - `disease + exam_kind / test_type` 的检查上下文分布
+    - `evidence_tags -> canonical family` 的轻量回退映射
     - top-k hypothesis belief 归一化
     - action 到 `question_type / family / exam_kind / test_type` 的集中映射
 

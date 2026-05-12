@@ -3,6 +3,9 @@ search_impl: modular_v2
 search_policy:
   root_action_mode: mcts
 
+search:
+  discriminative_gain_weight: 0.14
+
 transition_model:
   type: statistical
   statistics_source_mode: auto
@@ -14,6 +17,14 @@ transition_model:
 
 reward_model:
   type: belief_aware_v1
+  enable_top3_separation_gain: true
+  enable_competitor_elimination_bonus: true
+  enable_discriminative_support_bonus: true
+  top3_separation_weight: 0.28
+  competitor_elimination_weight: 0.3
+  discriminative_support_weight: 0.2
+  acceptance_risk_weight: 0.12
+  detail_non_discriminative_penalty: 0.06
 
 acceptance_calibration:
   enable_reward_confidence_proxy: true
@@ -24,3 +35,10 @@ acceptance_calibration:
   risk_relaxation_buffer: 0.06
   high_support_quality_override: 0.58
   high_support_quality_risk_discount: 0.06
+
+path_evaluation:
+  enable_discriminative_answer_bonus: true
+  discriminative_answer_bonus_weight: 0.1
+  competitor_suppression_bonus_weight: 0.08
+  rank_stability_bonus_weight: 0.06
+  discriminative_support_bonus_weight: 0.06

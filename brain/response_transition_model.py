@@ -291,10 +291,9 @@ class StatisticalResponseTransitionModel(ResponseTransitionModel):
                 statistics=self.statistics,
                 disease_id=belief_item.disease_id,
             )
-            distribution = self.statistics.query_verify_distribution(
+            distribution, selected_family = self._select_verify_distribution_for_context(
                 disease_id=belief_item.disease_id,
-                evidence_family=disease_context.evidence_family,
-                question_type=disease_context.question_type,
+                action_context=disease_context,
             )
             probability_accumulator["positive"] += belief_item.weight * distribution.probabilities["present"]
             probability_accumulator["negative"] += belief_item.weight * distribution.probabilities["absent"]
@@ -304,6 +303,7 @@ class StatisticalResponseTransitionModel(ResponseTransitionModel):
                     belief_item=belief_item,
                     distribution=distribution,
                     action_context=disease_context,
+                    selected_family=selected_family,
                 )
             )
 
@@ -318,6 +318,7 @@ class StatisticalResponseTransitionModel(ResponseTransitionModel):
                     "branch_schema": "verify",
                     "question_type": action_context.question_type,
                     "evidence_family": action_context.evidence_family,
+                    "evidence_families": list(action_context.evidence_families),
                     "belief_components": mixture_components,
                 },
             ),
@@ -331,6 +332,7 @@ class StatisticalResponseTransitionModel(ResponseTransitionModel):
                     "branch_schema": "verify",
                     "question_type": action_context.question_type,
                     "evidence_family": action_context.evidence_family,
+                    "evidence_families": list(action_context.evidence_families),
                     "belief_components": mixture_components,
                 },
             ),
@@ -344,10 +346,57 @@ class StatisticalResponseTransitionModel(ResponseTransitionModel):
                     "branch_schema": "verify",
                     "question_type": action_context.question_type,
                     "evidence_family": action_context.evidence_family,
+                    "evidence_families": list(action_context.evidence_families),
                     "belief_components": mixture_components,
                 },
             ),
         ]
+
+    # 某些动作同时带多个 family tag，这里优先选“更具体、统计量更扎实”的 verify 分布，而不是只吃第一个 family。
+    def _select_verify_distribution_for_context(
+        self,
+        *,
+        disease_id: str,
+        action_context: TransitionActionContext,
+    ) -> tuple[ConditionalBranchDistribution, str]:
+        candidate_families = list(action_context.evidence_families or ())
+        if len(candidate_families) == 0:
+            candidate_families = [action_context.evidence_family]
+
+        candidates: list[tuple[str, ConditionalBranchDistribution]] = []
+        for family in candidate_families:
+            normalized_family = str(family or "").strip()
+            if len(normalized_family) == 0:
+                continue
+            candidates.append(
+                (
+                    normalized_family,
+                    self.statistics.query_verify_distribution(
+                        disease_id=disease_id,
+                        evidence_family=normalized_family,
+                        question_type=action_context.question_type,
+                    ),
+                )
+            )
+
+        if len(candidates) == 0:
+            fallback_family = str(action_context.evidence_family or "").strip()
+            fallback_distribution = self.statistics.query_verify_distribution(
+                disease_id=disease_id,
+                evidence_family=fallback_family,
+                question_type=action_context.question_type,
+            )
+            return fallback_distribution, fallback_family
+
+        best_family, best_distribution = sorted(
+            candidates,
+            key=lambda item: (
+                _verify_backoff_rank(item[1].backoff_level),
+                -float(item[1].total_count),
+                item[0],
+            ),
+        )[0]
+        return best_distribution, best_family
 
     def _predict_exam_branches(
         self,
@@ -575,13 +624,15 @@ class StatisticalResponseTransitionModel(ResponseTransitionModel):
         belief_item: HypothesisBeliefWeight,
         distribution: ConditionalBranchDistribution,
         action_context: TransitionActionContext,
+        selected_family: str,
     ) -> dict[str, Any]:
         return {
             "disease_id": belief_item.disease_id,
             "weight": round(float(belief_item.weight), 4),
             "raw_score": round(float(belief_item.raw_score), 4),
             "question_type": action_context.question_type,
-            "evidence_family": action_context.evidence_family,
+            "evidence_family": selected_family,
+            "candidate_evidence_families": list(action_context.evidence_families),
             "backoff_level": distribution.backoff_level,
             "source_key": list(distribution.source_key),
             "total_count": round(float(distribution.total_count), 4),
@@ -638,3 +689,13 @@ class LearnedResponseTransitionModel(ResponseTransitionModel):
         raise NotImplementedError(
             "LearnedResponseTransitionModel 目前只保留接口占位；当前版本未接入训练与推理流程。"
         )
+
+
+def _verify_backoff_rank(level: str) -> int:
+    return {
+        "disease_family_question_type": 0,
+        "disease_question_type": 1,
+        "family_question_type": 2,
+        "question_type": 3,
+        "global": 4,
+    }.get(str(level or "").strip(), 5)

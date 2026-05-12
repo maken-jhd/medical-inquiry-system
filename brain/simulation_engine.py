@@ -223,6 +223,7 @@ class SimulationEngine:
         )
         branch_estimates: list[dict] = []
         expected_reward = 0.0
+        discriminative_action_bonus = 0.0
         positive_reward = 0.0
         negative_reward = 0.0
         doubtful_reward = 0.0
@@ -239,13 +240,22 @@ class SimulationEngine:
             )
             reward = max(float(reward_evaluation.reward), 0.0)
             weighted_reward = branch.probability * reward
+            discriminative_branch_bonus = self._estimate_branch_discriminative_bonus(
+                action=action,
+                branch=branch,
+                reward_breakdown=reward_evaluation.metadata,
+            )
+            selection_score = weighted_reward + discriminative_branch_bonus
             expected_reward += weighted_reward
+            discriminative_action_bonus += discriminative_branch_bonus
             branch_estimates.append(
                 {
                     "branch": branch.branch_name,
                     "probability": branch.probability,
                     "reward": reward,
                     "weighted_reward": weighted_reward,
+                    "selection_score": selection_score,
+                    "discriminative_branch_bonus": discriminative_branch_bonus,
                     "polarity": branch.polarity,
                     "resolution": branch.resolution,
                     "transition_metadata": dict(branch.metadata),
@@ -259,10 +269,18 @@ class SimulationEngine:
             elif branch.branch_name == "doubtful":
                 doubtful_reward = reward
 
+        expected_reward += discriminative_action_bonus
         probability_map = {
             str(item["branch"]): float(item["probability"])
             for item in branch_estimates
         }
+        competitor_coverage_bonus = max(
+            (
+                float(item.get("reward_breakdown", {}).get("competitor_coverage_surrogate", 0.0) or 0.0)
+                for item in branch_estimates
+            ),
+            default=0.0,
+        )
         return SimulationOutcome(
             action_id=action.action_id,
             expected_reward=expected_reward,
@@ -276,6 +294,9 @@ class SimulationEngine:
                 "doubtful_branch_reward": doubtful_reward,
                 "relation_type": str(action.metadata.get("relation_type", "")),
                 "branch_estimates": branch_estimates,
+                "expected_reward_raw": round(expected_reward - discriminative_action_bonus, 4),
+                "discriminative_action_bonus": round(discriminative_action_bonus, 4),
+                "competitor_coverage_bonus": round(competitor_coverage_bonus, 4),
                 "transition_model_type": self.config.transition_model_type,
                 "reward_model_type": self.config.reward_model_type,
             },
@@ -302,7 +323,10 @@ class SimulationEngine:
         branch_payloads = self._build_branch_payloads(action, outcome)
 
         # 单动作 rollout 直接选择期望收益最高的回答分支，构成最轻量的一条前瞻轨迹。
-        selected_branch = sorted(branch_payloads, key=lambda item: (-item["weighted_reward"], item["branch"]))[0]
+        selected_branch = sorted(
+            branch_payloads,
+            key=lambda item: (-self._payload_selection_score(item), item["branch"]),
+        )[0]
         reward_proxy_summary = self._summarize_reward_proxy([selected_branch])
 
         steps = [
@@ -644,6 +668,10 @@ class SimulationEngine:
                         "probability": probability,
                         "reward": reward,
                         "weighted_reward": weighted_reward,
+                        "selection_score": float(item.get("selection_score", weighted_reward) or weighted_reward),
+                        "discriminative_branch_bonus": float(
+                            item.get("discriminative_branch_bonus", 0.0) or 0.0
+                        ),
                         "pending_action_result": self._build_pending_action_result_from_branch(
                             action,
                             branch_name=branch_name,
@@ -676,6 +704,7 @@ class SimulationEngine:
                 "probability": positive_probability,
                 "reward": outcome.positive_branch_reward,
                 "weighted_reward": positive_probability * outcome.positive_branch_reward,
+                "selection_score": positive_probability * outcome.positive_branch_reward,
                 "pending_action_result": PendingActionResult(
                     action_type=action.action_type,
                     target_node_id=action.target_node_id,
@@ -691,6 +720,7 @@ class SimulationEngine:
                 "probability": negative_probability,
                 "reward": outcome.negative_branch_reward,
                 "weighted_reward": negative_probability * outcome.negative_branch_reward,
+                "selection_score": negative_probability * outcome.negative_branch_reward,
                 "pending_action_result": PendingActionResult(
                     action_type=action.action_type,
                     target_node_id=action.target_node_id,
@@ -706,6 +736,7 @@ class SimulationEngine:
                 "probability": doubtful_probability,
                 "reward": doubtful_reward,
                 "weighted_reward": doubtful_probability * doubtful_reward,
+                "selection_score": doubtful_probability * doubtful_reward,
                 "pending_action_result": PendingActionResult(
                     action_type=action.action_type,
                     target_node_id=action.target_node_id,
@@ -723,7 +754,7 @@ class SimulationEngine:
     def _select_rollout_branch_seeds(self, branch_payloads: list[dict]) -> list[dict]:
         ranked = sorted(
             branch_payloads,
-            key=lambda item: (-float(item["weighted_reward"]), item["branch"]),
+            key=lambda item: (-self._payload_selection_score(item), item["branch"]),
         )
         if len(ranked) == 0:
             return []
@@ -752,7 +783,7 @@ class SimulationEngine:
                 non_positive_candidates,
                 key=lambda item: (
                     str(item.get("branch") or "") != "negative",
-                    -float(item.get("weighted_reward", 0.0) or 0.0),
+                    -self._payload_selection_score(item),
                     -float(item.get("probability", 0.0) or 0.0),
                 ),
             )[0]
@@ -783,6 +814,10 @@ class SimulationEngine:
         uncertainty_reductions: list[float] = []
         acceptance_risks: list[float] = []
         support_qualities: list[float] = []
+        top3_separation_gains: list[float] = []
+        competitor_eliminations: list[float] = []
+        discriminative_supports: list[float] = []
+        competitor_coverages: list[float] = []
 
         for payload in branch_payloads:
             breakdown = payload.get("reward_breakdown", {})
@@ -792,6 +827,10 @@ class SimulationEngine:
             uncertainty_reduction = breakdown.get("uncertainty_reduction_surrogate")
             acceptance_risk = breakdown.get("acceptance_risk_proxy")
             support_quality = breakdown.get("branch_support_quality")
+            top3_separation_gain = breakdown.get("top1_top3_separation_gain_surrogate")
+            competitor_elimination = breakdown.get("competitor_elimination_surrogate")
+            discriminative_support = breakdown.get("discriminative_support_quality")
+            competitor_coverage = breakdown.get("competitor_coverage_surrogate")
             if isinstance(belief_margin, (int, float)):
                 belief_margins.append(float(belief_margin))
             if isinstance(uncertainty_reduction, (int, float)):
@@ -800,12 +839,22 @@ class SimulationEngine:
                 acceptance_risks.append(float(acceptance_risk))
             if isinstance(support_quality, (int, float)):
                 support_qualities.append(float(support_quality))
+            if isinstance(top3_separation_gain, (int, float)):
+                top3_separation_gains.append(float(top3_separation_gain))
+            if isinstance(competitor_elimination, (int, float)):
+                competitor_eliminations.append(float(competitor_elimination))
+            if isinstance(discriminative_support, (int, float)):
+                discriminative_supports.append(float(discriminative_support))
+            if isinstance(competitor_coverage, (int, float)):
+                competitor_coverages.append(float(competitor_coverage))
 
         if (
             len(belief_margins) == 0
             and len(uncertainty_reductions) == 0
             and len(acceptance_risks) == 0
             and len(support_qualities) == 0
+            and len(top3_separation_gains) == 0
+            and len(competitor_eliminations) == 0
         ):
             return {}
 
@@ -830,6 +879,22 @@ class SimulationEngine:
             "uncertainty_reduction_proxy": round(uncertainty_mean, 4),
             "acceptance_risk_proxy": round(risk_mean, 4),
             "branch_support_quality": round(support_mean, 4),
+            "top1_top3_separation_proxy": round(
+                sum(top3_separation_gains) / max(len(top3_separation_gains), 1),
+                4,
+            ),
+            "competitor_elimination_proxy": round(
+                sum(competitor_eliminations) / max(len(competitor_eliminations), 1),
+                4,
+            ),
+            "discriminative_support_quality": round(
+                sum(discriminative_supports) / max(len(discriminative_supports), 1),
+                4,
+            ),
+            "competitor_coverage_proxy": round(
+                sum(competitor_coverages) / max(len(competitor_coverages), 1),
+                4,
+            ),
             "branch_consistency_score": round(branch_consistency_score, 4),
         }
 
@@ -844,14 +909,14 @@ class SimulationEngine:
                 branch_payloads,
                 key=lambda item: (
                     -float(item.get("probability", 0.0) or 0.0),
-                    -float(item.get("weighted_reward", 0.0) or 0.0),
+                    -self._payload_selection_score(item),
                     item["branch"],
                 ),
             )[0]
 
         return sorted(
             branch_payloads,
-            key=lambda item: (-float(item["weighted_reward"]), item["branch"]),
+            key=lambda item: (-self._payload_selection_score(item), item["branch"]),
         )[0]
 
     # sampled 模式先保留占位实现：按固定 seed 做确定性采样，便于后续替换成真正的 chance rollout。
@@ -898,13 +963,13 @@ class SimulationEngine:
 
         best_non_positive = max(
             (
-                float(item.get("weighted_reward", 0.0) or 0.0)
+                self._payload_selection_score(item)
                 for item in branch_payloads
                 if str(item.get("branch") or "") != "positive"
             ),
             default=0.0,
         )
-        dominance_margin = max(float(selected_branch.get("weighted_reward", 0.0) or 0.0) - best_non_positive, 0.0)
+        dominance_margin = max(self._payload_selection_score(selected_branch) - best_non_positive, 0.0)
         if dominance_margin <= 0.0:
             return 0.0, ""
 
@@ -913,6 +978,42 @@ class SimulationEngine:
             float(selected_branch.get("reward", 0.0) or 0.0) * 0.35,
         )
         return penalty, "low_observed_anchor_positive_branch_collapse_risk"
+
+    def _payload_selection_score(self, payload: dict) -> float:
+        return float(payload.get("selection_score", payload.get("weighted_reward", 0.0)) or 0.0)
+
+    def _estimate_branch_discriminative_bonus(
+        self,
+        *,
+        action: MctsAction,
+        branch: TransitionBranch,
+        reward_breakdown: dict,
+    ) -> float:
+        if not self._uses_modular_v2() or not isinstance(reward_breakdown, dict):
+            return 0.0
+
+        top3_separation_gain = float(reward_breakdown.get("top1_top3_separation_gain_surrogate", 0.0) or 0.0)
+        competitor_elimination = float(reward_breakdown.get("competitor_elimination_surrogate", 0.0) or 0.0)
+        competitor_coverage = float(reward_breakdown.get("competitor_coverage_surrogate", 0.0) or 0.0)
+        discriminative_support = float(reward_breakdown.get("discriminative_support_quality", 0.0) or 0.0)
+        action_discriminative_gain = min(max(float(action.metadata.get("discriminative_gain", 0.0) or 0.0), 0.0), 1.0)
+        probability = max(float(branch.probability), 0.0)
+        question_type_hint = str(action.metadata.get("question_type_hint", "") or "")
+
+        bonus = probability * (
+            top3_separation_gain * 0.22
+            + competitor_elimination * 0.24
+            + competitor_coverage * 0.1
+            + discriminative_support * 0.14
+            + action_discriminative_gain * 0.08
+        )
+        if (
+            question_type_hint == "detail"
+            and top3_separation_gain < 0.035
+            and competitor_elimination < 0.03
+        ):
+            bonus -= probability * 0.045
+        return bonus
 
     # 从树节点元数据中提取当前动作。
     def _extract_action(self, node: TreeNode) -> MctsAction | None:

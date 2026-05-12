@@ -218,3 +218,133 @@ def test_mcts_engine_select_root_action_greedy_prefers_higher_prior_score() -> N
 
     assert selected is not None
     assert selected.action_id == "high_prior"
+
+
+# 验证在 modular_v2 下，root action 排序会轻量偏向更能拉开候选差距的动作。
+def test_mcts_engine_select_root_action_prefers_higher_discriminative_gain_on_close_values() -> None:
+    engine = MctsEngine()
+    tree = SearchTree()
+    root = TreeNode(node_id="root", state_signature="root", parent_id=None, action_from_parent=None, stage="A2", depth=0)
+    weak_discriminative = TreeNode(
+        node_id="root::weak",
+        state_signature="weak",
+        parent_id="root",
+        action_from_parent="weak",
+        stage="A3",
+        depth=1,
+        visit_count=4,
+        total_value=3.12,
+        average_value=0.78,
+        metadata={
+            "prior_score": 0.72,
+            "discriminative_gain": 0.12,
+            "action": MctsAction(
+                action_id="weak",
+                action_type="verify_evidence",
+                target_node_id="node_weak",
+                target_node_label="ClinicalFinding",
+                target_node_name="一般症状",
+                prior_score=0.72,
+                metadata={"discriminative_gain": 0.12},
+            ),
+        },
+    )
+    strong_discriminative = TreeNode(
+        node_id="root::strong",
+        state_signature="strong",
+        parent_id="root",
+        action_from_parent="strong",
+        stage="A3",
+        depth=1,
+        visit_count=4,
+        total_value=3.12,
+        average_value=0.78,
+        metadata={
+            "prior_score": 0.72,
+            "discriminative_gain": 1.05,
+            "action": MctsAction(
+                action_id="strong",
+                action_type="verify_evidence",
+                target_node_id="node_strong",
+                target_node_label="LabFinding",
+                target_node_name="高区分度证据",
+                prior_score=0.72,
+                metadata={"discriminative_gain": 1.05},
+            ),
+        },
+    )
+    tree.add_node(root)
+    tree.add_node(weak_discriminative)
+    tree.add_node(strong_discriminative)
+    tree.add_edge("root", "root::weak")
+    tree.add_edge("root", "root::strong")
+
+    selected = engine.select_root_action(tree)
+
+    assert selected is not None
+    assert selected.action_id == "strong"
+
+
+# greedy 根动作在 prior 接近时，也应允许区分性 gain 作为 tie-break，减少细节动作占优。
+def test_mcts_engine_select_root_action_greedy_uses_discriminative_gain_tiebreak() -> None:
+    engine = MctsEngine()
+    tree = SearchTree()
+    root = TreeNode(node_id="root", state_signature="root", parent_id=None, action_from_parent=None, stage="A2", depth=0)
+    detail_child = TreeNode(
+        node_id="root::detail",
+        state_signature="detail",
+        parent_id="root",
+        action_from_parent="detail",
+        stage="A3",
+        depth=1,
+        visit_count=2,
+        total_value=0.8,
+        average_value=0.4,
+        metadata={
+            "prior_score": 0.7,
+            "discriminative_gain": 0.08,
+            "action": MctsAction(
+                action_id="detail",
+                action_type="verify_evidence",
+                target_node_id="node_detail",
+                target_node_label="ClinicalAttribute",
+                target_node_name="细节问题",
+                prior_score=0.7,
+                metadata={"discriminative_gain": 0.08},
+            ),
+        },
+    )
+    discriminative_child = TreeNode(
+        node_id="root::disc",
+        state_signature="disc",
+        parent_id="root",
+        action_from_parent="disc",
+        stage="A3",
+        depth=1,
+        visit_count=2,
+        total_value=0.8,
+        average_value=0.4,
+        metadata={
+            "prior_score": 0.7,
+            "discriminative_gain": 0.92,
+            "action": MctsAction(
+                action_id="disc",
+                action_type="verify_evidence",
+                target_node_id="node_disc",
+                target_node_label="LabFinding",
+                target_node_name="区分性问题",
+                prior_score=0.7,
+                metadata={"discriminative_gain": 0.92},
+            ),
+        },
+    )
+    tree.add_node(root)
+    tree.add_node(detail_child)
+    tree.add_node(discriminative_child)
+    tree.add_edge("root", "root::detail")
+    tree.add_edge("root", "root::disc")
+
+    selected = engine.select_root_action_greedy(tree)
+
+    assert selected is not None
+    assert selected.action_id == "disc"
