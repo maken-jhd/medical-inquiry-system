@@ -7,7 +7,7 @@ import json
 import signal
 import sys
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -17,6 +17,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from baselines.llm_consultation_brain import PureLlmConsultationBrain
+from baselines.llm_text_rag_consultation_brain import TextRagConsultationBrain
+from baselines.text_rag_retriever import SparseTextRagRetriever
 from brain.llm_client import LlmClient
 from frontend.config_loader import apply_config_to_environment, load_frontend_config
 from scripts import run_batch_replay
@@ -38,19 +40,32 @@ class _BaselineWorkerRuntime:
     """保存单个 baseline worker 会跨病例复用的 LLM client。"""
 
     llm_client: LlmClient
+    sparse_text_rag_retrievers: dict[str, SparseTextRagRetriever] = field(default_factory=dict)
+
+    def get_sparse_text_rag_retriever(self, corpus_file: str) -> SparseTextRagRetriever:
+        normalized_path = str(Path(corpus_file).resolve())
+        retriever = self.sparse_text_rag_retrievers.get(normalized_path)
+        if retriever is None:
+            retriever = SparseTextRagRetriever.from_jsonl(normalized_path)
+            self.sparse_text_rag_retrievers[normalized_path] = retriever
+        return retriever
 
     def close(self) -> None:
         self.llm_client.close()
 
 
+def _default_output_root_for_mode(baseline_mode: str) -> Path:
+    return PROJECT_ROOT / "test_outputs" / "simulator_replay" / "benchmark_external_baselines" / baseline_mode
+
+
 # 解析 baseline batch runner 的命令行参数。
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="批量运行纯 LLM baseline 并输出 benchmark 指标。")
+    parser = argparse.ArgumentParser(description="批量运行外部 baseline 并输出 benchmark 指标。")
     parser.add_argument(
         "--baseline-mode",
         default="pure_llm",
-        choices=["pure_llm"],
-        help="当前只支持 pure_llm；文本 RAG 基线留待下一步实现。",
+        choices=["pure_llm", "text_rag"],
+        help="当前支持 pure_llm 与 text_rag。",
     )
     parser.add_argument(
         "--cases-file",
@@ -59,7 +74,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output-root",
-        default=str(PROJECT_ROOT / "test_outputs" / "simulator_replay" / "benchmark_external_baselines" / "pure_llm"),
+        default="",
         help="baseline 输出目录。",
     )
     parser.add_argument(
@@ -90,6 +105,17 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=1,
         help="遇到 APIConnectionError / Connection error 时，单病例额外自动重试次数。",
+    )
+    parser.add_argument(
+        "--rag-corpus-file",
+        default="",
+        help="text_rag 模式使用的 JSONL 语料文件。",
+    )
+    parser.add_argument(
+        "--retrieval-top-k",
+        type=int,
+        default=4,
+        help="text_rag 模式每轮注入 prompt 的检索块数量上限。",
     )
     return parser.parse_args()
 
@@ -125,17 +151,36 @@ def _normalize_text(value: str) -> str:
     return str(value).strip().replace(" ", "").replace("-", "").replace("_", "").lower()
 
 
-def _run_single_case(case, max_turns: int, baseline_mode: str, disease_scope: list[str]):
+def _run_single_case(
+    case,
+    max_turns: int,
+    baseline_mode: str,
+    disease_scope: list[str],
+    *,
+    rag_corpus_file: str = "",
+    retrieval_top_k: int = 4,
+):
     worker_runtime = _get_worker_runtime()
-    if baseline_mode != "pure_llm":
+    if baseline_mode == "pure_llm":
+        brain = PureLlmConsultationBrain(
+            llm_client=worker_runtime.llm_client,
+            max_turns=max_turns,
+            backend_name=baseline_mode,
+            disease_scope=disease_scope,
+        )
+    elif baseline_mode == "text_rag":
+        if len(rag_corpus_file.strip()) == 0:
+            raise ValueError("text_rag 模式必须提供 rag_corpus_file。")
+        brain = TextRagConsultationBrain(
+            llm_client=worker_runtime.llm_client,
+            retriever=worker_runtime.get_sparse_text_rag_retriever(rag_corpus_file),
+            max_turns=max_turns,
+            retrieval_top_k=retrieval_top_k,
+            disease_scope=disease_scope,
+        )
+    else:
         raise ValueError(f"暂不支持的 baseline_mode: {baseline_mode}")
 
-    brain = PureLlmConsultationBrain(
-        llm_client=worker_runtime.llm_client,
-        max_turns=max_turns,
-        backend_name=baseline_mode,
-        disease_scope=disease_scope,
-    )
     patient_agent = VirtualPatientAgent(use_llm=True, llm_client=worker_runtime.llm_client)
     engine = ReplayEngine(
         brain=brain,
@@ -151,6 +196,8 @@ def _run_single_case_guarded(
     *,
     baseline_mode: str,
     disease_scope: list[str],
+    rag_corpus_file: str = "",
+    retrieval_top_k: int = 4,
     api_error_retries: int = 1,
 ):
     retry_count = max(int(api_error_retries), 0)
@@ -159,7 +206,14 @@ def _run_single_case_guarded(
 
     while True:
         try:
-            result = _run_single_case(case, max_turns, baseline_mode, disease_scope)
+            result = _run_single_case(
+                case,
+                max_turns,
+                baseline_mode,
+                disease_scope,
+                rag_corpus_file=rag_corpus_file,
+                retrieval_top_k=retrieval_top_k,
+            )
         except Exception as exc:
             if retries_used < retry_count and run_batch_replay._is_retryable_api_exception(exc):
                 retries_used += 1
@@ -194,6 +248,8 @@ def _run_cases_streaming(
     case_concurrency: int,
     baseline_mode: str,
     disease_scope: list[str],
+    rag_corpus_file: str = "",
+    retrieval_top_k: int = 4,
     api_error_retries: int = 1,
     on_case_start=None,
     on_result=None,
@@ -219,6 +275,8 @@ def _run_cases_streaming(
                     max_turns,
                     baseline_mode=baseline_mode,
                     disease_scope=disease_scope,
+                    rag_corpus_file=rag_corpus_file,
+                    retrieval_top_k=retrieval_top_k,
                     api_error_retries=api_error_retries,
                 )
                 if on_result is not None:
@@ -253,6 +311,8 @@ def _run_cases_streaming(
                     max_turns,
                     baseline_mode=baseline_mode,
                     disease_scope=disease_scope,
+                    rag_corpus_file=rag_corpus_file,
+                    retrieval_top_k=retrieval_top_k,
                     api_error_retries=api_error_retries,
                 )
             ] = case
@@ -288,6 +348,8 @@ def _run_cases_streaming(
                             max_turns,
                             baseline_mode=baseline_mode,
                             disease_scope=disease_scope,
+                            rag_corpus_file=rag_corpus_file,
+                            retrieval_top_k=retrieval_top_k,
                             api_error_retries=api_error_retries,
                         )
                     ] = next_case
@@ -394,7 +456,11 @@ def main() -> int:
     previous_signal_handlers = run_batch_replay._install_interrupt_signal_handlers()
     frontend_config = load_frontend_config()
     apply_config_to_environment(frontend_config)
-    output_root = Path(args.output_root)
+    output_root = (
+        Path(args.output_root).expanduser()
+        if len(args.output_root.strip()) > 0
+        else _default_output_root_for_mode(args.baseline_mode)
+    )
     output_root.mkdir(parents=True, exist_ok=True)
     results_file = output_root / "replay_results.jsonl"
     summary_file = output_root / "benchmark_summary.json"
@@ -411,6 +477,53 @@ def main() -> int:
 
     if int(args.limit) > 0:
         cases = cases[: int(args.limit)]
+
+    rag_corpus_file = args.rag_corpus_file.strip()
+    if args.baseline_mode == "text_rag":
+        if len(rag_corpus_file) == 0:
+            run_batch_replay._write_json(
+                status_file,
+                run_batch_replay._build_status_payload(
+                    run_status="failed",
+                    total_cases=len(cases),
+                    completed_cases=0,
+                    skipped_completed_cases=0,
+                    case_concurrency=args.case_concurrency,
+                    case_file=args.cases_file.strip(),
+                    case_limit=args.limit,
+                    output_root=output_root,
+                    start_time=start_time,
+                    active_cases=[],
+                    timing_summary=run_batch_replay._build_timing_summary([]),
+                ),
+            )
+            run_batch_replay._emit_terminal_line(
+                "[baseline_replay] 启动失败：text_rag 模式必须提供 --rag-corpus-file。"
+            )
+            return 1
+        rag_corpus_path = Path(rag_corpus_file).expanduser().resolve()
+        if not rag_corpus_path.exists():
+            run_batch_replay._write_json(
+                status_file,
+                run_batch_replay._build_status_payload(
+                    run_status="failed",
+                    total_cases=len(cases),
+                    completed_cases=0,
+                    skipped_completed_cases=0,
+                    case_concurrency=args.case_concurrency,
+                    case_file=args.cases_file.strip(),
+                    case_limit=args.limit,
+                    output_root=output_root,
+                    start_time=start_time,
+                    active_cases=[],
+                    timing_summary=run_batch_replay._build_timing_summary([]),
+                ),
+            )
+            run_batch_replay._emit_terminal_line(
+                f"[baseline_replay] 启动失败：找不到 text_rag 语料文件 {rag_corpus_path}。"
+            )
+            return 1
+        rag_corpus_file = str(rag_corpus_path)
 
     disease_scope, disease_scope_source = resolve_disease_scope(args.cases_file.strip(), cases)
 
@@ -456,7 +569,7 @@ def main() -> int:
             f"启动失败：baseline_mode={args.baseline_mode}，llm_available=false。",
         )
         run_batch_replay._emit_terminal_line(
-            "[baseline_replay] 启动失败：llm_available=false，当前纯 LLM baseline 不会退回规则链路。"
+            "[baseline_replay] 启动失败：llm_available=false，当前外部 baseline 不会退回规则链路。"
         )
         return 1
 
@@ -469,6 +582,9 @@ def main() -> int:
     initial_summary["baseline_mode"] = args.baseline_mode
     initial_summary["disease_scope_count"] = len(disease_scope)
     initial_summary["disease_scope_source"] = disease_scope_source
+    initial_summary["retrieval_top_k"] = max(int(args.retrieval_top_k), 1)
+    if len(rag_corpus_file) > 0:
+        initial_summary["rag_corpus_file"] = rag_corpus_file
     run_batch_replay._write_json(summary_file, initial_summary)
     run_batch_replay._write_json(
         non_completed_cases_file,
@@ -498,6 +614,8 @@ def main() -> int:
             f"api_error_retries={max(int(args.api_error_retries), 0)}，"
             f"disease_scope_count={len(disease_scope)}，"
             f"disease_scope_source={disease_scope_source}，"
+            f"retrieval_top_k={max(int(args.retrieval_top_k), 1)}，"
+            f"rag_corpus_file={rag_corpus_file or 'n/a'}，"
             f"api_error_cooldown_seconds={api_error_cooldown_seconds:.2f}，"
             f"resume={'off' if args.no_resume else 'on'}，llm_available={str(llm_available).lower()}"
         ),
@@ -507,6 +625,7 @@ def main() -> int:
             f"[baseline_replay] 启动：mode={args.baseline_mode}，总病例 {len(cases)}，已完成 {len(existing_results)}，"
             f"待运行 {len(pending_cases)}，并发 {max(int(args.case_concurrency), 1)}，"
             f"disease scope {len(disease_scope)}，"
+            f"retrieval_top_k={max(int(args.retrieval_top_k), 1)}，"
             f"API 连接错误重试 {max(int(args.api_error_retries), 0)} 次，"
             f"冷却基线 {api_error_cooldown_seconds:.2f} 秒，"
             f"resume={'off' if args.no_resume else 'on'}，llm_available={str(llm_available).lower()}"
@@ -540,6 +659,9 @@ def main() -> int:
         summary_payload["baseline_mode"] = args.baseline_mode
         summary_payload["disease_scope_count"] = len(disease_scope)
         summary_payload["disease_scope_source"] = disease_scope_source
+        summary_payload["retrieval_top_k"] = max(int(args.retrieval_top_k), 1)
+        if len(rag_corpus_file) > 0:
+            summary_payload["rag_corpus_file"] = rag_corpus_file
         current_timing_summary = summary_payload["timing_summary"]
         run_batch_replay._write_json(summary_file, summary_payload)
         run_batch_replay._write_json(
@@ -589,6 +711,8 @@ def main() -> int:
             case_concurrency=args.case_concurrency,
             baseline_mode=args.baseline_mode,
             disease_scope=disease_scope,
+            rag_corpus_file=rag_corpus_file,
+            retrieval_top_k=max(int(args.retrieval_top_k), 1),
             api_error_retries=args.api_error_retries,
             on_case_start=mark_case_started,
             on_result=persist_result,
@@ -647,6 +771,9 @@ def main() -> int:
     final_summary["baseline_mode"] = args.baseline_mode
     final_summary["disease_scope_count"] = len(disease_scope)
     final_summary["disease_scope_source"] = disease_scope_source
+    final_summary["retrieval_top_k"] = max(int(args.retrieval_top_k), 1)
+    if len(rag_corpus_file) > 0:
+        final_summary["rag_corpus_file"] = rag_corpus_file
     run_batch_replay._write_json(summary_file, final_summary)
     run_batch_replay._write_json(
         non_completed_cases_file,

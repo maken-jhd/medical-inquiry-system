@@ -150,7 +150,7 @@ class PureLlmConsultationBrain:
     def _build_prompt_variables(self, session: BaselineSessionState, *, must_finalize: bool) -> dict[str, Any]:
         asked_count = len(session.asked_questions)
         remaining_budget = max(self.max_turns - asked_count, 0)
-        return {
+        variables = {
             "scene": "HIV/AIDS 场景下的多轮问诊 baseline",
             "max_turns": self.max_turns,
             "asked_question_count": asked_count,
@@ -162,6 +162,47 @@ class PureLlmConsultationBrain:
             "disease_scope_count": len(self.disease_scope),
             "disease_scope_names": list(self.disease_scope),
         }
+        variables.update(self._build_additional_prompt_variables(session, must_finalize=must_finalize))
+        return variables
+
+    # 子类可以在这里补充额外 prompt 变量，例如检索结果或外部上下文。
+    def _build_additional_prompt_variables(
+        self,
+        session: BaselineSessionState,
+        *,
+        must_finalize: bool,
+    ) -> dict[str, Any]:
+        _ = session, must_finalize
+        return {}
+
+    # 不同 baseline 可以覆盖动作来源，方便 replay 区分纯 LLM 和检索增强路线。
+    def _selected_action_source(self) -> str:
+        return "baseline_llm"
+
+    # 子类可以在 search_report.search_metadata 里补充检索元信息。
+    def _build_additional_search_metadata(
+        self,
+        session: BaselineSessionState,
+        *,
+        decision_kind: str,
+        question_group: str,
+        evidence_cost: str,
+        final_answer: str,
+    ) -> dict[str, Any]:
+        _ = session, decision_kind, question_group, evidence_cost, final_answer
+        return {}
+
+    # 子类可以在 final_report.metadata 里补充本轮最终决策时使用的额外上下文。
+    def _build_additional_final_metadata(
+        self,
+        session: BaselineSessionState,
+        decision: BaselineFinalDecision,
+        *,
+        stop_reason: str,
+        forced_finalize: bool,
+    ) -> dict[str, Any]:
+        _ = session, decision, stop_reason, forced_finalize
+        return {}
 
     # 将模型原始 JSON 统一收口为 ask / final 两种规范化决策。
     def _normalize_turn_decision(
@@ -448,7 +489,7 @@ class PureLlmConsultationBrain:
                 "question_type_hint": decision.question_group,
                 "acquisition_mode": self._acquisition_mode_for_group(decision.question_group, target_node_id),
                 "evidence_cost": decision.evidence_cost,
-                "selected_action_source": "baseline_llm",
+                "selected_action_source": self._selected_action_source(),
                 "selected_action_source_priority_rank": 1,
                 "decision_confidence": decision.confidence,
                 "backend": self.backend_name,
@@ -531,6 +572,26 @@ class PureLlmConsultationBrain:
             }
             for item in top3
         ]
+        search_metadata = {
+            "backend": self.backend_name,
+            "decision": decision_kind,
+            "decision_confidence": confidence,
+            "selected_action_source": self._selected_action_source(),
+            "question_group": question_group,
+            "evidence_cost": evidence_cost,
+            "final_answer": final_answer,
+            "current_top3": top3_payload,
+            "reasoning": reasoning,
+        }
+        search_metadata.update(
+            self._build_additional_search_metadata(
+                session,
+                decision_kind=decision_kind,
+                question_group=question_group,
+                evidence_cost=evidence_cost,
+                final_answer=final_answer,
+            )
+        )
         return {
             "session_id": session.session_id,
             "turn_index": session.turn_index,
@@ -547,17 +608,7 @@ class PureLlmConsultationBrain:
                 }
                 for item in top3
             ],
-            "search_metadata": {
-                "backend": self.backend_name,
-                "decision": decision_kind,
-                "decision_confidence": confidence,
-                "selected_action_source": "baseline_llm",
-                "question_group": question_group,
-                "evidence_cost": evidence_cost,
-                "final_answer": final_answer,
-                "current_top3": top3_payload,
-                "reasoning": reasoning,
-            },
+            "search_metadata": search_metadata,
         }
 
     # final_report 只保留 benchmark 真正会消费的字段，并补充少量 baseline 自身元信息。
@@ -585,6 +636,24 @@ class PureLlmConsultationBrain:
             for item in decision.top3
         ]
         top_confidence = decision.top3[0].confidence if decision.top3 else decision.confidence
+        final_metadata = {
+            "backend": self.backend_name,
+            "forced_finalize": forced_finalize,
+            "decision_confidence": decision.confidence,
+            "compiled": bool(decision.compiled),
+            "asked_question_count": len(session.asked_questions),
+            "disease_scope_enabled": bool(self.disease_scope),
+            "disease_scope_count": len(self.disease_scope),
+            "reasoning": decision.reasoning,
+        }
+        final_metadata.update(
+            self._build_additional_final_metadata(
+                session,
+                decision,
+                stop_reason=stop_reason,
+                forced_finalize=forced_finalize,
+            )
+        )
         return {
             "session_id": session.session_id,
             "turn_index": session.turn_index,
@@ -595,16 +664,7 @@ class PureLlmConsultationBrain:
             },
             "candidate_hypotheses": candidate_hypotheses,
             "answer_group_scores": answer_group_scores,
-            "metadata": {
-                "backend": self.backend_name,
-                "forced_finalize": forced_finalize,
-                "decision_confidence": decision.confidence,
-                "compiled": bool(decision.compiled),
-                "asked_question_count": len(session.asked_questions),
-                "disease_scope_enabled": bool(self.disease_scope),
-                "disease_scope_count": len(self.disease_scope),
-                "reasoning": decision.reasoning,
-            },
+            "metadata": final_metadata,
         }
 
     def _normalize_text(self, value: str) -> str:

@@ -327,14 +327,17 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 - [simulator/benchmark.py](/Users/loki/Workspace/GraduationDesign/simulator/benchmark.py)
 - [simulator/path_cache_builder.py](/Users/loki/Workspace/GraduationDesign/simulator/path_cache_builder.py)
 - [baselines/llm_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/baselines/llm_consultation_brain.py)：纯 LLM 医生 baseline，实现 `start_session / process_turn / finalize`
+- [baselines/llm_text_rag_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/baselines/llm_text_rag_consultation_brain.py)：文本稀疏 RAG 医生 baseline，在纯 LLM 契约上叠加 `retrieved_documents`
 - [baselines/llm_baseline_types.py](/Users/loki/Workspace/GraduationDesign/baselines/llm_baseline_types.py)：pure LLM baseline 的会话状态与 ask/final 决策结构
+- [baselines/text_rag_retriever.py](/Users/loki/Workspace/GraduationDesign/baselines/text_rag_retriever.py)：基于轻量 TF-IDF 风格打分的文本稀疏检索器
 - [scripts/export_disease_evidence_family_catalog.py](/Users/loki/Workspace/GraduationDesign/scripts/export_disease_evidence_family_catalog.py)：基于 Neo4j 导出全证据族 catalog 和疾病最低证据组
 - [scripts/generate_graph_virtual_patients.py](/Users/loki/Workspace/GraduationDesign/scripts/generate_graph_virtual_patients.py)：基于疾病审计结果生成图谱驱动病例骨架
 - [scripts/build_graph_case_smoke_set.py](/Users/loki/Workspace/GraduationDesign/scripts/build_graph_case_smoke_set.py)：从 role-QC eligible 病例中抽取 replay smoke 输入
 - [scripts/build_smoke_case_subset.py](/Users/loki/Workspace/GraduationDesign/scripts/build_smoke_case_subset.py)：从全量病例中按 `case_type` 做可复现均衡抽样，便于生成 `smoke60` 这类中等规模 smoke 集
+- [scripts/build_text_rag_corpus.py](/Users/loki/Workspace/GraduationDesign/scripts/build_text_rag_corpus.py)：从 `HIV_cleaned/` 构建文本稀疏 RAG baseline 使用的 JSONL 语料
 - [scripts/run_role_qc_smoke20_replay.sh](/Users/loki/Workspace/GraduationDesign/scripts/run_role_qc_smoke20_replay.sh)：运行最新 role-QC smoke20 replay 的一键脚本
 - [scripts/run_batch_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_batch_replay.py)：批量虚拟病人回放与评测入口
-- [scripts/run_baseline_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_baseline_replay.py)：纯 LLM baseline 的批量回放与 benchmark 入口
+- [scripts/run_baseline_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_baseline_replay.py)：`pure_llm / text_rag` 外部 baseline 的批量回放与 benchmark 入口
 
 当前实现的要点包括：
 
@@ -366,6 +369,7 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 - `run_batch_replay.py` 当前输出的 `final_report.metadata` 已做轻量化处理，不再携带原始 `search_tree` 和 `last_search_result` 运行态对象，以降低批量回放的内存占用
 - `Pure LLM` baseline 当前已将模型输出契约收紧为 `decision / question_text / target_name / top3 / reasoning / compiled / final_answer`；`question_group / evidence_cost / decision_confidence` 改为程序端推断，减轻结构化输出负担，同时保留 replay 侧的动作分组与成本分析字段
 - `Pure LLM` baseline 当前还会自动注入当前 benchmark 对应的 closed-set disease scope；默认优先从病例目录祖先 `manifest.json` 提取全量 `Disease` 名称，并要求 `top3 / final_answer` 在这份列表中精确选择，减少“某类机会性感染”这类范围外泛化答案
+- `Text RAG` baseline 当前已落地最小代码骨架：`SparseTextRagRetriever` 会从 JSONL 语料做轻量稀疏检索，`TextRagConsultationBrain` 会在纯 LLM 同一 ask / final 契约上额外注入 `retrieved_documents`，并把 `retrieved_doc_ids / retrieved_disease_names / retrieval_query` 写回 replay search metadata
 - 病人代理当前已改为“骨架驱动开场”：首轮输入优先由 `patient_agent.open_case(case)` 基于 opening slots 生成，而不是直接把 `chief_complaint` 当作唯一入口
 - `brain/service.py` 当前对主诉澄清增加了防重复保护：若已经追问过一次 `chief complaint` 但仍无任何可推理线索，会以 `repeated_chief_complaint_without_signal` 终止，避免 bad opening 在 intake 环节空转 8 轮
 - `brain/med_extractor.py` 与 `brain/evidence_parser.py` 当前补了 competitive 病例常见症状 / 风险词典，并对字符串型 `clinical_features` 输出增加了容错；即使 LLM schema 返回较松，也不至于把整段特征直接丢掉
@@ -643,6 +647,25 @@ OPENAI_MODEL=qwen3.5-flash conda run --no-capture-output -n GraduationDesign pyt
 - 走 [baselines/llm_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/baselines/llm_consultation_brain.py) 的纯 LLM 医生 baseline
 - 继续复用 [simulator/patient_agent.py](/Users/loki/Workspace/GraduationDesign/simulator/patient_agent.py) 与 [simulator/replay_engine.py](/Users/loki/Workspace/GraduationDesign/simulator/replay_engine.py)
 - 写出与主 batch runner 对齐的 `replay_results.jsonl / benchmark_summary.json / non_completed_cases.json / status.json`
+
+构建文本稀疏 RAG 语料并跑 text_rag smoke：
+
+```bash
+conda run -n GraduationDesign python scripts/build_text_rag_corpus.py \
+  --source-dir HIV_cleaned \
+  --output-file test_outputs/rag_corpus/hiv_cleaned_text_rag_corpus.jsonl
+
+OPENAI_MODEL=qwen3.5-flash conda run --no-capture-output -n GraduationDesign python scripts/run_baseline_replay.py \
+  --baseline-mode text_rag \
+  --rag-corpus-file test_outputs/rag_corpus/hiv_cleaned_text_rag_corpus.jsonl \
+  --retrieval-top-k 4 \
+  --cases-file test_outputs/simulator_cases/graph_cases_20260502_role_qc/smoke20/cases.jsonl \
+  --output-root test_outputs/simulator_replay/benchmark_external_baselines/text_rag_smoke20 \
+  --max-turns 8 \
+  --case-concurrency 4 \
+  --limit 5 \
+  --no-resume
+```
 
 使用最新 role-QC 的 20 例 smoke 输入：
 

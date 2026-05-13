@@ -1,9 +1,18 @@
-# 外部 LLM 基线开发 Checklist（2026-05-07）
+# 外部 LLM 基线开发 Checklist（2026-05-13）
 
-本文档用于规划两类外部基线实验的实现路径：
+本文档用于规划三类外部基线实验的实现路径：
 
 1. `纯 LLM` 多轮问诊基线
 2. `LLM + 文本 RAG` 多轮问诊基线
+3. `LLM + KG RAG` 多轮问诊基线
+
+当前不把 `LLM + 向量 RAG` 作为本轮主线。原因不是它没有价值，而是当前更需要先把：
+
+- 无检索的外部弱基线跑稳
+- 非结构化医学文档检索增强跑通
+- 结构化知识图谱检索增强跑通
+
+这样后续 benchmark 才能清楚回答“不同知识形态的检索增强到底带来什么收益”，而不是先把工程复杂度堆到向量数据库、embedding 索引和 reranker 上。
 
 目标不是另起一套评测框架，而是尽量复用当前已有的：
 
@@ -24,7 +33,12 @@
   - 对话机制与 `纯 LLM` 一致
   - 区别只在于每轮可额外读取文本检索结果
 
-- [x] 目标 3：复用现有 benchmark 汇总
+- [x] 目标 3：实现一个 `LLM + KG RAG` 医生 baseline
+  - 对话机制与 `纯 LLM` 一致
+  - 区别只在于每轮可额外读取图谱检索结果
+  - 图谱只提供检索上下文，不直接复用主系统的树搜索、repair 与 acceptance 决策
+
+- [x] 目标 4：复用现有 benchmark 汇总
   - 输出目录结构仍兼容：
     - `replay_results.jsonl`
     - `benchmark_summary.json`
@@ -35,6 +49,7 @@
   - 不直接复用当前 `brain/service.py` 的图谱搜索与 repair 主链路
   - 不把图谱检索伪装成“文本 RAG”
   - 不单独维护另一套不兼容的 benchmark 统计脚本
+  - 当前不引入向量数据库、embedding 检索与 reranker
 
 ## 1. 推荐实现总原则
 
@@ -48,18 +63,25 @@
     - `process_turn(session_id, patient_text)`
     - `finalize(session_id)`
 
-- [x] 原则 3：先做 `纯 LLM`，再做 `LLM + 文本 RAG`
+- [x] 原则 3：先做 `纯 LLM`，再做 `LLM + 文本 RAG`，最后做 `LLM + KG RAG`
   - `纯 LLM` 是最小 MVP
   - `文本 RAG` 建议在 `纯 LLM` smoke 跑通后再叠加
+  - `KG RAG` 建议在 `文本 RAG` 契约稳定后接入，避免同时放大“检索问题”和“图谱依赖问题”
 
 - [x] 原则 4：RAG 先做轻量版本
   - 第一版优先使用：
-    - 文本化疾病画像
-    - `BM25 / TF-IDF` 这类轻检索
+    - 文本侧：`HIV_cleaned/` 中的专家共识文档或由其整理出的文本化 disease profile
+    - 文本检索：`BM25 / TF-IDF` 这类轻检索
+    - 图谱侧：基于 [brain/retriever.py](/Users/loki/Workspace/GraduationDesign/brain/retriever.py) 的轻量 KG 检索封装
   - 暂不要求：
     - 全量原始文档 chunk
     - embedding 检索
     - reranker
+
+- [x] 原则 5：检索只增强上下文，不替代 baseline doctor 自身决策
+  - `纯 LLM / 文本 RAG / KG RAG` 三条路线都应共用同一 ask / final JSON 契约
+  - `文本 RAG` 与 `KG RAG` 的差异只体现在 prompt 里额外注入的检索结果
+  - 不把 `mcts_engine / reward_model / response_transition_model / acceptance_controller` 搬进外部 baseline
 
 ## 2. 目录与文件 Checklist
 
@@ -85,17 +107,29 @@
 
 ### 2.3 文本 RAG baseline
 
-- [ ] 新增 [baselines/text_rag_retriever.py](/Users/loki/Workspace/GraduationDesign/baselines/text_rag_retriever.py)
+- [x] 新增 [baselines/text_rag_retriever.py](/Users/loki/Workspace/GraduationDesign/baselines/text_rag_retriever.py)
   - 负责：
     - 加载文本 corpus
     - 查询
     - 返回 top-k 文本块
 
-- [ ] 新增 [baselines/llm_rag_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/baselines/llm_rag_consultation_brain.py)
+- [x] 新增 [baselines/llm_text_rag_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/baselines/llm_text_rag_consultation_brain.py)
   - 复用 `llm_consultation_brain`
   - 只增加检索层与检索结果注入 prompt
 
-### 2.4 CLI 与语料构建
+### 2.4 KG RAG baseline
+
+- [ ] 新增 [baselines/kg_rag_retriever.py](/Users/loki/Workspace/GraduationDesign/baselines/kg_rag_retriever.py)
+  - 负责：
+    - 连接当前活跃 Neo4j 搜索图谱
+    - 基于当前对话与候选病名检索关键证据画像
+    - 返回 top-k 图谱证据块
+
+- [ ] 新增 [baselines/llm_kg_rag_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/baselines/llm_kg_rag_consultation_brain.py)
+  - 复用 `llm_consultation_brain`
+  - 只增加 KG 检索层与检索结果注入 prompt
+
+### 2.5 CLI 与语料构建
 
 - [x] 新增 [scripts/run_baseline_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_baseline_replay.py)
   - 复用：
@@ -109,14 +143,20 @@
   - 目标不是只产出“同名文件”，而是尽量复用或抽出当前 [scripts/run_batch_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_batch_replay.py) 的结果汇总骨架
   - 这样外部 baseline 的 `benchmark_summary.json / non_completed_cases.json / status.json` 才能与主 benchmark 保持同一 schema
 
-- [ ] 新增 [scripts/build_text_rag_corpus.py](/Users/loki/Workspace/GraduationDesign/scripts/build_text_rag_corpus.py)
+- [x] 新增 [scripts/build_text_rag_corpus.py](/Users/loki/Workspace/GraduationDesign/scripts/build_text_rag_corpus.py)
   - 第一版负责把已有知识整理成文本化 disease profile corpus
 
-### 2.5 测试
+- [ ] KG RAG 第一版不强制新增静态 corpus 构建脚本
+  - 优先直接连接当前 Neo4j 搜索图谱
+  - 如果后续需要脱离 Neo4j 跑离线对照，再考虑补充 KG snapshot 导出脚本
+
+### 2.6 测试
 
 - [x] 新增 [tests/test_llm_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/tests/test_llm_consultation_brain.py)
-- [ ] 新增 [tests/test_llm_rag_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/tests/test_llm_rag_consultation_brain.py)
-- [ ] 新增 [tests/test_text_rag_retriever.py](/Users/loki/Workspace/GraduationDesign/tests/test_text_rag_retriever.py)
+- [x] 新增 [tests/test_llm_text_rag_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/tests/test_llm_text_rag_consultation_brain.py)
+- [x] 新增 [tests/test_text_rag_retriever.py](/Users/loki/Workspace/GraduationDesign/tests/test_text_rag_retriever.py)
+- [ ] 新增 [tests/test_llm_kg_rag_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/tests/test_llm_kg_rag_consultation_brain.py)
+- [ ] 新增 [tests/test_kg_rag_retriever.py](/Users/loki/Workspace/GraduationDesign/tests/test_kg_rag_retriever.py)
 - [x] 新增 [tests/test_run_baseline_replay.py](/Users/loki/Workspace/GraduationDesign/tests/test_run_baseline_replay.py)
 
 ## 3. 纯 LLM 基线 Checklist
@@ -286,7 +326,7 @@
 ### 5.1 语料来源
 
 - [ ] 第一版不要直接接图谱推理链
-- [ ] 第一版优先构建“文本化 disease profile”语料
+- [ ] 第一版优先从 [HIV_cleaned](/Users/loki/Workspace/GraduationDesign/HIV_cleaned) 与其整理产物构建“文本化 disease profile”语料
   - 每个疾病一条或多条文本记录
   - 内容可包含：
     - 疾病名
@@ -307,6 +347,9 @@
   - `title`
   - `content`
   - `tags`
+  - 可选补充：
+    - `source_path`
+    - `chunk_id`
 
 ### 5.3 检索实现
 
@@ -322,6 +365,7 @@
 - [ ] 每轮给模型的 RAG 上下文
   - 建议仅保留 top-k 文本块
   - 避免把太多噪声文本塞给模型
+  - 当前不要求向量数据库或 embedding 索引
 
 ### 5.4 RAG prompt 注入
 
@@ -336,25 +380,84 @@
   - `retrieved_disease_names`
   - `retrieval_query`
 
-## 6. run_baseline_replay.py Checklist
+## 6. KG RAG 基线 Checklist
 
-### 6.1 CLI 参数
+### 6.1 数据来源
+
+- [ ] 第一版直接连接当前活跃搜索图谱 Neo4j，不单独维护另一套 KG 数据副本
+- [ ] 第一版优先复用 [brain/retriever.py](/Users/loki/Workspace/GraduationDesign/brain/retriever.py) 的现有检索能力做轻量封装
+  - `retrieve_candidate_evidence_profile()`
+  - `retrieve_r2_expected_evidence()`
+  - 必要时补一个更薄的 baseline 专用适配层
+- [ ] 不直接复用 [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py) 的主搜索、repair、acceptance 主链
+
+### 6.2 检索结果形态
+
+- [ ] 每轮返回的 KG 上下文优先组织成“可直接喂给 LLM 的证据块”，而不是整段 Cypher 原始结果
+- [ ] 每条证据块建议至少包含：
+  - `node_id`
+  - `name`
+  - `label`
+  - `relation_type`
+  - `question_type_hint`
+  - `evidence_cost`
+  - `priority`
+- [ ] 如有必要，可额外按 `symptom / risk / detail / lab / imaging / pathogen` 分组，减少 prompt 噪声
+
+### 6.3 检索策略
+
+- [ ] 每轮 KG query 来源可优先使用：
+  - 当前全部对话历史
+  - 当前模型 top3 候选名
+  - 当前病例闭集 disease scope
+  - 已明确的阳性主诉或高价值线索
+- [ ] 前几轮候选尚不稳定时，优先拉“候选疾病画像 + 高优先级待验证证据”
+- [ ] top3 已相对稳定后，优先拉“区分当前候选的关键证据”
+- [ ] 每轮给模型的 KG 上下文同样只保留 top-k，避免把图谱检索结果整包灌进 prompt
+
+### 6.4 KG RAG prompt 注入
+
+- [ ] `LLM + KG RAG` 与 `纯 LLM` 共用同一 ask/final JSON 契约
+- [ ] 唯一区别：
+  - prompt 中额外增加：
+    - `retrieved_kg_context`
+- [ ] `search_report.search_metadata` 建议增加：
+  - `backend = "llm_kg_rag"`
+  - `retrieved_node_ids`
+  - `retrieved_disease_names`
+  - `retrieval_query`
+  - `retrieval_mode`
+
+### 6.5 边界约束
+
+- [ ] KG RAG baseline 的 ask / final 决策仍由 baseline LLM 给出
+- [ ] 不把主系统的 `MCTS / reward / verifier / repair / acceptance` 作为外部 baseline 的内部组件
+- [ ] 若运行环境没有 Neo4j，应显式报出依赖缺失，而不是静默退化成纯 LLM
+
+## 7. run_baseline_replay.py Checklist
+
+### 7.1 CLI 参数
 
 - [x] `--baseline-mode`
   - 当前已支持：
     - `pure_llm`
-  - 后续待补：
     - `text_rag`
+    - `kg_rag`
 
 - [x] `--cases-file`
 - [x] `--output-root`
 - [x] `--max-turns`
 - [x] `--case-concurrency`
 - [x] `--api-error-retries`
-- [ ] `--rag-corpus-file`
-- [ ] `--retrieval-top-k`
+- [x] `--rag-corpus-file`
+- [x] `--retrieval-top-k`
 
-### 6.2 运行逻辑
+说明：
+
+- `--rag-corpus-file` 主要服务于 `text_rag`
+- `kg_rag` 第一版优先继续复用现有 Neo4j 环境变量与连接配置，不急于暴露一组新的 CLI 参数
+
+### 7.2 运行逻辑
 
 - [x] 启动时先复用当前 batch runner 的环境引导
   - 先加载 `configs/frontend.yaml / configs/frontend.local.yaml`
@@ -364,6 +467,8 @@
 - [x] 复用 `VirtualPatientAgent(use_llm=True, llm_client=shared_client)`
 - [x] 复用 `ReplayEngine`
 - [x] 写出与 `run_batch_replay.py` 相同格式的结果文件
+- [ ] `text_rag` worker 级缓存文本 corpus 与稀疏检索索引
+- [ ] `kg_rag` worker 级缓存 Neo4j client 与 KG retriever
 - [x] `benchmark_summary.json` 应继续包含：
   - `eligible_summary`
   - `case_qc_status_summaries`
@@ -372,14 +477,15 @@
   - `timing_summary`
 - [x] `status.json` 应继续包含运行进度、完成计数、失败计数与 timing 汇总
 
-### 6.3 输出目录建议
+### 7.3 输出目录建议
 
 - [ ] `test_outputs/simulator_replay/benchmark_external_baselines/pure_llm/...`
 - [ ] `test_outputs/simulator_replay/benchmark_external_baselines/text_rag/...`
+- [ ] `test_outputs/simulator_replay/benchmark_external_baselines/kg_rag/...`
 
-## 7. 测试与验证 Checklist
+## 8. 测试与验证 Checklist
 
-### 7.1 单元测试
+### 8.1 单元测试
 
 - [ ] `llm_consultation_brain` 能正确：
   - ask
@@ -390,23 +496,43 @@
   - 加载 corpus
   - 返回 top-k
 
+- [ ] `llm_text_rag_consultation_brain` 能正确：
+  - 注入 `retrieved_documents`
+  - 保持与 pure LLM 相同的 ask / final 契约
+
+- [ ] `kg_rag_retriever` 能正确：
+  - 返回候选疾病画像或关键待验证证据
+  - 对 Neo4j 不可用给出清晰错误
+
+- [ ] `llm_kg_rag_consultation_brain` 能正确：
+  - 注入 `retrieved_kg_context`
+  - 保持与 pure LLM 相同的 ask / final 契约
+
 - [ ] `run_baseline_replay.py` 能正确输出：
   - `replay_results.jsonl`
   - `benchmark_summary.json`
 
-### 7.2 smoke 顺序
+### 8.2 smoke 顺序
 
 - [ ] 先跑极小 smoke
-  - `limit=5`
+  - `pure_llm limit=5`
+  - `text_rag limit=5`
+  - `kg_rag limit=5`
 
 - [ ] 再跑 balanced smoke
-  - `smoke20`
-  - 或 `smoke60`
+  - `text_rag smoke20`
+  - `kg_rag smoke20`
+  - 如有需要再扩大到 `smoke60`
 
 - [ ] 最后再跑：
-  - `full227`
+  - 稳定路线的 `full227`
 
-## 8. 推荐实现顺序
+说明：
+
+- `kg_rag` 的 smoke / full replay 依赖真实 Neo4j
+- `text_rag` 不依赖 Neo4j，更适合作为第一条检索增强路线先跑通
+
+## 9. 推荐实现顺序
 
 - [ ] 第一步：实现 `baselines/llm_consultation_brain.py`
 - [ ] 第二步：实现 `scripts/run_baseline_replay.py`
@@ -414,29 +540,48 @@
 - [ ] 第四步：补 `final_report` 契约细节，确保 benchmark 指标都能正常出
 - [ ] 第五步：实现 `build_text_rag_corpus.py`
 - [ ] 第六步：实现 `text_rag_retriever.py`
-- [ ] 第七步：实现 `llm_rag_consultation_brain.py`
+- [ ] 第七步：实现 `llm_text_rag_consultation_brain.py`
 - [ ] 第八步：跑 `text_rag` 的 `smoke5 / smoke20`
-- [ ] 第九步：两组外部基线都稳定后，再跑 `full227`
+- [ ] 第九步：实现 `kg_rag_retriever.py`
+- [ ] 第十步：实现 `llm_kg_rag_consultation_brain.py`
+- [ ] 第十一步：跑 `kg_rag` 的 `smoke5 / smoke20`
+- [ ] 第十二步：三条外部基线都稳定后，再跑 `full227`
 
-## 9. 当前推荐的最小可交付版本
+## 10. 当前推荐的最小可交付版本
 
-如果时间非常紧，建议只先完成下面这组最小闭环：
+如果时间非常紧，建议先完成下面这组最小闭环：
 
 - [ ] `pure_llm`
-- [ ] `run_baseline_replay.py`
-- [ ] `smoke5`
-- [ ] `smoke20`
-
-这样你就已经能得到一个可写进论文的外部最低基线。
-
-`LLM + 文本 RAG` 则作为下一阶段补充：
-
 - [ ] `text_rag`
-- [ ] `smoke20`
-- [ ] `full227`
+- [ ] `kg_rag`
+- [ ] 三条路线各自 `smoke5`
+- [ ] 至少 `text_rag / kg_rag` 各自 `smoke20`
 
-## 10. 与当前 benchmark 文档的关系
+这样你就已经能得到一组可写进论文、且知识来源差异清楚的外部 baseline 对照。
+
+如果时间再紧一档，则最低优先级的缩减顺序建议是：
+
+- [ ] 先不做 `full227`
+- [ ] 只保留 `kg_rag smoke5`
+- [ ] 但尽量保留 `text_rag smoke20`
+
+## 11. 当前不纳入本轮的向量 RAG
+
+- [x] 当前不把 `LLM + 向量 RAG` 作为第四条并行主线
+- [ ] 只有在 `text_rag` 与 `kg_rag` 都已经稳定后，再评估是否值得补做
+- [ ] 若后续要补，至少还需要额外明确：
+  - 文本 chunk 策略
+  - embedding 模型与缓存策略
+  - 向量索引持久化
+  - 查询改写与结果去重
+  - 如何与当前 `text_rag` 公平比较
+
+## 12. 与当前 benchmark 文档的关系
 
 - [x] 当前主系统内部消融仍以 [diagnosis_benchmark_experiment_design.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_benchmark_experiment_design.md) 为主
 - [x] 本文档只负责外部基线的开发与实现清单
 - [x] 外部基线真正开始实现后，应把运行命令与结果摘要再回填到主 benchmark 文档
+- [x] 后续结果表建议至少区分：
+  - `pure_llm`
+  - `llm_text_rag`
+  - `llm_kg_rag`

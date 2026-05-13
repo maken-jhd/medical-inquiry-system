@@ -10,6 +10,13 @@ search:
 transition_model:
   type: statistical
   statistics_source_mode: auto
+  # 这里固定使用 full227 graph cases 作为条件化回答概率的病例统计来源，
+  # 避免 benchmark 运行时被最近生成的 smoke 子集覆盖。
+  graph_case_paths:
+    - /Users/loki/Workspace/GraduationDesign/test_outputs/simulator_cases/graph_cases_20260502_role_qc/cases.jsonl
+  # 当前这轮 full benchmark 不再混入 replay_results 统计，只保留 graph cases 条件统计。
+  replay_result_paths: []
+  replay_result_glob: __disabled__/replay_results.jsonl
   statistics_top_k_hypotheses: 5
   enable_belief_mixture: true
   fallback_to_heuristic: true

@@ -1,143 +1,58 @@
 # AGENTS.md
 
-本文件给后续在本仓库工作的 coding agent 使用。请优先遵守当前用户请求；本文件只记录仓库内的长期约定与常用入口。
+本文件只保留后续 coding agent 需要长期记住、且不容易从代码里直接看出来的信息。实现细节优先跳到对应 README 和 docs，不在这里重复扩写。
 
-## 项目定位
+## 项目速览
 
-- 这是一个面向 HIV/AIDS 场景的智能问诊系统毕业设计项目。
-- `knowledge_graph/` 是当前激活的第一阶段搜索专用知识图谱处理链：清理医学资料、LLM 抽取诊断问诊子图、alias 合并、导入 Neo4j。
-- `knowledge_graph_bak/` 是旧版全量指南知识图谱备份，已经废弃；除非用户明确要求恢复旧链路，否则只把它当历史参考，不要用于当前入库、replay 或实时问诊。
-- `brain/` 是第二阶段问诊大脑：A1/A2/A3/A4、KG 检索、MCTS/UCT、rollout、终止规则、报告生成。
-- `simulator/` 是虚拟病人与离线回放评测：病例 schema、病人代理、自动对战、benchmark。
-- `frontend/` 是 Streamlit 演示界面：回放模式、实时运行模式、实验复盘模式。
-- `configs/` 保存第二阶段配置，`docs/` 保存阶段清单和复盘资料，`tests/` 保存第二阶段测试。
+- 这是一个面向 HIV/AIDS 场景的智能问诊系统毕业设计仓库。
+- 当前活跃链路只有三条：`knowledge_graph/` 负责搜索专用知识图谱，`brain/` 与 `simulator/` 负责问诊大脑和离线回放，`frontend/` 负责 Streamlit 演示。
+- `knowledge_graph_bak/` 是旧版全量指南图谱备份，只作历史参考；除非用户明确要求，不要把旧本体、旧关系或旧导入链路带回当前系统。
 
-## 工作原则
+## 快速定位
 
-- 仓库文档以中文为主，新增说明、代码注释、测试注释优先使用中文。
-- `brain/`、`simulator/`、`tests/` 已约定：文件顶部有中文说明，类/函数或测试函数附近保留简短中文用途说明。
-- 对于 `brain/`、`simulator/` 等核心流程较长的函数，除了函数上方用途说明外，函数内部的关键步骤、阶段切换、分支入口前也要补充简短中文注释，帮助后续读代码的人顺着控制流理解实现。
-- 对模块级常量，尤其是标签集合、关系集合、family tag、状态枚举、阈值分组这类“只看英文名不易懂”的定义，常量上方要补一行或多行中文用途注释，说明“这组常量给谁用、为什么这样分组”。
-- 今后在本仓库新增常量定义时，默认也要遵守上一条：不要只保留英文常量名而没有中文解释。
-- 保持现有 Python 风格：类型标注、`dataclass`、轻量配置对象和显式依赖注入。
-- 不要把真实 API Key、Neo4j 私密密码或本机配置提交进仓库。私密前端配置写入 `configs/frontend.local.yaml`，该文件已被忽略。
-- 不要随意提交或依赖大型本地产物：`HIV/`、`HIV_cleaned/`、`test_outputs/`、`output_graph_test*.jsonl` 都被忽略。
-- `.gitignore` 默认忽略 `*.sh`，只有少数演示/评测脚本被显式放行；新增 shell 脚本如需入库，要同步检查 `.gitignore`。
-- 触碰 `knowledge_graph/` 时，默认遵循线上问诊搜索专用本体：候选诊断统一用 `Disease`；证据标签为 `ClinicalFinding`、`ClinicalAttribute`、`LabTest`、`LabFinding`、`ImagingFinding`、`Pathogen`、`RiskFactor`、`PopulationGroup`，关系重点是 `R1/R2/A3/A4` 会消费的诊断与证据边。
-- 当前抽取端为证据节点预留 `acquisition_mode` 和 `evidence_cost`，用于后续区分可直接询问证据和高成本检查证据；除非用户明确要求，本字段预留不应顺手改动 `brain/` 的搜索排序。
-- 不要把旧版全量指南图谱的 `Recommendation`、`Medication`、`TreatmentRegimen`、`GuidelineDocument`、`EvidenceSpan`、`Assertion` 等标签重新加回当前活跃抽取端，除非用户明确要求切回旧方向。
-- 每完成一个相对独立的工作部分，除非用户明确说明不需要，都要同步更新相关 `README.md`，并在工作记录文档中登记本次工作内容、影响范围、输出文件和验证结果；默认工作记录文档使用 `docs/phase2_changelog.md`，如果用户指定了其他记录文档，则以用户指定为准。
+- 总览与常用入口：`README.md`
+- 问诊大脑：`brain/README.md`
+- 运行链路与 A1/A2/A3/A4：`docs/brain_runtime_call_chain_guide.md`
+- 虚拟病人与 replay：`simulator/README.md`
+- benchmark 设计：`docs/diagnosis_benchmark_experiment_design.md`
+- 搜索图谱链路：`knowledge_graph/README.md`
+- 搜索图谱本体：`docs/search_kg_label_guide.md`
+- 前端演示：`frontend/README.md`
+- 第二阶段记录：`docs/phase2_changelog.md`、`docs/phase2_execution_checklist.md`
+
+## 仓库级约定
+
+- 文档、README、代码注释和测试说明优先中文。
+- 保持现有 Python 风格：完整类型标注、`dataclass`、轻量配置对象、显式依赖注入。
+- `brain/`、`simulator/`、`tests/` 的核心流程函数需要简短中文用途说明；长函数在关键阶段、分支入口和状态切换前补简短中文注释。
+- 标签集合、关系集合、family tag、状态枚举、阈值分组等模块级常量，补中文说明“给谁用、为什么这样分组”。
+- 不提交真实 API Key、Neo4j 密码或本机私密配置；私密前端配置放 `configs/frontend.local.yaml`。
+- 不依赖或清理用户未明确要求的大型本地产物，例如 `HIV/`、`HIV_cleaned/`、`test_outputs/`。
+- `.gitignore` 默认忽略 `*.sh`；新增 shell 脚本前先确认是否需要显式放行。
+- 默认使用 `python -m pytest`，不要直接运行 `pytest`。
+- 完成相对独立的实现工作后，除非用户明确限制范围，同步更新相关 README 和 `docs/phase2_changelog.md`。
 
 ## 常用命令
 
-推荐环境：
-
 ```bash
 conda activate GraduationDesign
-```
-
-运行单元测试：
-
-```bash
 conda run -n GraduationDesign python -m pytest -q
-```
-
-说明：仓库 README 明确建议使用 `python -m pytest`，直接运行 `pytest` 在部分环境下可能有导入路径问题。
-
-启动 Streamlit 演示：
-
-```bash
-./scripts/run_streamlit_realtime.sh
-```
-
-或：
-
-```bash
+conda run -n GraduationDesign python -m pytest tests/test_acceptance_controller.py -q
 conda run -n GraduationDesign streamlit run frontend/app.py --browser.gatherUsageStats false
-```
-
-构建当前搜索专用知识图谱：
-
-```bash
 ./knowledge_graph/run_search_kg_pipeline.sh
-```
-
-说明：该入口默认输出到 `test_outputs/search_kg/search_kg_<timestamp>/`，不会运行可选的孤立节点 relation repair，也不会自动导入 Neo4j；如需导入设置 `IMPORT_TO_NEO4J=true`。
-
-如果需要对最近一次搜索图谱输出修补孤立节点关系，可运行：
-
-```bash
-./knowledge_graph/run_repair_relations_with_llm.sh
-```
-
-如果用户已经人工维护了某次输出目录下的 `aliases/`，优先用：
-
-```bash
-SEARCH_KG_OUTPUT_ROOT=对应输出目录 SKIP_EXTRACTION=true ./knowledge_graph/run_search_kg_pipeline.sh
-```
-
-这会跳过 LLM 抽取，复用该目录的 `output_graph.jsonl` 并优先读取该目录的 `aliases/`。
-
-在自动生成病例骨架前，优先做疾病级图谱审计。单疾病局部子图审计：
-
-```bash
-NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_disease_ego_graphs.py --disease-name 肺孢子菌肺炎 --top-k 80
-```
-
-疾病对差异证据审计：
-
-```bash
-NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_differential_pairs.py --target-name 肺孢子菌肺炎 --competitor-name 结核病 --top-k 80
-```
-
-说明：审计逻辑位于 `simulator/graph_audit.py`，默认输出 JSON、Markdown 和 `.llm_prompt.md` 到 `test_outputs/graph_audit/`。如果同名疾病匹配到多个节点，优先改用 `--disease-id` / `--target-id` / `--competitor-id` 精确定位；不要把全图直接发给 LLM，先看程序化规则审计和局部 Markdown。
-
-清空 Neo4j 旧图谱、导入当前搜索图谱并生成校验报告：
-
-```bash
 ./knowledge_graph/run_reload_search_kg_neo4j.sh
-```
-
-真实 Neo4j smoke 需要本地 Neo4j 与密码：
-
-```bash
-NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/run_retriever_smoke.py --features 发热,干咳
-```
-
-真实端到端 replay 会调用 Neo4j 与 LLM，运行前确认 `DASHSCOPE_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_MODEL` / `NEO4J_PASSWORD`：
-
-```bash
 conda run -n GraduationDesign python scripts/run_batch_replay.py --max-turns 5
 ```
 
-## 配置与外部依赖
+## 外部依赖与验证
 
-- `configs/brain.yaml` 会被 `brain/service.py` 默认构造逻辑读取，影响 MCTS、检索、A1-A4、终止规则与 verifier 行为。
-- `configs/frontend.yaml` 保存非敏感默认配置；`configs/frontend.local.yaml` 用于本机密钥和私密覆盖。
-- 默认 LLM 路径使用 DashScope compatible OpenAI 接口，模型通常为 `qwen3-max`。
-- 实时模式和部分 smoke 依赖本地 Neo4j，默认 URI 是 `bolt://localhost:7687`。
-- 常规单元测试应尽量避免依赖真实 Neo4j 或真实 LLM；需要外部服务时，在最终回复中明确说明。
+- 默认 LLM 走 DashScope compatible OpenAI 接口；常见环境变量：`DASHSCOPE_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL`、`NEO4J_PASSWORD`。
+- 本地 Neo4j 默认 `bolt://localhost:7687`；需要真实 Neo4j 或真实 LLM 的 smoke / replay，在最终回复中明确说明依赖。
+- 小改动优先跑最小测试切片；改 `brain/service.py`、router、acceptance、report、replay 时，补跑相邻服务流或回放测试。
 
-## 测试与变更范围
+## 任务路由
 
-- 小范围代码改动优先跑对应测试文件，例如：
-
-```bash
-conda run -n GraduationDesign python -m pytest tests/test_acceptance_controller.py -q
-```
-
-- 触碰 `brain/service.py`、路由、最终接受控制、replay 或报告字段时，优先考虑补跑相关服务流、router、acceptance_controller、report_builder、replay_engine 测试。
-- 触碰 `frontend/` 时，至少确认 import/语法层面无误；启动 Streamlit 可能需要本地依赖和端口可用。
-- 不要重写无关模块或清理用户未请求的历史输出。
-
-## 重要入口
-
-- 总体说明：`README.md`
-- 问诊大脑说明：`brain/README.md`
-- 虚拟病人与离线回放说明：`simulator/README.md`
-- 当前搜索专用知识图谱处理链说明：`knowledge_graph/README.md`
-- 已废弃的旧版全量指南图谱备份说明：`knowledge_graph_bak/README.md`
-- 前端演示说明：`frontend/README.md`
-- 测试说明：`tests/README.md`
-- 第二阶段变更脉络：`docs/phase2_changelog.md`
-- 第二阶段执行清单：`docs/phase2_execution_checklist.md`
+- 改问诊策略、搜索、奖励、终止：先看 `brain/service.py`、`brain/router.py`、`brain/mcts_engine.py`、`brain/reward_model.py`、`configs/brain*.yaml`。
+- 改病例生成、虚拟病人或 benchmark：先看 `simulator/`、`scripts/run_batch_replay.py`、`docs/diagnosis_benchmark_experiment_design.md`。
+- 改搜索图谱抽取或导入：先看 `knowledge_graph/README.md`、`docs/search_kg_label_guide.md`，再看 `knowledge_graph/` 当前入口脚本。
+- 改演示界面：先看 `frontend/app.py`、`frontend/ui_adapter.py`、`frontend/README.md`；至少做 import 或语法级验证。

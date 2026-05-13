@@ -10,6 +10,110 @@
 - `phase2_execution_checklist.md` 更偏“路线设计与待办清单”
 - 本文更偏“已经发生过哪些阶段性变化、分别解决了什么问题”
 
+## 近期更新：2026-05-13 将外部 baseline checklist 扩展为“纯 LLM + 文本 RAG + KG RAG”三路方案
+
+### 本次目标
+
+- 把外部 baseline 的路线设计从两路扩展为三路：
+  - `纯 LLM`
+  - `LLM + 文本 RAG`
+  - `LLM + KG RAG`
+- 明确文本检索增强与图谱检索增强分别对应两类不同知识来源
+- 明确 `LLM + 向量 RAG` 暂不作为当前主线
+
+### 本次改动
+
+- [docs/external_llm_baseline_development_checklist.md](/Users/loki/Workspace/GraduationDesign/docs/external_llm_baseline_development_checklist.md)
+  - 将文档总纲从“两类外部基线”调整为“三类外部基线”
+  - 为 `KG RAG` 新增独立 checklist：
+    - 数据来源
+    - 检索结果形态
+    - prompt 注入
+    - runner 参数
+    - 测试与 smoke 顺序
+  - 把原本语义过宽的 `llm_rag_consultation_brain.py` 规划拆成：
+    - `llm_text_rag_consultation_brain.py`
+    - `llm_kg_rag_consultation_brain.py`
+  - 明确当前不引入向量数据库、embedding 检索与 reranker
+
+### 影响
+
+- 后续外部 baseline 对照将更清楚地区分：
+  - 无检索的纯 LLM
+  - 非结构化医学文档检索增强
+  - 结构化知识图谱检索增强
+- 论文实验设计不再把“图谱检索”混在文本 RAG 路线里，后续结果表与分析口径会更清楚
+
+### 验证结果
+
+- 已人工核对以下实现与文档规划方向一致：
+  - [baselines/llm_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/baselines/llm_consultation_brain.py)
+  - [scripts/run_baseline_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_baseline_replay.py)
+  - [brain/retriever.py](/Users/loki/Workspace/GraduationDesign/brain/retriever.py)
+- 本次为文档型改动，未涉及可执行代码逻辑，因此未新增单元测试或运行 batch replay
+
+## 近期更新：2026-05-13 落地文本稀疏 RAG baseline 最小代码骨架
+
+### 本次目标
+
+- 在现有 pure LLM baseline 基础上，落一条最小可扩展的 `text_rag` 路线
+- 保持外部 baseline 仍复用同一 `ReplayEngine` 与 benchmark summary schema
+- 先把稀疏检索、prompt 注入和 runner 分发骨架搭好，再进入 smoke 与效果调优
+
+### 本次改动
+
+- [baselines/llm_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/baselines/llm_consultation_brain.py)
+  - 为外部 baseline 增加轻量扩展 hook：
+    - 额外 prompt 变量注入
+    - 额外 search metadata 注入
+    - 额外 final metadata 注入
+    - 可覆盖的 `selected_action_source`
+  - 这样后续 `text_rag / kg_rag` 都不需要复制一份纯 LLM 主流程
+- [baselines/text_rag_retriever.py](/Users/loki/Workspace/GraduationDesign/baselines/text_rag_retriever.py)
+  - 新增轻量稀疏检索器
+  - 当前用内置 TF-IDF 风格打分，不引入额外三方依赖
+  - 支持从 JSONL 语料加载，并返回 top-k 文本块
+- [baselines/llm_text_rag_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/baselines/llm_text_rag_consultation_brain.py)
+  - 新增文本稀疏 RAG 医生 baseline
+  - 每轮会先做稀疏检索，再把 `retrieved_documents` 注入 `baseline_consultation_turn` prompt
+  - replay 的 `search_report.search_metadata` 会额外记录：
+    - `retrieval_query`
+    - `retrieved_doc_ids`
+    - `retrieved_disease_names`
+- [brain/llm_client.py](/Users/loki/Workspace/GraduationDesign/brain/llm_client.py)
+  - 更新 `baseline_consultation_turn` prompt，显式说明 `retrieved_documents` 是辅助参考，不等于患者已确认事实
+- [scripts/build_text_rag_corpus.py](/Users/loki/Workspace/GraduationDesign/scripts/build_text_rag_corpus.py)
+  - 新增文本语料构建脚本
+  - 当前会从 `HIV_cleaned/` 递归读取 Markdown，并按 heading 与长度切成 JSONL 文本块
+- [scripts/run_baseline_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_baseline_replay.py)
+  - baseline mode 新增 `text_rag`
+  - 新增 `--rag-corpus-file` 与 `--retrieval-top-k`
+  - worker 会缓存稀疏检索器，避免并发回放时重复加载同一语料
+- 测试新增：
+  - [tests/test_text_rag_retriever.py](/Users/loki/Workspace/GraduationDesign/tests/test_text_rag_retriever.py)
+  - [tests/test_llm_text_rag_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/tests/test_llm_text_rag_consultation_brain.py)
+  - [tests/test_run_baseline_replay.py](/Users/loki/Workspace/GraduationDesign/tests/test_run_baseline_replay.py)
+- 文档更新：
+  - [README.md](/Users/loki/Workspace/GraduationDesign/README.md)
+  - [docs/external_llm_baseline_development_checklist.md](/Users/loki/Workspace/GraduationDesign/docs/external_llm_baseline_development_checklist.md)
+
+### 影响
+
+- 外部 baseline 现在不再只有 `pure_llm` 一条路线；已经可以在同一回放框架下切到 `text_rag`
+- 当前文本稀疏 RAG 仍属于“骨架可跑”阶段，重点先验证：
+  - 语料能否稳定构建
+  - 检索结果能否稳定注入 prompt
+  - benchmark 输出 schema 是否继续兼容
+- 向量检索、rerank 和 KG RAG 仍未进入这一轮实现
+
+### 验证结果
+
+- 已补窄单测覆盖：
+  - 稀疏检索命中顺序
+  - text_rag prompt 注入
+  - runner 对 `text_rag` 参数和分发逻辑的支持
+- 真实 smoke / full replay 仍待下一轮执行
+
 ## 近期更新：2026-05-12 针对 ranking-stage flip 与 Top-3 coverage loss 做轻量修复
 
 ### 本次目标
