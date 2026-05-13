@@ -328,7 +328,9 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 - [simulator/path_cache_builder.py](/Users/loki/Workspace/GraduationDesign/simulator/path_cache_builder.py)
 - [baselines/llm_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/baselines/llm_consultation_brain.py)：纯 LLM 医生 baseline，实现 `start_session / process_turn / finalize`
 - [baselines/llm_text_rag_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/baselines/llm_text_rag_consultation_brain.py)：文本稀疏 RAG 医生 baseline，在纯 LLM 契约上叠加 `retrieved_documents`
+- [baselines/llm_kg_rag_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/baselines/llm_kg_rag_consultation_brain.py)：KG RAG 医生 baseline，在纯 LLM 契约上叠加 `retrieved_kg_context`
 - [baselines/llm_baseline_types.py](/Users/loki/Workspace/GraduationDesign/baselines/llm_baseline_types.py)：pure LLM baseline 的会话状态与 ask/final 决策结构
+- [baselines/kg_rag_retriever.py](/Users/loki/Workspace/GraduationDesign/baselines/kg_rag_retriever.py)：基于当前活跃 Neo4j 搜索图谱，把候选疾病画像与待验证证据整理成 prompt 证据块
 - [baselines/text_rag_retriever.py](/Users/loki/Workspace/GraduationDesign/baselines/text_rag_retriever.py)：基于轻量 TF-IDF 风格打分的文本稀疏检索器
 - [scripts/export_disease_evidence_family_catalog.py](/Users/loki/Workspace/GraduationDesign/scripts/export_disease_evidence_family_catalog.py)：基于 Neo4j 导出全证据族 catalog 和疾病最低证据组
 - [scripts/generate_graph_virtual_patients.py](/Users/loki/Workspace/GraduationDesign/scripts/generate_graph_virtual_patients.py)：基于疾病审计结果生成图谱驱动病例骨架
@@ -337,7 +339,7 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 - [scripts/build_text_rag_corpus.py](/Users/loki/Workspace/GraduationDesign/scripts/build_text_rag_corpus.py)：从 `HIV_cleaned/` 构建文本稀疏 RAG baseline 使用的 JSONL 语料
 - [scripts/run_role_qc_smoke20_replay.sh](/Users/loki/Workspace/GraduationDesign/scripts/run_role_qc_smoke20_replay.sh)：运行最新 role-QC smoke20 replay 的一键脚本
 - [scripts/run_batch_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_batch_replay.py)：批量虚拟病人回放与评测入口
-- [scripts/run_baseline_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_baseline_replay.py)：`pure_llm / text_rag` 外部 baseline 的批量回放与 benchmark 入口
+- [scripts/run_baseline_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_baseline_replay.py)：`pure_llm / text_rag / kg_rag` 外部 baseline 的批量回放与 benchmark 入口
 
 当前实现的要点包括：
 
@@ -361,6 +363,7 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 - `run_batch_replay.py` 当前启动时会直接记录 `llm_available=true/false`；如果为 `false`，批量回放会尽早失败，不再退回旧规则链路
 - `run_batch_replay.py` 当前会在每个病例完成后立即追加写入 `replay_results.jsonl`、`run.log`，并刷新 `benchmark_summary.json` 与 `status.json`；评测摘要会同时给出 `top1_final_answer_hit` 口径和 `top3_hypothesis_hit` 口径，便于区分“最终答案已对”和“候选前三已召回”，并在整批完成后自动补充 `eligible`、按 `case_qc_status`、按 `case_type` 的 cohort 指标
 - `run_batch_replay.py` 当前还会把 replay 诊断分析一起写进输出：`benchmark_summary.json` 会补 `analysis_summary / eligible_analysis_summary`，`replay_results.jsonl` 的每轮 turn 会补 `asked_action_group / asked_action_evidence_cost / asked_action_selected_source / truth_hit / revealed_slot_group` 等字段，便于判断问题到底出在“没问到”“问歪了”还是“问到了但排序没上来”
+- 对 `text_rag / kg_rag` 外部 baseline，`replay_results.jsonl` 的 turn 级 `search_report.search_metadata` 与 `final_report.metadata` 现在会直接保留截断后的 `retrieved_documents`、`retrieved_kg_context`，以及开启插件后的 `retrieved_kg_candidate_diseases`，便于离线确认“RAG 实际给模型喂了什么”
 - `run_batch_replay.py` 当前已支持单病例 `failed` 语义：若 `brain` 抛出 LLM 领域错误，该病例会带 `error.code / error.stage / error.message / error.attempts` 落盘，其他病例继续运行；遇到 `APIConnectionError / Connection error` 时，batch 外层会在整例重试前先做一次冷却退避，并把累计冷却时长写入 `timing.batch_retry_cooldown_seconds_total`
 - `run_batch_replay.py` 默认支持断点续跑：若输出目录里已经有 `replay_results.jsonl`，会自动跳过已完成病例；如需强制重跑，可加 `--no-resume`
 - `run_batch_replay.py` 当前会记录病例级耗时信息：每个病例的 opening、初始 brain、逐轮 patient/brain、finalize 和总耗时会写入 `replay_results.jsonl`，并在 `benchmark_summary.json` / `status.json` 中聚合 `timing_summary`；同一份 `replay_results.jsonl` 还会补落 `case_type / case_qc_status / benchmark_qc_status / case_qc_reasons`，便于全量跑完后直接切 `eligible` 和各病例类型子集；运行日志对亚秒级耗时会保留更高精度，避免全部显示成 `0.00`
@@ -369,7 +372,8 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 - `run_batch_replay.py` 当前输出的 `final_report.metadata` 已做轻量化处理，不再携带原始 `search_tree` 和 `last_search_result` 运行态对象，以降低批量回放的内存占用
 - `Pure LLM` baseline 当前已将模型输出契约收紧为 `decision / question_text / target_name / top3 / reasoning / compiled / final_answer`；`question_group / evidence_cost / decision_confidence` 改为程序端推断，减轻结构化输出负担，同时保留 replay 侧的动作分组与成本分析字段
 - `Pure LLM` baseline 当前还会自动注入当前 benchmark 对应的 closed-set disease scope；默认优先从病例目录祖先 `manifest.json` 提取全量 `Disease` 名称，并要求 `top3 / final_answer` 在这份列表中精确选择，减少“某类机会性感染”这类范围外泛化答案
-- `Text RAG` baseline 当前已落地最小代码骨架：`SparseTextRagRetriever` 会从 JSONL 语料做轻量稀疏检索，`TextRagConsultationBrain` 会在纯 LLM 同一 ask / final 契约上额外注入 `retrieved_documents`，并把 `retrieved_doc_ids / retrieved_disease_names / retrieval_query` 写回 replay search metadata
+- `Text RAG` baseline 当前已落地最小代码骨架：`SparseTextRagRetriever` 会从 JSONL 语料做轻量稀疏检索，`TextRagConsultationBrain` 会在纯 LLM 同一 ask / final 契约上额外注入 `retrieved_documents`，并把 `retrieved_doc_ids / retrieved_disease_names / retrieval_query` 连同截断后的检索文档预览一起写回 replay metadata
+- `KG RAG` baseline 当前已落地最小代码骨架：`KgRagRetriever` 会直接连接当前活跃 Neo4j 搜索图谱，围绕当前 top 候选疾病拉取 `candidate profile + expected evidence`，并按“每个候选病种独立分组配额”裁剪注入块：`symptom<=5`、`lab<=4`、`imaging<=2`、`pathogen<=2`、`risk<=2`、`detail<=2`；当显式开启 `--kg-enable-symptom-candidate-recall` 时，还会基于 baseline 已观察到的 opening/明确肯定短答特征，通过 `retrieve_r1_candidates()` 额外反查 `retrieved_kg_candidate_diseases`；`KgRagConsultationBrain` 会在纯 LLM 同一 ask / final 契约上同时注入 `retrieved_kg_context` 与可选的症状反查候选疾病列表，并把 `retrieved_node_ids / retrieved_disease_names / retrieval_mode / retrieval_query / retrieved_candidate_disease_names_from_symptoms` 等字段写回 replay metadata；当前插件默认关闭，只作为对照实验中的可插拔辅助召回
 - 病人代理当前已改为“骨架驱动开场”：首轮输入优先由 `patient_agent.open_case(case)` 基于 opening slots 生成，而不是直接把 `chief_complaint` 当作唯一入口
 - `brain/service.py` 当前对主诉澄清增加了防重复保护：若已经追问过一次 `chief complaint` 但仍无任何可推理线索，会以 `repeated_chief_complaint_without_signal` 终止，避免 bad opening 在 intake 环节空转 8 轮
 - `brain/med_extractor.py` 与 `brain/evidence_parser.py` 当前补了 competitive 病例常见症状 / 风险词典，并对字符串型 `clinical_features` 输出增加了容错；即使 LLM schema 返回较松，也不至于把整段特征直接丢掉
@@ -666,6 +670,31 @@ OPENAI_MODEL=qwen3.5-flash conda run --no-capture-output -n GraduationDesign pyt
   --limit 5 \
   --no-resume
 ```
+
+连接当前活跃 Neo4j 搜索图谱跑 kg_rag smoke：
+
+```bash
+OPENAI_MODEL=qwen3.5-flash NEO4J_PASSWORD=你的密码 conda run --no-capture-output -n GraduationDesign python scripts/run_baseline_replay.py \
+  --baseline-mode kg_rag \
+  --retrieval-top-k 4 \
+  --cases-file test_outputs/simulator_cases/graph_cases_20260502_role_qc/smoke20/cases.jsonl \
+  --output-root test_outputs/simulator_replay/benchmark_external_baselines/kg_rag_smoke20 \
+  --max-turns 8 \
+  --case-concurrency 4 \
+  --limit 5 \
+  --no-resume
+```
+
+这条命令依赖真实 Neo4j；若未配置 `NEO4J_PASSWORD` 或本地图谱不可达，runner 会在启动前直接失败，而不会静默退化成纯 LLM。
+
+  若要在 `kg_rag` 对照实验里额外开启“已知特征 -> 候选疾病”反查插件，可追加：
+
+  ```bash
+    --kg-enable-symptom-candidate-recall \
+    --kg-symptom-candidate-top-k 10
+  ```
+
+  当前插件默认关闭；开启后只把反查结果作为 prompt 参考，不会直接覆盖 baseline LLM 自己维护的 `top3 / final_answer`。
 
 使用最新 role-QC 的 20 例 smoke 输入：
 

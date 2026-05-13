@@ -80,6 +80,7 @@ class TextRagConsultationBrain(PureLlmConsultationBrain):
             "retrieval_top_k": retrieval_context.get("retrieval_top_k", self.retrieval_top_k),
             "retrieved_doc_ids": list(retrieval_context.get("retrieved_doc_ids", [])),
             "retrieved_disease_names": list(retrieval_context.get("retrieved_disease_names", [])),
+            "retrieved_documents": list(retrieval_context.get("retrieved_documents", [])),
             "retrieved_document_count": len(retrieval_context.get("retrieved_documents", [])),
         }
 
@@ -97,6 +98,8 @@ class TextRagConsultationBrain(PureLlmConsultationBrain):
             "retrieval_query": retrieval_context.get("retrieval_query", ""),
             "retrieved_doc_ids": list(retrieval_context.get("retrieved_doc_ids", [])),
             "retrieved_disease_names": list(retrieval_context.get("retrieved_disease_names", [])),
+            "retrieved_documents": list(retrieval_context.get("retrieved_documents", [])),
+            "retrieved_document_count": len(retrieval_context.get("retrieved_documents", [])),
         }
 
     def _build_retrieval_context(self, session: BaselineSessionState) -> dict[str, Any]:

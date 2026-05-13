@@ -81,3 +81,49 @@ def test_text_rag_brain_injects_retrieved_documents_and_search_metadata() -> Non
         "肺孢子菌肺炎",
         "活动性结核病",
     ]
+    assert turn_output["search_report"]["search_metadata"]["retrieved_documents"][0]["doc_id"] == "pcp_doc"
+    assert turn_output["search_report"]["search_metadata"]["retrieved_document_count"] == 2
+
+
+# 验证 text_rag baseline 在直接 final 时，也会把检索文档预览写进 final_report 元信息。
+def test_text_rag_brain_writes_retrieved_documents_into_final_metadata() -> None:
+    retriever = SparseTextRagRetriever(
+        [
+            TextRagDocument(
+                doc_id="cmv_doc",
+                disease_name="巨细胞病毒(CMV)肺炎",
+                title="CMV 肺炎画像",
+                content="CMV DNA 阳性、严重免疫抑制和发热呼吸困难可支持诊断。",
+                tags=["机会性感染"],
+            )
+        ]
+    )
+    fake_llm = FakeBaselineLlmClient(
+        responses=[
+            {
+                "decision": "final",
+                "final_answer": "巨细胞病毒(CMV)肺炎",
+                "compiled": True,
+                "top3": [
+                    {"name": "巨细胞病毒(CMV)肺炎", "confidence": 0.92},
+                    {"name": "肺孢子菌肺炎", "confidence": 0.06},
+                    {"name": "活动性结核病", "confidence": 0.02},
+                ],
+                "reasoning": "检索文档和当前患者主诉都更支持 CMV 肺炎。",
+            }
+        ]
+    )
+    brain = TextRagConsultationBrain(
+        llm_client=fake_llm,
+        retriever=retriever,
+        max_turns=8,
+        retrieval_top_k=1,
+        disease_scope=["巨细胞病毒(CMV)肺炎", "肺孢子菌肺炎", "活动性结核病"],
+    )
+
+    brain.start_session("text_rag_final_session")
+    turn_output = brain.process_turn("text_rag_final_session", "我最近呼吸困难，还伴有发热。")
+
+    assert turn_output["final_report"]["metadata"]["retrieved_doc_ids"] == ["cmv_doc"]
+    assert turn_output["final_report"]["metadata"]["retrieved_documents"][0]["doc_id"] == "cmv_doc"
+    assert turn_output["final_report"]["metadata"]["retrieved_document_count"] == 1

@@ -17,7 +17,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from baselines.llm_consultation_brain import PureLlmConsultationBrain
+from baselines.llm_kg_rag_consultation_brain import KgRagConsultationBrain
 from baselines.llm_text_rag_consultation_brain import TextRagConsultationBrain
+from baselines.kg_rag_retriever import KgRagRetriever
 from baselines.text_rag_retriever import SparseTextRagRetriever
 from brain.llm_client import LlmClient
 from frontend.config_loader import apply_config_to_environment, load_frontend_config
@@ -41,6 +43,7 @@ class _BaselineWorkerRuntime:
 
     llm_client: LlmClient
     sparse_text_rag_retrievers: dict[str, SparseTextRagRetriever] = field(default_factory=dict)
+    kg_rag_retriever: KgRagRetriever | None = None
 
     def get_sparse_text_rag_retriever(self, corpus_file: str) -> SparseTextRagRetriever:
         normalized_path = str(Path(corpus_file).resolve())
@@ -50,7 +53,14 @@ class _BaselineWorkerRuntime:
             self.sparse_text_rag_retrievers[normalized_path] = retriever
         return retriever
 
+    def get_kg_rag_retriever(self) -> KgRagRetriever:
+        if self.kg_rag_retriever is None:
+            self.kg_rag_retriever = KgRagRetriever.from_env()
+        return self.kg_rag_retriever
+
     def close(self) -> None:
+        if self.kg_rag_retriever is not None:
+            self.kg_rag_retriever.close()
         self.llm_client.close()
 
 
@@ -64,8 +74,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--baseline-mode",
         default="pure_llm",
-        choices=["pure_llm", "text_rag"],
-        help="当前支持 pure_llm 与 text_rag。",
+        choices=["pure_llm", "text_rag", "kg_rag"],
+        help="当前支持 pure_llm、text_rag 与 kg_rag。",
     )
     parser.add_argument(
         "--cases-file",
@@ -117,6 +127,17 @@ def parse_args() -> argparse.Namespace:
         default=4,
         help="text_rag 模式每轮注入 prompt 的检索块数量上限。",
     )
+    parser.add_argument(
+        "--kg-enable-symptom-candidate-recall",
+        action="store_true",
+        help="为 kg_rag 额外开启‘已知特征 -> 候选疾病’的图谱反查辅助召回。",
+    )
+    parser.add_argument(
+        "--kg-symptom-candidate-top-k",
+        type=int,
+        default=10,
+        help="kg_rag 症状反查分支展示给模型的候选疾病数量上限。",
+    )
     return parser.parse_args()
 
 
@@ -159,6 +180,8 @@ def _run_single_case(
     *,
     rag_corpus_file: str = "",
     retrieval_top_k: int = 4,
+    kg_enable_symptom_candidate_recall: bool = False,
+    kg_symptom_candidate_top_k: int = 10,
 ):
     worker_runtime = _get_worker_runtime()
     if baseline_mode == "pure_llm":
@@ -176,6 +199,16 @@ def _run_single_case(
             retriever=worker_runtime.get_sparse_text_rag_retriever(rag_corpus_file),
             max_turns=max_turns,
             retrieval_top_k=retrieval_top_k,
+            disease_scope=disease_scope,
+        )
+    elif baseline_mode == "kg_rag":
+        brain = KgRagConsultationBrain(
+            llm_client=worker_runtime.llm_client,
+            retriever=worker_runtime.get_kg_rag_retriever(),
+            max_turns=max_turns,
+            retrieval_top_k=retrieval_top_k,
+            enable_symptom_candidate_recall=kg_enable_symptom_candidate_recall,
+            symptom_candidate_top_k=kg_symptom_candidate_top_k,
             disease_scope=disease_scope,
         )
     else:
@@ -198,6 +231,8 @@ def _run_single_case_guarded(
     disease_scope: list[str],
     rag_corpus_file: str = "",
     retrieval_top_k: int = 4,
+    kg_enable_symptom_candidate_recall: bool = False,
+    kg_symptom_candidate_top_k: int = 10,
     api_error_retries: int = 1,
 ):
     retry_count = max(int(api_error_retries), 0)
@@ -213,6 +248,8 @@ def _run_single_case_guarded(
                 disease_scope,
                 rag_corpus_file=rag_corpus_file,
                 retrieval_top_k=retrieval_top_k,
+                kg_enable_symptom_candidate_recall=kg_enable_symptom_candidate_recall,
+                kg_symptom_candidate_top_k=kg_symptom_candidate_top_k,
             )
         except Exception as exc:
             if retries_used < retry_count and run_batch_replay._is_retryable_api_exception(exc):
@@ -250,6 +287,8 @@ def _run_cases_streaming(
     disease_scope: list[str],
     rag_corpus_file: str = "",
     retrieval_top_k: int = 4,
+    kg_enable_symptom_candidate_recall: bool = False,
+    kg_symptom_candidate_top_k: int = 10,
     api_error_retries: int = 1,
     on_case_start=None,
     on_result=None,
@@ -277,6 +316,8 @@ def _run_cases_streaming(
                     disease_scope=disease_scope,
                     rag_corpus_file=rag_corpus_file,
                     retrieval_top_k=retrieval_top_k,
+                    kg_enable_symptom_candidate_recall=kg_enable_symptom_candidate_recall,
+                    kg_symptom_candidate_top_k=kg_symptom_candidate_top_k,
                     api_error_retries=api_error_retries,
                 )
                 if on_result is not None:
@@ -313,6 +354,8 @@ def _run_cases_streaming(
                     disease_scope=disease_scope,
                     rag_corpus_file=rag_corpus_file,
                     retrieval_top_k=retrieval_top_k,
+                    kg_enable_symptom_candidate_recall=kg_enable_symptom_candidate_recall,
+                    kg_symptom_candidate_top_k=kg_symptom_candidate_top_k,
                     api_error_retries=api_error_retries,
                 )
             ] = case
@@ -350,6 +393,8 @@ def _run_cases_streaming(
                             disease_scope=disease_scope,
                             rag_corpus_file=rag_corpus_file,
                             retrieval_top_k=retrieval_top_k,
+                            kg_enable_symptom_candidate_recall=kg_enable_symptom_candidate_recall,
+                            kg_symptom_candidate_top_k=kg_symptom_candidate_top_k,
                             api_error_retries=api_error_retries,
                         )
                     ] = next_case
@@ -450,6 +495,11 @@ def resolve_disease_scope(cases_file: str, cases) -> tuple[list[str], str]:
     return [], "unavailable"
 
 
+def _validate_kg_rag_dependencies() -> None:
+    probe = KgRagRetriever.from_env()
+    probe.close()
+
+
 # 运行 baseline batch replay 主流程，并复用现有主 benchmark 的 summary/status 写盘逻辑。
 def main() -> int:
     args = parse_args()
@@ -524,6 +574,30 @@ def main() -> int:
             )
             return 1
         rag_corpus_file = str(rag_corpus_path)
+    elif args.baseline_mode == "kg_rag":
+        try:
+            _validate_kg_rag_dependencies()
+        except Exception as exc:
+            run_batch_replay._write_json(
+                status_file,
+                run_batch_replay._build_status_payload(
+                    run_status="failed",
+                    total_cases=len(cases),
+                    completed_cases=0,
+                    skipped_completed_cases=0,
+                    case_concurrency=args.case_concurrency,
+                    case_file=args.cases_file.strip(),
+                    case_limit=args.limit,
+                    output_root=output_root,
+                    start_time=start_time,
+                    active_cases=[],
+                    timing_summary=run_batch_replay._build_timing_summary([]),
+                ),
+            )
+            run_batch_replay._emit_terminal_line(
+                f"[baseline_replay] 启动失败：kg_rag 模式需要可用的 Neo4j，详情：{exc}"
+            )
+            return 1
 
     disease_scope, disease_scope_source = resolve_disease_scope(args.cases_file.strip(), cases)
 
@@ -583,6 +657,8 @@ def main() -> int:
     initial_summary["disease_scope_count"] = len(disease_scope)
     initial_summary["disease_scope_source"] = disease_scope_source
     initial_summary["retrieval_top_k"] = max(int(args.retrieval_top_k), 1)
+    initial_summary["kg_enable_symptom_candidate_recall"] = bool(args.kg_enable_symptom_candidate_recall)
+    initial_summary["kg_symptom_candidate_top_k"] = max(int(args.kg_symptom_candidate_top_k), 1)
     if len(rag_corpus_file) > 0:
         initial_summary["rag_corpus_file"] = rag_corpus_file
     run_batch_replay._write_json(summary_file, initial_summary)
@@ -615,6 +691,8 @@ def main() -> int:
             f"disease_scope_count={len(disease_scope)}，"
             f"disease_scope_source={disease_scope_source}，"
             f"retrieval_top_k={max(int(args.retrieval_top_k), 1)}，"
+            f"kg_enable_symptom_candidate_recall={str(bool(args.kg_enable_symptom_candidate_recall)).lower()}，"
+            f"kg_symptom_candidate_top_k={max(int(args.kg_symptom_candidate_top_k), 1)}，"
             f"rag_corpus_file={rag_corpus_file or 'n/a'}，"
             f"api_error_cooldown_seconds={api_error_cooldown_seconds:.2f}，"
             f"resume={'off' if args.no_resume else 'on'}，llm_available={str(llm_available).lower()}"
@@ -626,6 +704,7 @@ def main() -> int:
             f"待运行 {len(pending_cases)}，并发 {max(int(args.case_concurrency), 1)}，"
             f"disease scope {len(disease_scope)}，"
             f"retrieval_top_k={max(int(args.retrieval_top_k), 1)}，"
+            f"kg_symptom_candidate_recall={'on' if args.kg_enable_symptom_candidate_recall else 'off'}，"
             f"API 连接错误重试 {max(int(args.api_error_retries), 0)} 次，"
             f"冷却基线 {api_error_cooldown_seconds:.2f} 秒，"
             f"resume={'off' if args.no_resume else 'on'}，llm_available={str(llm_available).lower()}"
@@ -660,6 +739,8 @@ def main() -> int:
         summary_payload["disease_scope_count"] = len(disease_scope)
         summary_payload["disease_scope_source"] = disease_scope_source
         summary_payload["retrieval_top_k"] = max(int(args.retrieval_top_k), 1)
+        summary_payload["kg_enable_symptom_candidate_recall"] = bool(args.kg_enable_symptom_candidate_recall)
+        summary_payload["kg_symptom_candidate_top_k"] = max(int(args.kg_symptom_candidate_top_k), 1)
         if len(rag_corpus_file) > 0:
             summary_payload["rag_corpus_file"] = rag_corpus_file
         current_timing_summary = summary_payload["timing_summary"]
@@ -713,6 +794,8 @@ def main() -> int:
             disease_scope=disease_scope,
             rag_corpus_file=rag_corpus_file,
             retrieval_top_k=max(int(args.retrieval_top_k), 1),
+            kg_enable_symptom_candidate_recall=bool(args.kg_enable_symptom_candidate_recall),
+            kg_symptom_candidate_top_k=max(int(args.kg_symptom_candidate_top_k), 1),
             api_error_retries=args.api_error_retries,
             on_case_start=mark_case_started,
             on_result=persist_result,
@@ -772,6 +855,8 @@ def main() -> int:
     final_summary["disease_scope_count"] = len(disease_scope)
     final_summary["disease_scope_source"] = disease_scope_source
     final_summary["retrieval_top_k"] = max(int(args.retrieval_top_k), 1)
+    final_summary["kg_enable_symptom_candidate_recall"] = bool(args.kg_enable_symptom_candidate_recall)
+    final_summary["kg_symptom_candidate_top_k"] = max(int(args.kg_symptom_candidate_top_k), 1)
     if len(rag_corpus_file) > 0:
         final_summary["rag_corpus_file"] = rag_corpus_file
     run_batch_replay._write_json(summary_file, final_summary)

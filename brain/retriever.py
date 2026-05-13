@@ -746,8 +746,13 @@ class GraphRetriever:
         hypothesis: HypothesisCandidate | HypothesisScore,
         session_state: SessionState,
         top_k: int | None = None,
+        *,
+        group_limit: int | None = None,
+        total_limit: int | None = None,
     ) -> list[dict]:
         limit = top_k or self.config.evidence_profile_limit
+        effective_group_limit = max(int(group_limit or self.config.evidence_profile_group_limit), 1)
+        effective_total_limit = max(int(total_limit or self.config.evidence_profile_limit), 1)
 
         # 证据画像是解释用途，不像 R2 那样过滤 asked/known 节点；
         # 它需要尽可能完整地展示“这个诊断常见依赖哪些证据簇”。
@@ -833,7 +838,11 @@ class GraphRetriever:
                 }
             )
 
-        return self._limit_profile_groups(enriched)
+        return self._limit_profile_groups(
+            enriched,
+            group_limit=effective_group_limit,
+            total_limit=effective_total_limit,
+        )
 
     # 对真实图谱执行一次轻量联调，验证关键标签、关系和 R1/R2 是否能正常返回结果。
     def run_live_schema_smoke_checks(self) -> dict:
@@ -1067,21 +1076,42 @@ class GraphRetriever:
         return "detail"
 
     # 控制每个诊断卡片里的证据数量，避免前端过长。
-    def _limit_profile_groups(self, rows: Sequence[dict]) -> list[dict]:
+    def _limit_profile_groups(
+        self,
+        rows: Sequence[dict],
+        *,
+        group_limit: int | None = None,
+        total_limit: int | None = None,
+    ) -> list[dict]:
+        return self._limit_profile_groups_with_limits(
+            rows,
+            group_limit=group_limit,
+            total_limit=total_limit,
+        )
+
+    def _limit_profile_groups_with_limits(
+        self,
+        rows: Sequence[dict],
+        *,
+        group_limit: int | None = None,
+        total_limit: int | None = None,
+    ) -> list[dict]:
         group_counts: dict[str, int] = {}
         limited: list[dict] = []
+        effective_group_limit = max(int(group_limit or self.config.evidence_profile_group_limit), 1)
+        effective_total_limit = max(int(total_limit or self.config.evidence_profile_limit), 1)
 
         for row in rows:
             group = str(row.get("group") or "detail")
             count = group_counts.get(group, 0)
 
-            if count >= self.config.evidence_profile_group_limit:
+            if count >= effective_group_limit:
                 continue
 
             limited.append(dict(row))
             group_counts[group] = count + 1
 
-            if len(limited) >= self.config.evidence_profile_limit:
+            if len(limited) >= effective_total_limit:
                 break
 
         return limited

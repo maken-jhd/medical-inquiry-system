@@ -81,6 +81,21 @@ class BaselineDialogueTurn:
 
 
 @dataclass
+class BaselineObservedFeature:
+    """表示 baseline 会话中已确认、可用于检索的轻量特征记录。"""
+
+    normalized_name: str = ""
+    mention_state: str = "present"
+    canonical_name: str = ""
+    node_id: str = ""
+    label: str = ""
+    similarity: float = 0.0
+    source_turn: int = 0
+    source_kind: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class BaselineSessionState:
     """保存单病例纯 LLM 问诊会话状态。"""
 
@@ -91,3 +106,7 @@ class BaselineSessionState:
     last_model_top3: list[BaselineHypothesisCandidate] = field(default_factory=list)
     finalized: bool = False
     last_final_report: dict[str, Any] = field(default_factory=dict)
+    pending_question_text: str = ""
+    pending_target_name: str = ""
+    pending_question_group: str = "unknown"
+    observed_features: list[BaselineObservedFeature] = field(default_factory=list)

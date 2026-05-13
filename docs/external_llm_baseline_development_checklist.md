@@ -1,4 +1,4 @@
-# 外部 LLM 基线开发 Checklist（2026-05-13）
+# 外部 LLM 基线开发 Checklist（2026-05-14）
 
 本文档用于规划三类外部基线实验的实现路径：
 
@@ -119,13 +119,13 @@
 
 ### 2.4 KG RAG baseline
 
-- [ ] 新增 [baselines/kg_rag_retriever.py](/Users/loki/Workspace/GraduationDesign/baselines/kg_rag_retriever.py)
+- [x] 新增 [baselines/kg_rag_retriever.py](/Users/loki/Workspace/GraduationDesign/baselines/kg_rag_retriever.py)
   - 负责：
     - 连接当前活跃 Neo4j 搜索图谱
     - 基于当前对话与候选病名检索关键证据画像
     - 返回 top-k 图谱证据块
 
-- [ ] 新增 [baselines/llm_kg_rag_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/baselines/llm_kg_rag_consultation_brain.py)
+- [x] 新增 [baselines/llm_kg_rag_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/baselines/llm_kg_rag_consultation_brain.py)
   - 复用 `llm_consultation_brain`
   - 只增加 KG 检索层与检索结果注入 prompt
 
@@ -155,8 +155,8 @@
 - [x] 新增 [tests/test_llm_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/tests/test_llm_consultation_brain.py)
 - [x] 新增 [tests/test_llm_text_rag_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/tests/test_llm_text_rag_consultation_brain.py)
 - [x] 新增 [tests/test_text_rag_retriever.py](/Users/loki/Workspace/GraduationDesign/tests/test_text_rag_retriever.py)
-- [ ] 新增 [tests/test_llm_kg_rag_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/tests/test_llm_kg_rag_consultation_brain.py)
-- [ ] 新增 [tests/test_kg_rag_retriever.py](/Users/loki/Workspace/GraduationDesign/tests/test_kg_rag_retriever.py)
+- [x] 新增 [tests/test_llm_kg_rag_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/tests/test_llm_kg_rag_consultation_brain.py)
+- [x] 新增 [tests/test_kg_rag_retriever.py](/Users/loki/Workspace/GraduationDesign/tests/test_kg_rag_retriever.py)
 - [x] 新增 [tests/test_run_baseline_replay.py](/Users/loki/Workspace/GraduationDesign/tests/test_run_baseline_replay.py)
 
 ## 3. 纯 LLM 基线 Checklist
@@ -384,17 +384,17 @@
 
 ### 6.1 数据来源
 
-- [ ] 第一版直接连接当前活跃搜索图谱 Neo4j，不单独维护另一套 KG 数据副本
-- [ ] 第一版优先复用 [brain/retriever.py](/Users/loki/Workspace/GraduationDesign/brain/retriever.py) 的现有检索能力做轻量封装
+- [x] 第一版直接连接当前活跃搜索图谱 Neo4j，不单独维护另一套 KG 数据副本
+- [x] 第一版优先复用 [brain/retriever.py](/Users/loki/Workspace/GraduationDesign/brain/retriever.py) 的现有检索能力做轻量封装
   - `retrieve_candidate_evidence_profile()`
   - `retrieve_r2_expected_evidence()`
   - 必要时补一个更薄的 baseline 专用适配层
-- [ ] 不直接复用 [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py) 的主搜索、repair、acceptance 主链
+- [x] 不直接复用 [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py) 的主搜索、repair、acceptance 主链
 
 ### 6.2 检索结果形态
 
-- [ ] 每轮返回的 KG 上下文优先组织成“可直接喂给 LLM 的证据块”，而不是整段 Cypher 原始结果
-- [ ] 每条证据块建议至少包含：
+- [x] 每轮返回的 KG 上下文优先组织成“可直接喂给 LLM 的证据块”，而不是整段 Cypher 原始结果
+- [x] 每条证据块建议至少包含：
   - `node_id`
   - `name`
   - `label`
@@ -406,6 +406,10 @@
 
 ### 6.3 检索策略
 
+- [x] 第一版 skeleton 当前优先围绕 `session.last_model_top3` 拉取候选疾病画像与待验证证据；首轮若尚无稳定 top3，允许暂时不注入 KG 上下文
+- [x] 当前实现虽然也会像 `text_rag` 一样构造 `retrieval_query`，但 [baselines/kg_rag_retriever.py](/Users/loki/Workspace/GraduationDesign/baselines/kg_rag_retriever.py) 目前并不会直接用这段 query 文本去图谱里做“症状 -> 疾病”反查
+  - 现有主链路仍是：`last_model_top3 -> candidate profile / expected evidence -> prompt`
+  - 因此“对话里已经出现了哪些症状”目前只会间接影响 LLM 自己的 top3，不会像 `text_rag` 那样直接参与 KG 检索
 - [ ] 每轮 KG query 来源可优先使用：
   - 当前全部对话历史
   - 当前模型 top3 候选名
@@ -415,24 +419,109 @@
 - [ ] top3 已相对稳定后，优先拉“区分当前候选的关键证据”
 - [ ] 每轮给模型的 KG 上下文同样只保留 top-k，避免把图谱检索结果整包灌进 prompt
 
+### 6.3A 症状反查候选疾病插件（已实现，可选启用）
+
+- [x] 可行性结论：该方案可行，且建议作为 `kg_rag` 的可插拔辅助召回模块，而不是替代当前“围绕 top3 候选疾病拉证据”的主链
+  - 现有 [brain/retriever.py](/Users/loki/Workspace/GraduationDesign/brain/retriever.py) 已经具备 `retrieve_r1_candidates()`，本质上就是“特征 / 症状 -> 候选疾病”的反向召回能力
+  - 现有 [brain/entity_linker.py](/Users/loki/Workspace/GraduationDesign/brain/entity_linker.py) 与 [brain/med_extractor.py](/Users/loki/Workspace/GraduationDesign/brain/med_extractor.py) 已经提供了“患者原话 -> 归一化特征 -> 图谱节点”这条链路
+  - 真正缺的不是图谱检索能力，而是 baseline 侧尚未维护“目前已知的所有症状 / 风险 / 检查线索”的轻量状态
+  - 当前搜索图谱里直接可稳定返回的是 `Disease` 候选，而不是 benchmark 意义上的“病例实例”；因此 prompt 中应表述为“候选疾病列表”，不要伪装成“匹配到的病例”
+
+- [x] baseline 已新增专用轻量状态，而不是把主系统整条会话状态机搬进外部 baseline
+  - 当前落点是 [baselines/llm_baseline_types.py](/Users/loki/Workspace/GraduationDesign/baselines/llm_baseline_types.py) 的 `BaselineSessionState.observed_features`
+  - 作用：维护当前 baseline 会话里已明确提到、且值得用于图谱反查的特征集合
+  - 当前保存：`normalized_name / mention_state / node_id / canonical_name / similarity / source_turn / source_kind`
+
+- [x] 已把“已知特征”的来源拆成两条，避免实现一上来就过重
+  - 路径 A：对 opening 或信息量较大的患者自由文本，复用 `MedExtractor + EntityLinker`
+  - 路径 B：对“上一轮刚问过某个 target，患者给出明确肯定回答”的短答，直接把 `target_name` 写入轻量状态
+  - 当前第一版优先纳入：`present` 且 `is_trusted=true` 的 opening / free-text 特征，以及明确肯定短答
+  - 当前先聚焦 `symptom / risk / lab / imaging / pathogen`，`unclear` 与弱链接结果默认不参与症状反查
+
+- [x] 新模块已设计成 `KgRagRetriever.query()` 内的可选第二分支，而不是改写现有 disease-centric 分支
+  - 分支 1：保留当前逻辑，继续围绕 `session.last_model_top3` 拉 `candidate profile + expected evidence`
+  - 分支 2：当开关开启时，使用 `BaselineSessionState.observed_features` 中的已知特征，通过 `retrieve_r1_candidates()` 反查候选疾病
+  - 两个分支最终共同注入 prompt，但不要混为一种数据结构再让字段语义变糊
+
+- [x] 症状反查 disease recall 结果已使用单独字段，不直接塞进 `retrieved_kg_context`
+  - 当前新增：`retrieved_kg_candidate_diseases`
+  - 当前新增：`retrieved_kg_candidate_disease_total`
+  - 当前新增：`retrieved_kg_candidate_disease_has_more`
+  - 当前新增：`retrieved_kg_candidate_disease_notice`
+  - 单条 item 当前包含：
+    - `disease_name`
+    - `score`
+    - `matched_features`
+    - `evidence_names`
+    - `retrieval_mode = "symptom_candidate_recall"`
+  - 原因：`retrieved_kg_context` 当前语义是“候选疾病周围的证据块”，如果直接混入 `Disease` 候选，prompt 会同时出现“病”和“病的证据节点”，阅读负担会明显上升
+
+- [x] 当前已实现数量控制
+  - 若反查得到的候选疾病 `<= top_k`，则全部返回
+  - 若 `> top_k`，只返回按 `semantic_score` 排序后的前 `top_k` 个
+  - 同时补充：
+    - `retrieved_kg_candidate_disease_total = 实际总数`
+    - `retrieved_kg_candidate_disease_has_more = true`
+    - `retrieved_kg_candidate_disease_notice = "基于当前已知症状从图谱反查到更多候选疾病，当前仅展示前 N 个。"`
+
+- [x] 当前已实现排序与过滤
+  - 直接复用 `retrieve_r1_candidates()` 当前的 `semantic_score`
+  - 按 `score DESC, disease_name ASC` 排序
+  - 若当前 baseline 已启用 closed-set disease scope，会先把症状反查结果限制在当前病例集对应的 disease scope 内，减少 prompt 被 scope 外疾病污染
+  - 对与 `session.last_model_top3` 完全重复的 disease，当前保留并显式标记 `already_in_top3=true`
+
+- [x] 当前已实现最小触发策略
+  - 增加布尔开关：`enable_symptom_candidate_recall = false`
+  - 当前默认关闭，只在对照实验中显式开启
+  - 当前开启后要求已知阳性特征数量 `>= 2`
+  - 暂未根据“disease-centric 证据块过少”做自适应触发，保持第一版足够轻量
+
+- [x] 当前实现遵守边界约束
+  - 症状反查结果只作为 prompt 参考，不直接覆盖 `last_model_top3`
+  - 不把该模块变成主系统的 `A1 -> R1 -> R2 -> MCTS` 缩小版
+  - 不在该模块里引入 `repair / acceptance / reward_model`
+  - 若本轮没有可信的已知特征，模块返回空列表，而不是退化成全文模糊搜索
+
+- [ ] 风险与代价评估
+  - 常见症状如“发热 / 咳嗽 / 头痛”会召回很多泛化疾病，若不过滤会明显放大 prompt 噪声
+  - baseline 当前没有主系统那种完整的会话级证据状态，因此短答解析若做得太弱，会把“没听医生提过”这类不确定回答错误当成阴性
+  - 若 disease-centric 分支与 symptom-centric 分支都把同一类疾病反复注入，LLM 可能被“重复出现次数”而不是“证据质量”带偏
+
+- [ ] 推荐实现顺序
+  - 第一步：只做 `opening + 明确肯定短答` 的已知特征维护，不处理复杂否定和跨句改写
+  - 第二步：接入 `retrieve_r1_candidates()`，得到 `retrieved_kg_candidate_diseases`
+  - 第三步：加上 `top10 + has_more + notice`
+  - 第四步：再考虑是否把 `risk / lab / imaging / pathogen` 一并纳入反查特征源
+
 ### 6.4 KG RAG prompt 注入
 
-- [ ] `LLM + KG RAG` 与 `纯 LLM` 共用同一 ask/final JSON 契约
-- [ ] 唯一区别：
+- [x] `LLM + KG RAG` 与 `纯 LLM` 共用同一 ask/final JSON 契约
+- [x] 唯一区别：
   - prompt 中额外增加：
     - `retrieved_kg_context`
-- [ ] `search_report.search_metadata` 建议增加：
+- [x] 若启用“症状反查候选疾病”插件，当前会额外增加：
+  - `retrieved_kg_candidate_diseases`
+  - `retrieved_kg_candidate_disease_total`
+  - `retrieved_kg_candidate_disease_has_more`
+  - `retrieved_kg_candidate_disease_notice`
+- [x] `search_report.search_metadata` 建议增加：
   - `backend = "llm_kg_rag"`
   - `retrieved_node_ids`
   - `retrieved_disease_names`
   - `retrieval_query`
   - `retrieval_mode`
+- [x] 若启用插件，`search_report.search_metadata / final_report.metadata` 当前还会增加：
+  - `retrieved_candidate_disease_names_from_symptoms`
+  - `retrieved_candidate_disease_count_from_symptoms`
+  - `retrieved_candidate_disease_total_from_symptoms`
+  - `retrieved_candidate_disease_has_more_from_symptoms`
+  - `retrieved_candidate_disease_notice_from_symptoms`
 
 ### 6.5 边界约束
 
-- [ ] KG RAG baseline 的 ask / final 决策仍由 baseline LLM 给出
-- [ ] 不把主系统的 `MCTS / reward / verifier / repair / acceptance` 作为外部 baseline 的内部组件
-- [ ] 若运行环境没有 Neo4j，应显式报出依赖缺失，而不是静默退化成纯 LLM
+- [x] KG RAG baseline 的 ask / final 决策仍由 baseline LLM 给出
+- [x] 不把主系统的 `MCTS / reward / verifier / repair / acceptance` 作为外部 baseline 的内部组件
+- [x] 若运行环境没有 Neo4j，会显式报出依赖缺失，而不是静默退化成纯 LLM
 
 ## 7. run_baseline_replay.py Checklist
 
@@ -451,11 +540,15 @@
 - [x] `--api-error-retries`
 - [x] `--rag-corpus-file`
 - [x] `--retrieval-top-k`
+- [x] 若将症状反查做成显式可插拔模块，当前已增加：
+  - `--kg-enable-symptom-candidate-recall`
+  - `--kg-symptom-candidate-top-k`
 
 说明：
 
 - `--rag-corpus-file` 主要服务于 `text_rag`
 - `kg_rag` 第一版优先继续复用现有 Neo4j 环境变量与连接配置，不急于暴露一组新的 CLI 参数
+- 若只在实验阶段启用症状反查插件，优先把它作为 `kg_rag` 的可选参数或配置开关，而不是默认行为
 
 ### 7.2 运行逻辑
 
@@ -467,8 +560,8 @@
 - [x] 复用 `VirtualPatientAgent(use_llm=True, llm_client=shared_client)`
 - [x] 复用 `ReplayEngine`
 - [x] 写出与 `run_batch_replay.py` 相同格式的结果文件
-- [ ] `text_rag` worker 级缓存文本 corpus 与稀疏检索索引
-- [ ] `kg_rag` worker 级缓存 Neo4j client 与 KG retriever
+- [x] `text_rag` worker 级缓存文本 corpus 与稀疏检索索引
+- [x] `kg_rag` worker 级缓存 Neo4j client 与 KG retriever
 - [x] `benchmark_summary.json` 应继续包含：
   - `eligible_summary`
   - `case_qc_status_summaries`
@@ -487,28 +580,37 @@
 
 ### 8.1 单元测试
 
-- [ ] `llm_consultation_brain` 能正确：
+- [x] `llm_consultation_brain` 能正确：
   - ask
   - final
   - 8 轮强制 finalize
 
-- [ ] `text_rag_retriever` 能正确：
+- [x] `text_rag_retriever` 能正确：
   - 加载 corpus
   - 返回 top-k
 
-- [ ] `llm_text_rag_consultation_brain` 能正确：
+- [x] `llm_text_rag_consultation_brain` 能正确：
   - 注入 `retrieved_documents`
   - 保持与 pure LLM 相同的 ask / final 契约
 
-- [ ] `kg_rag_retriever` 能正确：
+- [x] `kg_rag_retriever` 能正确：
   - 返回候选疾病画像或关键待验证证据
   - 对 Neo4j 不可用给出清晰错误
+- [x] 症状反查插件已补充验证：
+  - opening 中的阳性症状能被写入 baseline 轻量状态
+  - 明确肯定短答能把上一轮 `target_name` 写入已知特征集合
+  - `retrieve_r1_candidates()` 返回的疾病能被裁剪到前 `10` 个
+  - 当总数 `> 10` 时，`has_more / total / notice` 正确落盘
+  - 启用 closed-set disease scope 时，scope 外 disease 不会进入最终 prompt
 
-- [ ] `llm_kg_rag_consultation_brain` 能正确：
+- [x] `llm_kg_rag_consultation_brain` 能正确：
   - 注入 `retrieved_kg_context`
   - 保持与 pure LLM 相同的 ask / final 契约
+- [x] 症状反查插件已补充验证：
+  - prompt 中能额外看到 `retrieved_kg_candidate_diseases`
+  - `search_report.search_metadata` 与 `final_report.metadata` 中能保留该字段及其计数信息
 
-- [ ] `run_baseline_replay.py` 能正确输出：
+- [x] `run_baseline_replay.py` 能正确输出：
   - `replay_results.jsonl`
   - `benchmark_summary.json`
 

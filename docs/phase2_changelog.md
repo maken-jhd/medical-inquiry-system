@@ -10,6 +10,127 @@
 - `phase2_execution_checklist.md` 更偏“路线设计与待办清单”
 - 本文更偏“已经发生过哪些阶段性变化、分别解决了什么问题”
 
+## 近期更新：2026-05-14 为 KG RAG baseline 落地可插拔的症状反查候选疾病插件
+
+### 本次目标
+
+- 保留 `kg_rag` 作为轻量对照 baseline 的定位
+- 让它除了围绕当前 top 候选疾病拉证据块之外，还能在显式开启时，利用“当前已知特征”从图谱反查一批候选疾病给大模型参考
+- 保持该分支只是辅助召回，不把 baseline 膨胀成主系统的 `A1 -> R1 -> R2 -> MCTS`
+
+### 本次改动
+
+- [baselines/llm_baseline_types.py](/Users/loki/Workspace/GraduationDesign/baselines/llm_baseline_types.py)
+  - baseline 会话状态新增 `pending_question_*` 与 `observed_features`
+  - 为 `kg_rag` 症状反查插件提供最小会话状态承载，不引入主系统完整 session state
+- [baselines/llm_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/baselines/llm_consultation_brain.py)
+  - 新增 `_record_patient_observation()` 扩展钩子
+  - ask 后会记住上一轮 `target_name / question_group`，供下轮明确肯定短答写入 observed features
+- [baselines/llm_kg_rag_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/baselines/llm_kg_rag_consultation_brain.py)
+  - 开启插件后，opening 或信息量较大的自由文本会复用 `MedExtractor + EntityLinker` 写入可信 observed features
+  - 对上一轮已问 target 的明确肯定短答，会把 `target_name` 直接写入 observed features
+  - prompt / search metadata / final metadata 新增：
+    - `retrieved_kg_candidate_diseases`
+    - `retrieved_kg_candidate_disease_total`
+    - `retrieved_kg_candidate_disease_has_more`
+    - `retrieved_kg_candidate_disease_notice`
+    - `retrieved_candidate_disease_names_from_symptoms`
+- [baselines/kg_rag_retriever.py](/Users/loki/Workspace/GraduationDesign/baselines/kg_rag_retriever.py)
+  - `query()` 新增可选 symptom-centric recall 分支
+  - 复用 [brain/retriever.py](/Users/loki/Workspace/GraduationDesign/brain/retriever.py) 的 `retrieve_r1_candidates()`，把 observed features 反查成候选疾病列表
+  - 结果按 `score DESC, disease_name ASC` 排序，默认只展示前 `10` 个，并补 `total / has_more / notice`
+  - 若当前 baseline 有 closed-set disease scope，会先做 scope 过滤再注入 prompt
+- [brain/llm_client.py](/Users/loki/Workspace/GraduationDesign/brain/llm_client.py)
+  - `baseline_consultation_turn` prompt 新增 `retrieved_kg_candidate_diseases` 说明
+  - 明确要求模型把它视作检索参考，而不是患者已确认事实
+- [scripts/run_baseline_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_baseline_replay.py)
+  - `kg_rag` 新增 CLI：
+    - `--kg-enable-symptom-candidate-recall`
+    - `--kg-symptom-candidate-top-k`
+  - `benchmark_summary.json` 会同步记录这两个配置，便于后续对照实验复盘
+- 测试补强：
+  - [tests/test_kg_rag_retriever.py](/Users/loki/Workspace/GraduationDesign/tests/test_kg_rag_retriever.py)
+  - [tests/test_llm_kg_rag_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/tests/test_llm_kg_rag_consultation_brain.py)
+  - [tests/test_run_baseline_replay.py](/Users/loki/Workspace/GraduationDesign/tests/test_run_baseline_replay.py)
+
+### 影响
+
+- `kg_rag` 现在除了 disease-centric 的证据块，还可以在显式开启时，向模型额外展示“基于当前已知特征反查得到的候选疾病列表”
+- 这批候选疾病与 `retrieved_kg_context` 分离存放，避免把“疾病节点”和“疾病周围证据块”混成一个字段
+- 默认仍然关闭该插件，确保 `kg_rag` 作为对照 baseline 时不会被过度调优
+
+### 验证结果
+
+- 已执行：
+  - `conda run -n GraduationDesign python -m pytest tests/test_kg_rag_retriever.py tests/test_llm_kg_rag_consultation_brain.py tests/test_run_baseline_replay.py -q`
+  - 结果：`15 passed`
+
+## 近期更新：2026-05-13 增强 external baseline replay 中的 RAG 展示信息
+
+### 本次目标
+
+- 让 `text_rag / kg_rag` 的 replay 输出不仅记录命中 id 和 disease name
+- 还要能在离线复盘时直接看到“这一轮到底给大模型注入了哪些 RAG 载荷”
+
+### 本次改动
+
+- [baselines/llm_text_rag_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/baselines/llm_text_rag_consultation_brain.py)
+  - `search_report.search_metadata` 现在会额外落盘截断后的 `retrieved_documents`
+  - `final_report.metadata` 现在也会同步保留 `retrieved_documents` 与 `retrieved_document_count`
+- [baselines/llm_kg_rag_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/baselines/llm_kg_rag_consultation_brain.py)
+  - `search_report.search_metadata` 现在会额外落盘 `retrieved_kg_context`
+  - `final_report.metadata` 现在也会同步保留 `retrieved_kg_context` 与 `retrieved_kg_context_count`
+- 测试补强：
+  - [tests/test_llm_text_rag_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/tests/test_llm_text_rag_consultation_brain.py)
+  - [tests/test_llm_kg_rag_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/tests/test_llm_kg_rag_consultation_brain.py)
+  - 新增对 turn 级 search metadata 和 final metadata 的展示字段断言
+
+### 影响
+
+- 现在查看 `replay_results.jsonl` 时，可以直接确认：
+  - text RAG 给模型提供了哪些文档预览
+  - KG RAG 给模型提供了哪些图谱证据块
+- 这项改动只增强展示与离线复盘能力，不改变 baseline 的检索策略和问诊决策逻辑
+
+### 验证结果
+
+- 已执行：
+  - `conda run -n GraduationDesign python -m pytest tests/test_llm_text_rag_consultation_brain.py tests/test_llm_kg_rag_consultation_brain.py -q`
+  - 结果：`4 passed`
+
+## 近期更新：2026-05-13 增强 KG RAG baseline 的分组证据注入配额
+
+### 本次目标
+
+- 保留 `kg_rag` 作为对照实验 baseline 的轻量定位
+- 但把原先“全局只截前几条证据块”的策略，提升为“每个候选病种按分组配额注入一批更完整的证据摘要”
+- 避免直接把疾病全部邻接边原样塞进 prompt，导致噪声过大
+
+### 本次改动
+
+- [baselines/kg_rag_retriever.py](/Users/loki/Workspace/GraduationDesign/baselines/kg_rag_retriever.py)
+  - 将 KG 注入选择从“全局 top_k 截断”改为“每个候选病种独立分组配额裁剪”
+  - 当前默认配额为：`symptom<=5`、`lab<=4`、`imaging<=2`、`pathogen<=2`、`risk<=2`、`detail<=2`
+  - 为避免高优先级 symptom/lab 挤掉 risk/detail，profile 路径现在会先拉更宽的原始候选，再按最终配额落盘到 prompt
+- [brain/retriever.py](/Users/loki/Workspace/GraduationDesign/brain/retriever.py)
+  - `retrieve_candidate_evidence_profile()` 新增可选的 `group_limit / total_limit` 覆盖参数
+  - baseline 可以在不改变前端展示默认上限的前提下，单独拉取更完整的候选病证据画像
+- [tests/test_kg_rag_retriever.py](/Users/loki/Workspace/GraduationDesign/tests/test_kg_rag_retriever.py)
+  - 新增按 `symptom/lab/imaging/pathogen/risk/detail` 分组配额选取的单元测试
+
+### 影响
+
+- `kg_rag` prompt 注入不再只偏向前几条高优先级实验室或影像证据
+- 每个候选病种现在更容易同时保留症状、检查、病原、风险和病程细节这几类上下文
+- 这次改动仍然不是“全邻接信息 dump 给模型”，而是更厚一些的结构化摘要
+
+### 验证结果
+
+- 已执行：
+  - `conda run -n GraduationDesign python -m pytest tests/test_kg_rag_retriever.py -q`
+  - `conda run -n GraduationDesign python -m pytest tests/test_retriever.py tests/test_llm_kg_rag_consultation_brain.py tests/test_run_baseline_replay.py -q`
+  - 结果：`3 passed` 与 `16 passed`
+
 ## 近期更新：2026-05-13 将外部 baseline checklist 扩展为“纯 LLM + 文本 RAG + KG RAG”三路方案
 
 ### 本次目标
@@ -113,6 +234,69 @@
   - text_rag prompt 注入
   - runner 对 `text_rag` 参数和分发逻辑的支持
 - 真实 smoke / full replay 仍待下一轮执行
+
+## 近期更新：2026-05-13 落地 KG RAG baseline 最小代码骨架
+
+### 本次目标
+
+- 在现有 pure LLM baseline 扩展 hook 基础上，补一条最小可运行的 `kg_rag` 路线
+- 保持外部 baseline 仍复用同一 `ReplayEngine` 与 benchmark summary schema
+- 第一版只接轻量图谱证据注入，不引入主系统的 `service / MCTS / repair / acceptance`
+
+### 本次改动
+
+- [baselines/kg_rag_retriever.py](/Users/loki/Workspace/GraduationDesign/baselines/kg_rag_retriever.py)
+  - 新增 KG RAG 轻量检索适配器
+  - 直接连接当前活跃 Neo4j 搜索图谱
+  - 复用 [brain/retriever.py](/Users/loki/Workspace/GraduationDesign/brain/retriever.py) 的：
+    - `retrieve_candidate_evidence_profile()`
+    - `retrieve_r2_expected_evidence()`
+  - 把图谱返回结果整理成可直接注入 prompt 的证据块
+  - 若缺少 `NEO4J_PASSWORD` 或 Neo4j 不可用，会明确报错，不静默退化
+- [baselines/llm_kg_rag_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/baselines/llm_kg_rag_consultation_brain.py)
+  - 新增 KG RAG 医生 baseline
+  - 每轮会按当前 `top3` 候选疾病拉取图谱证据，并把 `retrieved_kg_context` 注入 `baseline_consultation_turn` prompt
+  - replay 的 `search_report.search_metadata` 会额外记录：
+    - `retrieval_query`
+    - `retrieved_node_ids`
+    - `retrieved_disease_names`
+    - `retrieval_mode`
+- [scripts/run_baseline_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_baseline_replay.py)
+  - `baseline_mode` 新增 `kg_rag`
+  - worker 级新增 KG retriever 缓存
+  - 启动前会主动校验 Neo4j 依赖，避免进入逐病例失败模式
+- [brain/llm_client.py](/Users/loki/Workspace/GraduationDesign/brain/llm_client.py)
+  - 更新 `baseline_consultation_turn` prompt，显式说明 `retrieved_kg_context` 是辅助参考，不等于患者已确认事实
+- 测试新增与补强：
+  - [tests/test_kg_rag_retriever.py](/Users/loki/Workspace/GraduationDesign/tests/test_kg_rag_retriever.py)
+  - [tests/test_llm_kg_rag_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/tests/test_llm_kg_rag_consultation_brain.py)
+  - [tests/test_run_baseline_replay.py](/Users/loki/Workspace/GraduationDesign/tests/test_run_baseline_replay.py)
+- 文档更新：
+  - [README.md](/Users/loki/Workspace/GraduationDesign/README.md)
+  - [docs/external_llm_baseline_development_checklist.md](/Users/loki/Workspace/GraduationDesign/docs/external_llm_baseline_development_checklist.md)
+
+### 影响
+
+- 外部 baseline 现在已经形成三条可清晰区分的代码路径：
+  - `pure_llm`
+  - `text_rag`
+  - `kg_rag`
+- `kg_rag` 当前仍属于“骨架可跑”阶段，现阶段重点是：
+  - 先验证 Neo4j 依赖、runner 分发与 prompt 注入都稳定
+  - 后续再调检索策略、首轮候选冷启动和 smoke 指标
+- 当前首轮若还没有稳定 `top3`，允许暂时不注入 KG 上下文；这是第一版刻意保守的边界，不等于最终策略
+
+### 验证结果
+
+- 已补窄单测覆盖：
+  - KG 检索适配器返回疾病画像 / 待验证证据
+  - Neo4j 依赖缺失时给出清晰错误
+  - kg_rag prompt 注入 `retrieved_kg_context`
+  - runner 对 `kg_rag` 参数和分发逻辑的支持
+- 已执行：
+  - `conda run -n GraduationDesign python -m pytest tests/test_kg_rag_retriever.py tests/test_llm_kg_rag_consultation_brain.py tests/test_run_baseline_replay.py -q`
+  - 结果：`11 passed`
+- 真实 `kg_rag smoke / full replay` 仍待下一轮执行；该路线依赖真实 Neo4j
 
 ## 近期更新：2026-05-12 针对 ranking-stage flip 与 Top-3 coverage loss 做轻量修复
 

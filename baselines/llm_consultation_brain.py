@@ -59,6 +59,7 @@ class PureLlmConsultationBrain:
         session = self.sessions.get(session_id) or self.start_session(session_id)
         session.turn_index += 1
         session.dialogue_history.append(BaselineDialogueTurn(role="patient", text=str(patient_text).strip()))
+        self._record_patient_observation(session, patient_text)
 
         decision_kind, decision = self._decide_next_step(session, must_finalize=False)
         if decision_kind == "ask":
@@ -76,6 +77,9 @@ class PureLlmConsultationBrain:
             )
             session.last_model_top3 = list(ask_decision.top3)
             session.asked_questions.append(ask_decision.question_text)
+            session.pending_question_text = ask_decision.question_text
+            session.pending_target_name = ask_decision.target_name
+            session.pending_question_group = ask_decision.question_group
             session.dialogue_history.append(BaselineDialogueTurn(role="doctor", text=ask_decision.question_text))
             return {
                 "session_id": session_id,
@@ -96,6 +100,9 @@ class PureLlmConsultationBrain:
         session.last_model_top3 = list(final_decision.top3)
         session.finalized = True
         session.last_final_report = dict(final_report)
+        session.pending_question_text = ""
+        session.pending_target_name = ""
+        session.pending_question_group = "unknown"
         search_report = self._build_search_report(
             session,
             decision_kind="final",
@@ -130,6 +137,9 @@ class PureLlmConsultationBrain:
         session.last_model_top3 = list(decision.top3)
         session.finalized = True
         session.last_final_report = dict(final_report)
+        session.pending_question_text = ""
+        session.pending_target_name = ""
+        session.pending_question_group = "unknown"
         return final_report
 
     # 将当前会话转成结构化 prompt 输入，并归一化 ask/final 决策。
@@ -203,6 +213,10 @@ class PureLlmConsultationBrain:
     ) -> dict[str, Any]:
         _ = session, decision, stop_reason, forced_finalize
         return {}
+
+    # 子类可在这里根据最新患者回复维护轻量会话状态，例如检索增强所需的已知特征集合。
+    def _record_patient_observation(self, session: BaselineSessionState, patient_text: str) -> None:
+        _ = session, patient_text
 
     # 将模型原始 JSON 统一收口为 ask / final 两种规范化决策。
     def _normalize_turn_decision(
