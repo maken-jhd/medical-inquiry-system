@@ -1,0 +1,86 @@
+{
+  "full227": {
+    "mcts": {
+      "case_count": 227,
+      "top1_hit_rate": 0.4185,
+      "top3_hit_rate": 0.6564,
+      "completion_rate": 0.3392,
+      "accepted_exact_accuracy": 0.6883,
+      "correct_accept_rate": 0.2335,
+      "wrong_accept_rate": 0.1057,
+      "average_turns": 6.1894
+    },
+    "pure_llm": {
+      "case_count": 227,
+      "top1_hit_rate": 0.1718,
+      "top3_hit_rate": 0.3436,
+      "completion_rate": 1.0,
+      "accepted_exact_accuracy": 0.1718,
+      "correct_accept_rate": 0.1718,
+      "wrong_accept_rate": 0.8282,
+      "average_turns": 7.4802
+    },
+    "text_rag": {
+      "case_count": 227,
+      "top1_hit_rate": 0.2203,
+      "top3_hit_rate": 0.4449,
+      "completion_rate": 1.0,
+      "accepted_exact_accuracy": 0.2203,
+      "correct_accept_rate": 0.2203,
+      "wrong_accept_rate": 0.7797,
+      "average_turns": 6.9031
+    },
+    "kg_rag": {
+      "case_count": 227,
+      "top1_hit_rate": 0.2819,
+      "top3_hit_rate": 0.467,
+      "completion_rate": 1.0,
+      "accepted_exact_accuracy": 0.2819,
+      "correct_accept_rate": 0.2819,
+      "wrong_accept_rate": 0.7181,
+      "average_turns": 6.5507
+    }
+  },
+  "eligible112": {
+    "mcts": {
+      "case_count": 112,
+      "top1_hit_rate": 0.5089,
+      "top3_hit_rate": 0.8214,
+      "completion_rate": 0.5179,
+      "accepted_exact_accuracy": 0.6724,
+      "correct_accept_rate": 0.3482,
+      "wrong_accept_rate": 0.1696,
+      "average_turns": 5.1339
+    },
+    "pure_llm": {
+      "case_count": 112,
+      "top1_hit_rate": 0.2589,
+      "top3_hit_rate": 0.4821,
+      "completion_rate": 1.0,
+      "accepted_exact_accuracy": 0.2589,
+      "correct_accept_rate": 0.2589,
+      "wrong_accept_rate": 0.7411,
+      "average_turns": 7.2589
+    },
+    "text_rag": {
+      "case_count": 112,
+      "top1_hit_rate": 0.3214,
+      "top3_hit_rate": 0.6071,
+      "completion_rate": 1.0,
+      "accepted_exact_accuracy": 0.3214,
+      "correct_accept_rate": 0.3214,
+      "wrong_accept_rate": 0.6786,
+      "average_turns": 6.6429
+    },
+    "kg_rag": {
+      "case_count": 112,
+      "top1_hit_rate": 0.4018,
+      "top3_hit_rate": 0.625,
+      "completion_rate": 1.0,
+      "accepted_exact_accuracy": 0.4018,
+      "correct_accept_rate": 0.4018,
+      "wrong_accept_rate": 0.5982,
+      "average_turns": 6.3125
+    }
+  }
+}
