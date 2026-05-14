@@ -42,11 +42,25 @@ transition_model:
   enable_belief_mixture: true
   fallback_to_heuristic: true
   statistics_smoothing_alpha: 0.5
-  statistics_min_total_count: 1
+  # 统计层至少要有一个更像样的样本量，再让它进入 hybrid mixing。
+  statistics_min_total_count: 3
   # 默认留空时，statistical 模式会自动发现最新的 graph cases / replay / evidence catalog。
   graph_case_paths: []
   replay_result_paths: []
   evidence_catalog_paths: []
+  # count-aware + backoff-aware hybrid：高置信统计才放大，低置信统计退回 heuristic。
+  hybrid_enable_count_aware_mixing: true
+  hybrid_count_threshold_low: 3
+  hybrid_count_threshold_mid: 8
+  hybrid_count_threshold_high: 20
+  hybrid_lambda_low: 0.25
+  hybrid_lambda_mid: 0.5
+  hybrid_lambda_high: 0.8
+  backoff_discount_disease_family_question_type: 1.0
+  backoff_discount_disease_question_type: 0.85
+  backoff_discount_family_question_type: 0.65
+  backoff_discount_question_type: 0.4
+  backoff_discount_global: 0.15
 
 # reward model 负责把信息增益近似、成本和不确定性拆成可替换的组件。
 reward_model:

@@ -5794,7 +5794,7 @@ def build_default_brain(
         enable_belief_mixture=bool(transition_model_config.get("enable_belief_mixture", True)),
         fallback_to_heuristic=bool(transition_model_config.get("fallback_to_heuristic", True)),
         statistics_smoothing_alpha=float(transition_model_config.get("statistics_smoothing_alpha", 0.5)),
-        statistics_min_total_count=int(transition_model_config.get("statistics_min_total_count", 1)),
+        statistics_min_total_count=int(transition_model_config.get("statistics_min_total_count", 3)),
         graph_case_paths=_normalize_optional_path_list(transition_model_config.get("graph_case_paths", [])),
         replay_result_paths=_normalize_optional_path_list(transition_model_config.get("replay_result_paths", [])),
         evidence_catalog_paths=_normalize_optional_path_list(
@@ -5817,6 +5817,36 @@ def build_default_brain(
                 "evidence_catalog_glob",
                 "test_outputs/evidence_family/**/disease_evidence_family_catalog.json",
             )
+        ),
+        hybrid_enable_count_aware_mixing=bool(
+            transition_model_config.get("hybrid_enable_count_aware_mixing", True)
+        ),
+        hybrid_count_threshold_low=float(
+            transition_model_config.get("hybrid_count_threshold_low", 3.0)
+        ),
+        hybrid_count_threshold_mid=float(
+            transition_model_config.get("hybrid_count_threshold_mid", 8.0)
+        ),
+        hybrid_count_threshold_high=float(
+            transition_model_config.get("hybrid_count_threshold_high", 20.0)
+        ),
+        hybrid_lambda_low=float(transition_model_config.get("hybrid_lambda_low", 0.25)),
+        hybrid_lambda_mid=float(transition_model_config.get("hybrid_lambda_mid", 0.5)),
+        hybrid_lambda_high=float(transition_model_config.get("hybrid_lambda_high", 0.8)),
+        backoff_discount_disease_family_question_type=float(
+            transition_model_config.get("backoff_discount_disease_family_question_type", 1.0)
+        ),
+        backoff_discount_disease_question_type=float(
+            transition_model_config.get("backoff_discount_disease_question_type", 0.85)
+        ),
+        backoff_discount_family_question_type=float(
+            transition_model_config.get("backoff_discount_family_question_type", 0.65)
+        ),
+        backoff_discount_question_type=float(
+            transition_model_config.get("backoff_discount_question_type", 0.4)
+        ),
+        backoff_discount_global=float(
+            transition_model_config.get("backoff_discount_global", 0.15)
         ),
     )
     heuristic_transition_model = HeuristicResponseTransitionModel(transition_model_runtime_config)

@@ -447,7 +447,13 @@ def test_simulation_engine_modular_v2_uses_statistical_transition_model() -> Non
     }
 
     assert outcome.metadata["transition_model_type"] == "statistical"
-    assert by_branch["positive"]["transition_metadata"]["source"] == "statistical"
+    assert by_branch["positive"]["transition_metadata"]["source"] in {
+        "statistical",
+        "hybrid_statistical_heuristic",
+    }
+    assert "statistical_total_count" in by_branch["positive"]["transition_metadata"]
+    assert "statistical_backoff_level" in by_branch["positive"]["transition_metadata"]
+    assert "hybrid_transition_lambda" in by_branch["positive"]["transition_metadata"]
     assert by_branch["positive"]["probability"] > by_branch["negative"]["probability"]
 
 
@@ -503,7 +509,10 @@ def test_simulation_engine_statistical_transition_uses_evidence_tags_family_fall
     )
     positive_branch = next(item for item in outcome.metadata["branch_estimates"] if item["branch"] == "positive")
 
-    assert positive_branch["transition_metadata"]["source"] == "statistical"
+    assert positive_branch["transition_metadata"]["source"] in {
+        "statistical",
+        "hybrid_statistical_heuristic",
+    }
     assert positive_branch["probability"] > 0.5
 
 

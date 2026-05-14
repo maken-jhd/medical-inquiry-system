@@ -55,7 +55,7 @@ def _build_statistics() -> TransitionStatistics:
     return statistics
 
 
-# 验证有统计数据时，普通问诊会直接使用统计版分支概率。
+# 验证高计数且细粒度 backoff 时，hybrid 会明显偏向 statistical，但仍保留 heuristic metadata。
 def test_statistical_transition_model_uses_statistics_for_verify_branches() -> None:
     model = StatisticalResponseTransitionModel(
         ResponseTransitionModelConfig(model_type="statistical"),
@@ -81,9 +81,17 @@ def test_statistical_transition_model_uses_statistics_for_verify_branches() -> N
     positive = next(branch for branch in branches if branch.branch_name == "positive")
     negative = next(branch for branch in branches if branch.branch_name == "negative")
 
-    assert positive.metadata["source"] == "statistical"
+    assert positive.metadata["source"] == "hybrid_statistical_heuristic"
+    assert positive.metadata["hybrid_transition_lambda"] >= 0.5
+    assert positive.metadata["statistical_backoff_level"] == "disease_family_question_type"
+    assert positive.metadata["statistical_total_count"] > 5.0
     assert positive.probability > negative.probability
     assert positive.metadata["belief_components"][0]["present_probability"] > 0.0
+    assert abs(
+        positive.probability - positive.metadata["statistical_branch_probability"]
+    ) < abs(
+        positive.probability - positive.metadata["heuristic_branch_probability"]
+    )
 
 
 # 验证 exam_context 动作会走 done/not_done -> result 的两层映射，而不是退回普通三分支。
@@ -117,6 +125,7 @@ def test_statistical_transition_model_supports_exam_context_branches() -> None:
     assert round(sum(branch.probability for branch in branches), 6) == 1.0
     assert any(branch.metadata["branch_schema"] == "exam_context" for branch in branches)
     assert done_positive.metadata["belief_components"][0]["done_positive_probability"] > 0.0
+    assert "hybrid_transition_lambda" in done_positive.metadata
 
 
 # 验证统计数据缺失时会安全回退到 heuristic，而不是直接失败。
@@ -145,3 +154,101 @@ def test_statistical_transition_model_falls_back_to_heuristic_when_statistics_ar
     branches = model.predict_branches(action, SessionState(session_id="s_stat_fallback"))
 
     assert any(branch.metadata["source"] == "heuristic_fallback" for branch in branches)
+
+
+# 验证低计数统计不会再强行主导，而是显式退回 heuristic 概率。
+def test_statistical_transition_model_prefers_heuristic_when_total_count_is_too_low() -> None:
+    statistics = TransitionStatistics(smoothing_alpha=0.05, min_total_count=1)
+    statistics.record_verify_observation(
+        disease_id="d1",
+        evidence_family="respiratory_symptom",
+        question_type="symptom",
+        outcome="present",
+    )
+    config = ResponseTransitionModelConfig(model_type="statistical")
+    model = StatisticalResponseTransitionModel(
+        config,
+        statistics=statistics,
+        heuristic_fallback=HeuristicResponseTransitionModel(config),
+    )
+    action = MctsAction(
+        action_id="a_stat_low_count",
+        action_type="verify_evidence",
+        target_node_id="slot_cough",
+        target_node_label="ClinicalFinding",
+        target_node_name="干咳",
+        metadata={
+            "question_type_hint": "symptom",
+            "evidence_families": ["respiratory_symptom"],
+        },
+    )
+
+    branches = model.predict_branches(
+        action,
+        SessionState(session_id="s_stat_low_count"),
+        candidate_hypotheses=[HypothesisScore(node_id="d1", label="Disease", name="PCP", score=1.0)],
+    )
+    positive = next(branch for branch in branches if branch.branch_name == "positive")
+
+    assert positive.metadata["source"] == "heuristic_fallback"
+    assert positive.metadata["fallback_reason"] == "low_statistical_confidence"
+    assert positive.metadata["hybrid_transition_lambda"] == 0.0
+    assert positive.metadata["statistical_total_count"] == 1.0
+    assert positive.probability == positive.metadata["heuristic_branch_probability"]
+
+
+# 验证即使 total_count 不低，只要 backoff 已经粗到 global，statistical 权重也会被明显压低。
+def test_statistical_transition_model_applies_global_backoff_discount() -> None:
+    statistics = TransitionStatistics(smoothing_alpha=0.05, min_total_count=1)
+    for _ in range(20):
+        statistics.record_verify_observation(
+            disease_id="d1",
+            evidence_family="respiratory_symptom",
+            question_type="symptom",
+            outcome="present",
+        )
+    for _ in range(6):
+        statistics.record_verify_observation(
+            disease_id="d1",
+            evidence_family="respiratory_symptom",
+            question_type="symptom",
+            outcome="absent",
+        )
+    for _ in range(4):
+        statistics.record_verify_observation(
+            disease_id="d1",
+            evidence_family="respiratory_symptom",
+            question_type="symptom",
+            outcome="unclear",
+        )
+
+    model = StatisticalResponseTransitionModel(
+        ResponseTransitionModelConfig(model_type="statistical"),
+        statistics=statistics,
+    )
+    action = MctsAction(
+        action_id="a_stat_global_backoff",
+        action_type="verify_evidence",
+        target_node_id="slot_pathogen",
+        target_node_label="Pathogen",
+        target_node_name="病原学提示",
+        metadata={
+            "question_type_hint": "pathogen",
+            "evidence_families": ["pathogen"],
+        },
+    )
+
+    branches = model.predict_branches(
+        action,
+        SessionState(session_id="s_stat_global_backoff"),
+        candidate_hypotheses=[HypothesisScore(node_id="d1", label="Disease", name="PCP", score=1.0)],
+    )
+    positive = next(branch for branch in branches if branch.branch_name == "positive")
+
+    assert positive.metadata["statistical_backoff_level"] == "global"
+    assert positive.metadata["hybrid_transition_lambda"] < 0.2
+    assert abs(
+        positive.probability - positive.metadata["heuristic_branch_probability"]
+    ) < abs(
+        positive.probability - positive.metadata["statistical_branch_probability"]
+    )

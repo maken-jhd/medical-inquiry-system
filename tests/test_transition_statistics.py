@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from brain.transition_statistics import TransitionStatisticsBuilder, TransitionStatisticsConfig
+from brain.transition_statistics import TransitionStatistics
 
 
 def _write_mock_statistics_sources(tmp_path: Path) -> tuple[Path, Path, Path]:
@@ -197,3 +198,31 @@ def test_transition_statistics_builder_supports_backoff_when_condition_is_missin
 
     assert round(sum(distribution.probabilities.values()), 6) == 1.0
     assert distribution.backoff_level in {"family_question_type", "question_type", "global"}
+
+
+# 验证 min_total_count 提高后，会从低样本 disease-level 继续 backoff，而不是直接吃掉 1~2 条样本。
+def test_transition_statistics_respects_min_total_count_before_using_specific_bucket() -> None:
+    statistics = TransitionStatistics(smoothing_alpha=0.05, min_total_count=3)
+    for _ in range(2):
+        statistics.record_verify_observation(
+            disease_id="d1",
+            evidence_family="respiratory_symptom",
+            question_type="symptom",
+            outcome="present",
+        )
+    for _ in range(2):
+        statistics.record_verify_observation(
+            disease_id="d2",
+            evidence_family="respiratory_symptom",
+            question_type="symptom",
+            outcome="absent",
+        )
+
+    distribution = statistics.query_verify_distribution(
+        disease_id="d1",
+        evidence_family="respiratory_symptom",
+        question_type="symptom",
+    )
+
+    assert distribution.backoff_level == "family_question_type"
+    assert distribution.total_count == 4.0

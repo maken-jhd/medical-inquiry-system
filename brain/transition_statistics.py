@@ -105,7 +105,7 @@ class TransitionStatisticsConfig:
     replay_result_glob: str = "test_outputs/simulator_replay/**/replay_results.jsonl"
     evidence_catalog_glob: str = "test_outputs/evidence_family/**/disease_evidence_family_catalog.json"
     smoothing_alpha: float = 0.5
-    min_total_count: int = 1
+    min_total_count: int = 3
 
 
 @dataclass
@@ -143,7 +143,7 @@ class TransitionStatistics:
     case_disease_map: dict[str, str] = field(default_factory=dict)
     source_metadata: dict[str, Any] = field(default_factory=dict)
     smoothing_alpha: float = 0.5
-    min_total_count: int = 1
+    min_total_count: int = 3
 
     def has_verify_statistics(self) -> bool:
         return sum(self.verify_global.values()) > 0

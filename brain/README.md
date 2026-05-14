@@ -63,6 +63,19 @@
   - final ranking 新增 answer-specific support / scope consistency / multi-path consensus 等稳定化项
   - 同时限制只靠单条尖锐路径抬高的脆弱答案组
 
+## 当前 statistical transition 的近期校准重点
+
+当前 `StatisticalResponseTransitionModel` 不再把离线统计表当成对 heuristic 的刚性替代，而是改成了更保守的 hybrid 形态：
+
+- 先继续使用 `min_total_count` 做 bucket 级 backoff，避免 1~2 条样本直接进入高优先级统计层
+- 再按 `total_count + backoff_level` 估计 statistical confidence，得到本轮混合权重 `λ`
+- 最终分支概率采用：
+  - `P_final = λ * P_statistical + (1 - λ) * P_heuristic`
+- 因此 statistical 当前更像：
+  - 高置信统计时的增益项
+  - 低置信统计时的可解释弱修正
+  - heuristic baseline 仍然是默认安全网
+
 ## 目录职责
 
 `brain/` 当前主要负责以下几类工作：
@@ -171,7 +184,7 @@
     - `modular_v2`：启用新的 transition model / reward model / belief signature 骨架
   - 当前 `modular_v2` 的 `transition_model.type` 已支持：
     - `heuristic`：沿用上一轮拆出来的启发式三分支分布
-    - `statistical`：基于 graph cases + replay 统计、再结合 top-k hypothesis belief mixture 的条件化分支概率
+    - `statistical`：基于 graph cases + replay 统计、再结合 top-k hypothesis belief mixture 的条件化分支概率；当前已改成 count-aware + backoff-aware + heuristic fallback 的 hybrid 版本
   - 当前 `modular_v2` 的 `reward_model.type` 已支持：
     - `heuristic_v2`：保留原有 surrogate 公式，作为回归基线
     - `belief_aware_v1`：显式消费 `candidate_hypotheses + belief_components`，并近似估计 branch 后的 `entropy / top1-top2 margin / acceptance risk`
@@ -285,7 +298,19 @@
     - `StatisticalResponseTransitionModel`
     - `LearnedResponseTransitionModel` 占位接口
   - `StatisticalResponseTransitionModel` 当前会先从 graph cases / replay 构建粗粒度条件统计，再用 top-k hypothesis belief mixture 计算 `P(y | s, a)`。
+  - 当前 statistical path 不再生硬覆盖 heuristic：
+    - 先按 `min_total_count` 做 backoff
+    - 再按 `total_count + backoff_level` 估计 statistical confidence
+    - 通过 hybrid mixing 决定 statistical 与 heuristic 的最终占比
   - 当前 statistical branch metadata 还会额外暴露 disease-conditioned branch likelihood，供 belief-aware reward 近似构造 branch posterior。
+  - 当前 metadata 还会补充：
+    - `statistical_total_count`
+    - `statistical_backoff_level`
+    - `statistical_backoff_discount`
+    - `statistical_confidence`
+    - `heuristic_confidence_share`
+    - `hybrid_transition_lambda`
+    - `hybrid_transition_source`
   - 当动作同时带多个 family tag 时，当前会优先选“更具体、统计更扎实”的 verify 分布，而不是只消费第一个 family。
   - 对普通问诊动作，当前输出 `positive / negative / doubtful`。
   - 对 `collect_exam_context` 动作，当前内部先估计 `done / not_done` 与结果分布，再映射成 `done_positive / done_negative / done_unclear / not_done`。

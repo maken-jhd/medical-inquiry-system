@@ -21,7 +21,19 @@ transition_model:
   enable_belief_mixture: true
   fallback_to_heuristic: true
   statistics_smoothing_alpha: 0.5
-  statistics_min_total_count: 1
+  statistics_min_total_count: 3
+  hybrid_enable_count_aware_mixing: true
+  hybrid_count_threshold_low: 3
+  hybrid_count_threshold_mid: 8
+  hybrid_count_threshold_high: 20
+  hybrid_lambda_low: 0.25
+  hybrid_lambda_mid: 0.5
+  hybrid_lambda_high: 0.8
+  backoff_discount_disease_family_question_type: 1.0
+  backoff_discount_disease_question_type: 0.85
+  backoff_discount_family_question_type: 0.65
+  backoff_discount_question_type: 0.4
+  backoff_discount_global: 0.15
 
 reward_model:
   type: belief_aware_v1

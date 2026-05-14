@@ -10,6 +10,68 @@
 - `phase2_execution_checklist.md` 更偏“路线设计与待办清单”
 - 本文更偏“已经发生过哪些阶段性变化、分别解决了什么问题”
 
+## 近期更新：2026-05-14 将 statistical transition 改造成 count-aware + backoff-aware hybrid
+
+### 本次目标
+
+- 不继续堆 final ranking / acceptance patch
+- 不实现 learned transition model
+- 把 `StatisticalResponseTransitionModel` 从“生硬替代 heuristic”改成“只在高置信统计下介入，否则退回 heuristic baseline”
+
+### 本次改动
+
+- [brain/response_transition_model.py](/Users/loki/Workspace/GraduationDesign/brain/response_transition_model.py)
+  - `ResponseTransitionModelConfig` 新增 hybrid transition 配置：
+    - `hybrid_enable_count_aware_mixing`
+    - `hybrid_count_threshold_low / mid / high`
+    - `hybrid_lambda_low / mid / high`
+    - `backoff_discount_*`
+  - `StatisticalResponseTransitionModel` 新增：
+    - count-aware confidence 估计
+    - backoff-aware discount
+    - `P_final = λ * P_statistical + (1 - λ) * P_heuristic` 的混合逻辑
+  - verify / exam_context 两条 statistical 路径现在都会输出更完整的 transition metadata：
+    - `statistical_total_count`
+    - `statistical_backoff_level`
+    - `statistical_backoff_discount`
+    - `statistical_confidence`
+    - `heuristic_confidence_share`
+    - `hybrid_transition_lambda`
+    - `hybrid_transition_source`
+  - 当 `λ=0` 时，不再假装 statistical 仍然主导，而是显式以 `heuristic_fallback` 作为分支来源
+- [brain/transition_statistics.py](/Users/loki/Workspace/GraduationDesign/brain/transition_statistics.py)
+  - 默认 `min_total_count` 从 `1` 提高到 `3`
+  - 让低样本 bucket 更容易继续 backoff，而不是过早参与高优先级统计
+- [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - 默认构造现在会读取并装配新的 hybrid transition 配置
+- 配置更新：
+  - [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml)
+  - [configs/brain_benchmark_modular_v2_statistical.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain_benchmark_modular_v2_statistical.yaml)
+  - [configs/brain_benchmark_modular_v2_statistical_belief_aware.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain_benchmark_modular_v2_statistical_belief_aware.yaml)
+  - [configs/brain_benchmark_modular_v2_statistical_belief_aware_relaxed.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain_benchmark_modular_v2_statistical_belief_aware_relaxed.yaml)
+  - 这些 statistical benchmark 配置现在都显式开启 hybrid mixing，并把 `statistics_min_total_count` 调到更保守的水平
+- 测试补强：
+  - [tests/test_statistical_transition_model.py](/Users/loki/Workspace/GraduationDesign/tests/test_statistical_transition_model.py)
+  - [tests/test_transition_statistics.py](/Users/loki/Workspace/GraduationDesign/tests/test_transition_statistics.py)
+  - [tests/test_service_config.py](/Users/loki/Workspace/GraduationDesign/tests/test_service_config.py)
+  - [tests/test_simulation_engine.py](/Users/loki/Workspace/GraduationDesign/tests/test_simulation_engine.py)
+
+### 影响
+
+- 当前 statistical transition 不再因为 low-count / coarse-backoff 条件分布而直接拖累 heuristic baseline
+- heuristic path 继续保留为安全网，statistical 更像“高置信增益项”
+- 后续 benchmark 可以直接通过 transition metadata 观察：
+  - 这一步到底用了哪一级统计
+  - total_count 多大
+  - λ 多大
+  - statistical 与 heuristic 各占多少
+
+### 验证结果
+
+- 已执行：
+  - `conda run -n GraduationDesign python -m pytest tests/test_hypothesis_belief_mixture.py tests/test_statistical_transition_model.py tests/test_transition_statistics.py tests/test_service_config.py tests/test_simulation_engine.py -q`
+  - 结果：`26 passed`
+
 ## 近期更新：2026-05-14 为 KG RAG baseline 落地可插拔的症状反查候选疾病插件
 
 ### 本次目标

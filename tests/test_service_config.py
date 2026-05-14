@@ -93,6 +93,19 @@ def test_load_brain_config_reads_yaml_file(tmp_path: Path) -> None:
                 "transition_model:",
                 "  type: heuristic",
                 "  statistics_top_k_hypotheses: 5",
+                "  statistics_min_total_count: 3",
+                "  hybrid_enable_count_aware_mixing: true",
+                "  hybrid_count_threshold_low: 4",
+                "  hybrid_count_threshold_mid: 9",
+                "  hybrid_count_threshold_high: 21",
+                "  hybrid_lambda_low: 0.2",
+                "  hybrid_lambda_mid: 0.45",
+                "  hybrid_lambda_high: 0.75",
+                "  backoff_discount_disease_family_question_type: 1.0",
+                "  backoff_discount_disease_question_type: 0.82",
+                "  backoff_discount_family_question_type: 0.61",
+                "  backoff_discount_question_type: 0.35",
+                "  backoff_discount_global: 0.12",
                 "reward_model:",
                 "  type: belief_aware_v1",
                 "  belief_top_k_hypotheses: 5",
@@ -159,6 +172,15 @@ def test_load_brain_config_reads_yaml_file(tmp_path: Path) -> None:
     assert config["rollout_control"]["branch_selection_mode"] == "expectation_ready"
     assert config["transition_model"]["type"] == "heuristic"
     assert config["transition_model"]["statistics_top_k_hypotheses"] == 5
+    assert config["transition_model"]["statistics_min_total_count"] == 3
+    assert config["transition_model"]["hybrid_enable_count_aware_mixing"] is True
+    assert config["transition_model"]["hybrid_count_threshold_low"] == 4
+    assert config["transition_model"]["hybrid_count_threshold_mid"] == 9
+    assert config["transition_model"]["hybrid_count_threshold_high"] == 21
+    assert config["transition_model"]["hybrid_lambda_low"] == 0.2
+    assert config["transition_model"]["hybrid_lambda_mid"] == 0.45
+    assert config["transition_model"]["hybrid_lambda_high"] == 0.75
+    assert config["transition_model"]["backoff_discount_global"] == 0.12
     assert config["reward_model"]["type"] == "belief_aware_v1"
     assert config["reward_model"]["belief_top_k_hypotheses"] == 5
     assert config["reward_model"]["top3_separation_weight"] == 0.29
@@ -343,6 +365,19 @@ def test_build_default_brain_supports_statistical_transition_model(tmp_path: Pat
                 "type": "statistical",
                 "statistics_source_mode": "explicit",
                 "statistics_top_k_hypotheses": 2,
+                "statistics_min_total_count": 4,
+                "hybrid_enable_count_aware_mixing": True,
+                "hybrid_count_threshold_low": 4,
+                "hybrid_count_threshold_mid": 9,
+                "hybrid_count_threshold_high": 18,
+                "hybrid_lambda_low": 0.22,
+                "hybrid_lambda_mid": 0.48,
+                "hybrid_lambda_high": 0.76,
+                "backoff_discount_disease_family_question_type": 1.0,
+                "backoff_discount_disease_question_type": 0.84,
+                "backoff_discount_family_question_type": 0.63,
+                "backoff_discount_question_type": 0.38,
+                "backoff_discount_global": 0.11,
                 "graph_case_paths": [str(cases_path)],
                 "replay_result_paths": [str(replay_path)],
                 "evidence_catalog_paths": [str(evidence_catalog_path)],
@@ -354,6 +389,11 @@ def test_build_default_brain_supports_statistical_transition_model(tmp_path: Pat
     assert brain.deps.simulation_engine.config.transition_model_type == "statistical"
     assert isinstance(brain.deps.simulation_engine.transition_model, StatisticalResponseTransitionModel)
     assert brain.deps.simulation_engine.transition_model.config.statistics_top_k_hypotheses == 2
+    assert brain.deps.simulation_engine.transition_model.config.statistics_min_total_count == 4
+    assert brain.deps.simulation_engine.transition_model.config.hybrid_enable_count_aware_mixing is True
+    assert brain.deps.simulation_engine.transition_model.config.hybrid_count_threshold_mid == 9
+    assert brain.deps.simulation_engine.transition_model.config.hybrid_lambda_high == 0.76
+    assert brain.deps.simulation_engine.transition_model.config.backoff_discount_global == 0.11
 
 
 # 验证 build_default_brain 也支持 belief-aware reward 与 acceptance calibration 的配置装配。
