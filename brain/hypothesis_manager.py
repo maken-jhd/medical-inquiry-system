@@ -40,6 +40,16 @@ class HypothesisManagerConfig:
     enable_multi_hypothesis_feedback: bool = True
     use_scope_weighted_feedback: bool = True
     max_related_hypotheses_per_evidence: int = 5
+    enable_top3_candidate_rescue: bool = False
+    top3_rescue_rank_window: int = 8
+    top3_rescue_bonus: float = 0.08
+    enable_candidate_rank_memory: bool = False
+    candidate_rank_memory_bonus: float = 0.05
+    candidate_rank_memory_decay: float = 0.6
+    enable_evidence_supported_rerank: bool = False
+    positive_evidence_support_weight: float = 0.04
+    evidence_family_diversity_weight: float = 0.03
+    contradiction_penalty_weight: float = 0.05
 
 
 class HypothesisManager:
@@ -103,7 +113,7 @@ class HypothesisManager:
         self,
         candidates: Iterable[HypothesisCandidate],
     ) -> List[HypothesisScore]:
-        return [
+        hypotheses = [
             HypothesisScore(
                 node_id=item.node_id,
                 label=item.label,
@@ -118,6 +128,7 @@ class HypothesisManager:
             )
             for item in candidates
         ]
+        return self.refresh_candidate_ranking(hypotheses, reset_candidate_raw_score=True)
 
     # 选择本轮需要继续展开的主假设和备选假设。
     def select_expandable_hypotheses(
@@ -159,21 +170,29 @@ class HypothesisManager:
         delta = self._score_delta_from_evidence(evidence_state)
 
         for hypothesis in hypothesis_list:
-            score = hypothesis.score
+            metadata = dict(hypothesis.metadata)
+            raw_score = float(metadata.get("candidate_raw_score", hypothesis.score) or hypothesis.score)
             weight = float(resolved_weights.get(hypothesis.node_id, 0.0) or 0.0)
 
             if weight > 0.0:
-                score += delta * weight
+                raw_score += delta * weight
+                metadata = self._update_evidence_support_metadata(
+                    metadata,
+                    evidence_state,
+                    weight=weight,
+                    delta=delta,
+                )
 
             updated.append(
                 HypothesisScore(
                     node_id=hypothesis.node_id,
                     label=hypothesis.label,
                     name=hypothesis.name,
-                    score=max(score, 0.0),
+                    score=max(raw_score, 0.0),
                     evidence_node_ids=list(hypothesis.evidence_node_ids),
                     metadata={
-                        **dict(hypothesis.metadata),
+                        **metadata,
+                        "candidate_raw_score": max(raw_score, 0.0),
                         "last_evidence_feedback_weight": round(weight, 4),
                         "last_evidence_feedback_node_id": evidence_state.node_id,
                         "last_evidence_feedback_polarity": evidence_state.effective_polarity(),
@@ -181,7 +200,7 @@ class HypothesisManager:
                 )
             )
 
-        return sorted(updated, key=lambda item: (-item.score, item.name))
+        return self.refresh_candidate_ranking(updated, reset_candidate_raw_score=False)
 
     # 将一条真实/模拟证据映射到所有相关 hypothesis，而不是只更新当前动作所属的单个候选。
     def resolve_evidence_feedback_weights(
@@ -321,12 +340,70 @@ class HypothesisManager:
                 node_id=hypothesis.node_id,
                 label=hypothesis.label,
                 name=hypothesis.name,
-                score=max(hypothesis.score + score_delta, 0.0),
+                score=max(float(metadata.get("candidate_raw_score", hypothesis.score) or hypothesis.score) + score_delta, 0.0),
                 evidence_node_ids=list(hypothesis.evidence_node_ids),
-                metadata=metadata,
+                metadata={
+                    **metadata,
+                    "candidate_raw_score": max(
+                        float(metadata.get("candidate_raw_score", hypothesis.score) or hypothesis.score) + score_delta,
+                        0.0,
+                    ),
+                },
             )
 
-        return sorted(ranked, key=lambda item: (-item.score, item.name))
+        return self.refresh_candidate_ranking(ranked, reset_candidate_raw_score=False)
+
+    # 将外部排序后的 hypothesis 列表重新补齐 rank memory / rescue / debug 字段。
+    def refresh_candidate_ranking(
+        self,
+        hypotheses: Iterable[HypothesisScore],
+        *,
+        reset_candidate_raw_score: bool = False,
+    ) -> List[HypothesisScore]:
+        ranked_input = sorted(
+            [self._clone_hypothesis(item) for item in hypotheses],
+            key=lambda item: (-item.score, item.name),
+        )
+
+        if len(ranked_input) == 0:
+            return []
+
+        rescored = [
+            self._apply_candidate_rerank_adjustments(
+                hypothesis,
+                current_rank=index,
+                reset_candidate_raw_score=reset_candidate_raw_score,
+            )
+            for index, hypothesis in enumerate(ranked_input, start=1)
+        ]
+        reranked = sorted(rescored, key=lambda item: (-item.score, item.name))
+        finalized: List[HypothesisScore] = []
+
+        for index, hypothesis in enumerate(reranked, start=1):
+            metadata = dict(hypothesis.metadata)
+            previous_best_rank = int(metadata.get("candidate_previous_best_rank", metadata.get("best_rank_seen", index)) or index)
+            previous_presence_count = int(metadata.get("consecutive_presence_count", 0) or 0)
+            metadata.update(
+                {
+                    "new_rank": index,
+                    "last_rank": index,
+                    "best_rank_seen": min(previous_best_rank, index),
+                    "consecutive_presence_count": min(previous_presence_count + 1, 12),
+                    "final_candidate_score": round(float(hypothesis.score), 6),
+                }
+            )
+            finalized.append(
+                HypothesisScore(
+                    node_id=hypothesis.node_id,
+                    label=hypothesis.label,
+                    name=hypothesis.name,
+                    score=hypothesis.score,
+                    evidence_node_ids=list(hypothesis.evidence_node_ids),
+                    metadata=metadata,
+                )
+            )
+
+        return finalized
 
     # 读取 service 持久化的 repair 反馈次数，用于把重复缺口变成显式排序惩罚。
     def _repair_feedback_count(self, payload: dict | None, hypothesis_id: str, reject_reason: str) -> int:
@@ -526,6 +603,234 @@ class HypothesisManager:
             return 0.6
 
         return 0.9
+
+    # 将真实反馈折成 candidate rescue / rerank 能复用的轻量支持计数。
+    def _update_evidence_support_metadata(
+        self,
+        metadata: dict,
+        evidence_state: EvidenceState,
+        *,
+        weight: float,
+        delta: float,
+    ) -> dict:
+        updated = dict(metadata)
+        polarity = evidence_state.effective_polarity()
+        support_strength = abs(delta) * max(weight, 0.0)
+
+        if support_strength <= 0.0:
+            return updated
+
+        relation_family = self._relation_family_from_evidence(evidence_state)
+        evidence_name = str(
+            evidence_state.metadata.get("target_node_name")
+            or evidence_state.metadata.get("normalized_name")
+            or evidence_state.node_id
+        ).strip()
+
+        if polarity == "present":
+            updated["positive_evidence_support_count"] = int(updated.get("positive_evidence_support_count", 0) or 0) + 1
+            updated["positive_evidence_support_score"] = round(
+                float(updated.get("positive_evidence_support_score", 0.0) or 0.0) + support_strength,
+                6,
+            )
+            updated["positive_evidence_support_families"] = self._merge_string_list(
+                updated.get("positive_evidence_support_families", []),
+                [relation_family],
+            )
+            updated["positive_support_evidence_names"] = self._merge_string_list(
+                updated.get("positive_support_evidence_names", []),
+                [evidence_name],
+                limit=6,
+            )
+            return updated
+
+        if polarity == "absent":
+            updated["negative_evidence_support_count"] = int(updated.get("negative_evidence_support_count", 0) or 0) + 1
+            updated["negative_evidence_support_score"] = round(
+                float(updated.get("negative_evidence_support_score", 0.0) or 0.0) + support_strength,
+                6,
+            )
+            updated["negative_evidence_support_families"] = self._merge_string_list(
+                updated.get("negative_evidence_support_families", []),
+                [relation_family],
+            )
+            updated["negative_support_evidence_names"] = self._merge_string_list(
+                updated.get("negative_support_evidence_names", []),
+                [evidence_name],
+                limit=6,
+            )
+            return updated
+
+        updated["unclear_evidence_support_count"] = int(updated.get("unclear_evidence_support_count", 0) or 0) + 1
+        updated["unclear_evidence_support_score"] = round(
+            float(updated.get("unclear_evidence_support_score", 0.0) or 0.0) + support_strength * 0.5,
+            6,
+        )
+        return updated
+
+    # 在不改主干打分体系的前提下，给 Top-3 附近候选增加一层轻量保留和解释性 debug。
+    def _apply_candidate_rerank_adjustments(
+        self,
+        hypothesis: HypothesisScore,
+        *,
+        current_rank: int,
+        reset_candidate_raw_score: bool,
+    ) -> HypothesisScore:
+        metadata = dict(hypothesis.metadata)
+        raw_score = float(hypothesis.score if reset_candidate_raw_score else metadata.get("candidate_raw_score", hypothesis.score) or hypothesis.score)
+        previous_best_rank = int(metadata.get("best_rank_seen", metadata.get("new_rank", current_rank)) or current_rank)
+        previous_presence_count = int(metadata.get("consecutive_presence_count", 0) or 0)
+
+        positive_support_signal = self._positive_support_signal(metadata)
+        diversity_signal = self._evidence_diversity_signal(metadata)
+        contradiction_signal = self._contradiction_signal(metadata)
+
+        positive_bonus = 0.0
+        diversity_bonus = 0.0
+        contradiction_penalty = 0.0
+        if self.config.enable_evidence_supported_rerank:
+            positive_bonus = self.config.positive_evidence_support_weight * positive_support_signal
+            diversity_bonus = self.config.evidence_family_diversity_weight * diversity_signal
+            contradiction_penalty = self.config.contradiction_penalty_weight * contradiction_signal
+
+        rescue_bonus = 0.0
+        rescue_window = max(int(self.config.top3_rescue_rank_window), 4)
+        rescue_signal = max(0.0, positive_support_signal + diversity_signal * 0.25 - contradiction_signal)
+        if self.config.enable_top3_candidate_rescue and 4 <= current_rank <= rescue_window and rescue_signal > 0.08:
+            rank_proximity = (rescue_window - current_rank + 1) / max(rescue_window - 3, 1)
+            rescue_bonus = self.config.top3_rescue_bonus * min(rescue_signal, 1.0) * max(rank_proximity, 0.0)
+
+        memory_bonus = 0.0
+        if self.config.enable_candidate_rank_memory and current_rank <= rescue_window:
+            support_floor = positive_support_signal + diversity_signal * 0.2 - contradiction_signal * 0.65
+            if previous_best_rank <= 5 and support_floor > 0.06:
+                presence_scale = min((previous_presence_count + 1) / 3.0, 1.0)
+                memory_decay = min(max(self.config.candidate_rank_memory_decay, 0.0), 1.0)
+                rank_gap = max(current_rank - previous_best_rank, 0)
+                memory_bonus = (
+                    self.config.candidate_rank_memory_bonus
+                    * presence_scale
+                    * (memory_decay ** rank_gap)
+                    * min(max(support_floor, 0.0), 1.0)
+                )
+
+        final_score = max(raw_score + positive_bonus + diversity_bonus + rescue_bonus + memory_bonus - contradiction_penalty, 0.0)
+        metadata.update(
+            {
+                "candidate_raw_score": round(raw_score, 6),
+                "candidate_previous_best_rank": previous_best_rank,
+                "old_rank": current_rank,
+                "positive_support_signal": round(positive_support_signal, 6),
+                "evidence_family_diversity_signal": round(diversity_signal, 6),
+                "contradiction_signal": round(contradiction_signal, 6),
+                "positive_evidence_support_bonus": round(positive_bonus, 6),
+                "evidence_family_diversity_bonus": round(diversity_bonus, 6),
+                "top3_rescue_bonus": round(rescue_bonus, 6),
+                "rank_memory_bonus": round(memory_bonus, 6),
+                "contradiction_penalty": round(contradiction_penalty, 6),
+                "candidate_rescue_eligible": bool(4 <= current_rank <= rescue_window and rescue_signal > 0.08),
+            }
+        )
+        return HypothesisScore(
+            node_id=hypothesis.node_id,
+            label=hypothesis.label,
+            name=hypothesis.name,
+            score=final_score,
+            evidence_node_ids=list(hypothesis.evidence_node_ids),
+            metadata=metadata,
+        )
+
+    def _positive_support_signal(self, metadata: dict) -> float:
+        positive_count = int(metadata.get("positive_evidence_support_count", 0) or 0)
+        positive_score = float(metadata.get("positive_evidence_support_score", 0.0) or 0.0)
+        exact_score = float(metadata.get("exact_scope_anchor_score", 0.0) or 0.0)
+        family_score = float(metadata.get("family_scope_anchor_score", 0.0) or 0.0)
+        phenotype_score = float(metadata.get("phenotype_support_score", 0.0) or 0.0)
+        observed_score = float(metadata.get("observed_anchor_score", 0.0) or 0.0)
+        signal = (
+            positive_score * 0.34
+            + positive_count * 0.08
+            + exact_score * 0.72
+            + family_score * 0.46
+            + phenotype_score * 0.24
+            + observed_score * 0.18
+        )
+        return min(max(signal, 0.0), 1.0)
+
+    def _evidence_diversity_signal(self, metadata: dict) -> float:
+        families = self._normalize_string_list(metadata.get("positive_evidence_support_families", []))
+        if len(families) == 0:
+            return 0.0
+        return min(len(families) / 3.0, 1.0)
+
+    def _contradiction_signal(self, metadata: dict) -> float:
+        negative_count = int(metadata.get("negative_evidence_support_count", 0) or 0)
+        negative_score = float(metadata.get("negative_evidence_support_score", 0.0) or 0.0)
+        unclear_count = int(metadata.get("unclear_evidence_support_count", 0) or 0)
+        unclear_score = float(metadata.get("unclear_evidence_support_score", 0.0) or 0.0)
+        anchor_negative = float(metadata.get("anchor_negative_score", 0.0) or 0.0)
+        scope_mismatch = float(metadata.get("scope_mismatch_score", 0.0) or 0.0)
+        generic_scope_penalty = float(metadata.get("generic_scope_penalty", 0.0) or 0.0)
+        signal = (
+            negative_score * 0.34
+            + unclear_score * 0.12
+            + negative_count * 0.08
+            + unclear_count * 0.04
+            + anchor_negative * 0.58
+            + scope_mismatch * 0.42
+            + generic_scope_penalty * 0.35
+        )
+        return min(max(signal, 0.0), 1.0)
+
+    def _relation_family_from_evidence(self, evidence_state: EvidenceState) -> str:
+        question_type_hint = str(evidence_state.metadata.get("question_type_hint") or "").strip()
+        if len(question_type_hint) > 0:
+            return question_type_hint
+
+        relation_type = str(evidence_state.metadata.get("relation_type") or "").strip()
+        if relation_type in {"DIAGNOSED_BY", "HAS_LAB_FINDING"}:
+            return "lab"
+        if relation_type == "HAS_IMAGING_FINDING":
+            return "imaging"
+        if relation_type == "HAS_PATHOGEN":
+            return "pathogen"
+        if relation_type == "MANIFESTS_AS":
+            return "symptom"
+        if relation_type == "RISK_FACTOR_FOR":
+            return "risk"
+        if relation_type == "REQUIRES_DETAIL":
+            return "detail"
+        return "other"
+
+    def _merge_string_list(
+        self,
+        existing: object,
+        values: Iterable[str],
+        *,
+        limit: int = 8,
+    ) -> list[str]:
+        merged = list(self._normalize_string_list(existing))
+
+        for value in values:
+            text = str(value).strip()
+            if len(text) == 0 or text in merged:
+                continue
+            merged.append(text)
+            if len(merged) >= limit:
+                break
+
+        return merged
+
+    def _normalize_string_list(self, values: object) -> list[str]:
+        if not isinstance(values, list):
+            return []
+        normalized: list[str] = []
+        for item in values:
+            text = str(item).strip()
+            if len(text) == 0 or text in normalized:
+                continue
+            normalized.append(text)
+        return normalized
 
     # 克隆假设对象，避免直接修改原列表中的引用。
     def _clone_hypothesis(self, hypothesis: HypothesisScore) -> HypothesisScore:

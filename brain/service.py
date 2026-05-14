@@ -1991,6 +1991,10 @@ class ConsultationBrain:
             return list(hypotheses)
 
         ranked, anchor_index = analyzer.rerank_hypotheses(state, list(hypotheses))
+        ranked = self.deps.hypothesis_manager.refresh_candidate_ranking(
+            ranked,
+            reset_candidate_raw_score=True,
+        )
         state.metadata["observed_anchor_index"] = anchor_index
         return ranked
 
@@ -6020,6 +6024,32 @@ def build_default_brain(
                 ),
                 max_related_hypotheses_per_evidence=int(
                     candidate_feedback_config.get("max_related_hypotheses_per_evidence", 5)
+                ),
+                enable_top3_candidate_rescue=bool(
+                    candidate_feedback_config.get("enable_top3_candidate_rescue", False)
+                ),
+                top3_rescue_rank_window=int(candidate_feedback_config.get("top3_rescue_rank_window", 8)),
+                top3_rescue_bonus=float(candidate_feedback_config.get("top3_rescue_bonus", 0.08)),
+                enable_candidate_rank_memory=bool(
+                    candidate_feedback_config.get("enable_candidate_rank_memory", False)
+                ),
+                candidate_rank_memory_bonus=float(
+                    candidate_feedback_config.get("candidate_rank_memory_bonus", 0.05)
+                ),
+                candidate_rank_memory_decay=float(
+                    candidate_feedback_config.get("candidate_rank_memory_decay", 0.6)
+                ),
+                enable_evidence_supported_rerank=bool(
+                    candidate_feedback_config.get("enable_evidence_supported_rerank", False)
+                ),
+                positive_evidence_support_weight=float(
+                    candidate_feedback_config.get("positive_evidence_support_weight", 0.04)
+                ),
+                evidence_family_diversity_weight=float(
+                    candidate_feedback_config.get("evidence_family_diversity_weight", 0.03)
+                ),
+                contradiction_penalty_weight=float(
+                    candidate_feedback_config.get("contradiction_penalty_weight", 0.05)
                 ),
             ),
         ),

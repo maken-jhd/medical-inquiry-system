@@ -177,6 +177,17 @@ candidate_feedback:
   enable_multi_hypothesis_feedback: true
   use_scope_weighted_feedback: true
   max_related_hypotheses_per_evidence: 5
+  # 默认配置保持保守关闭；论文主线 relaxed benchmark 会显式开启 Top-3 候选保留。
+  enable_top3_candidate_rescue: false
+  top3_rescue_rank_window: 8
+  top3_rescue_bonus: 0.08
+  enable_candidate_rank_memory: false
+  candidate_rank_memory_bonus: 0.05
+  candidate_rank_memory_decay: 0.6
+  enable_evidence_supported_rerank: false
+  positive_evidence_support_weight: 0.04
+  evidence_family_diversity_weight: 0.03
+  contradiction_penalty_weight: 0.05
 
 repair:
   enable_verifier_hypothesis_reshuffle: true

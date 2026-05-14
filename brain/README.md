@@ -249,6 +249,8 @@
   - 当前已能结合患者上下文和证据类型做轻量重排。
   - 若启用 LLM 排序，还会把 `supporting_features / conflicting_features / recommended_next_evidence` 写入 metadata。
   - 当前会按 `evidence_node_ids / evidence_names / relation_types + observed anchor tier` 计算多候选反馈权重，不再只更新当前动作所属的单个 hypothesis。
+  - 当前还支持面向 Top-3 覆盖的轻量 candidate rerank：对 rank 4~8 且仍有真实支持的候选，可追加 `top3_rescue_bonus / rank_memory_bonus`，减少 gold 已召回却被挤出 Top-3 的情况。
+  - 若显式开启 `enable_evidence_supported_rerank`，候选 metadata 会记录 `positive_evidence_support_bonus / evidence_family_diversity_bonus / contradiction_penalty / old_rank / new_rank`，便于 replay 分析候选为什么被拉回或压下。
   - 当前 repair 重排主要消费打薄后的 anchor-controlled 拒停原因，对缺少真实锚点、anchored alternative、硬反证和关键支持缺失分别施加不同分数调整。
 
 - [action_builder.py](/Users/loki/Workspace/GraduationDesign/brain/action_builder.py)

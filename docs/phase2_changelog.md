@@ -10,6 +10,69 @@
 - `phase2_execution_checklist.md` 更偏“路线设计与待办清单”
 - 本文更偏“已经发生过哪些阶段性变化、分别解决了什么问题”
 
+## 近期更新：2026-05-14 把优化重点转到 candidate_hypotheses 的 Top-3 coverage
+
+### 本次目标
+
+- 不继续修改 transition model 主逻辑
+- 不继续堆 final answer ranking patch
+- 在保住当前 Top-1 水平的前提下，优先修复 “gold 已召回但掉到 Top-3 外” 这类更容易回收的 case
+
+### 本次改动
+
+- [brain/hypothesis_manager.py](/Users/loki/Workspace/GraduationDesign/brain/hypothesis_manager.py)
+  - 新增轻量 candidate rerank：
+    - `top3_rescue_bonus`
+    - `rank_memory_bonus`
+    - `positive_evidence_support_bonus`
+    - `evidence_family_diversity_bonus`
+    - `contradiction_penalty`
+  - 新增 `refresh_candidate_ranking()`，统一给候选列表补齐：
+    - `candidate_raw_score`
+    - `old_rank / new_rank`
+    - `best_rank_seen`
+    - `consecutive_presence_count`
+    - `final_candidate_score`
+  - 当前 rescue 只会对 rank 4~8 且仍有真实支持的候选生效，不会无条件把旧候选顶回 Top-3
+- [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - 默认构造现在会读取 `candidate_feedback` 下的 Top-3 rescue / rank memory / evidence-supported rerank 配置
+  - observed-anchor 重排后会再同步一次 candidate rank tracking，避免 debug 与实际排序脱节
+- [brain/report_builder.py](/Users/loki/Workspace/GraduationDesign/brain/report_builder.py)
+  - `final_report.candidate_hypotheses` 现在会额外导出 compact `debug` 字段，便于 benchmark / replay 复盘候选为什么被拉回或压下
+- 新增脚本：
+  - [scripts/analyze_top3_candidate_coverage.py](/Users/loki/Workspace/GraduationDesign/scripts/analyze_top3_candidate_coverage.py)
+  - 可直接从 benchmark 输出目录读取 `replay_results.jsonl + benchmark_summary.json`
+  - 自动导出：
+    - `hypothesis_hit_but_top3_miss.jsonl`
+    - `candidate_miss.jsonl`
+    - `top3_hit_but_top1_miss.jsonl`
+    - `top1_hit_but_top3_miss_if_any.jsonl`
+- 配置更新：
+  - [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml)
+  - [configs/brain_benchmark_modular_v2_statistical_belief_aware_relaxed.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain_benchmark_modular_v2_statistical_belief_aware_relaxed.yaml)
+  - 默认配置保持保守关闭；当前 relaxed 主线显式开启 Top-3 candidate rescue / rank memory / evidence-supported rerank
+- 测试补强：
+  - [tests/test_hypothesis_manager.py](/Users/loki/Workspace/GraduationDesign/tests/test_hypothesis_manager.py)
+  - [tests/test_service_config.py](/Users/loki/Workspace/GraduationDesign/tests/test_service_config.py)
+  - [tests/test_top3_candidate_coverage_analysis.py](/Users/loki/Workspace/GraduationDesign/tests/test_top3_candidate_coverage_analysis.py)
+  - [tests/test_report_builder.py](/Users/loki/Workspace/GraduationDesign/tests/test_report_builder.py)
+
+### 影响
+
+- 当前优化重点从 “再修 Top-1” 转向 “先把已召回的 gold 更稳地留在 Top-3”
+- 这轮没有继续改 statistical transition，也没有继续加重 final answer ranking 复杂度
+- 后续 full227 benchmark 可以直接拆出：
+  - `hypothesis_hit_but_top3_miss`
+  - `candidate_miss`
+  - `top3_hit_but_top1_miss`
+
+### 验证结果
+
+- 已执行：
+  - `conda run -n GraduationDesign python -m pytest tests/test_hypothesis_manager.py tests/test_service_config.py tests/test_top3_candidate_coverage_analysis.py -q`
+  - `conda run -n GraduationDesign python -m pytest tests/test_report_builder.py -q`
+  - 结果：`17 passed` 与 `4 passed`
+
 ## 近期更新：2026-05-14 将 statistical transition 改造成 count-aware + backoff-aware hybrid
 
 ### 本次目标

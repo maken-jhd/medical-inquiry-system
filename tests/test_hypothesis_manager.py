@@ -1,6 +1,6 @@
-"""测试 A2 假设管理中的竞争性重排、极性计分与 LLM metadata 回写。"""
+"""测试 A2 假设管理中的竞争性重排、极性计分与 Top-3 候选保留。"""
 
-from brain.hypothesis_manager import HypothesisManager
+from brain.hypothesis_manager import HypothesisManager, HypothesisManagerConfig
 from brain.types import EvidenceState, HypothesisCandidate, HypothesisScore, PatientContext
 
 
@@ -240,3 +240,160 @@ def test_hypothesis_manager_fans_out_feedback_to_multiple_related_hypotheses() -
     assert by_id["generic_pneumonia"].score > 1.0
     assert by_id["pcp"].score > 0.88
     assert by_id["obesity"].score == 0.76
+
+
+def _build_top3_rescue_manager() -> HypothesisManager:
+    return HypothesisManager(
+        config=HypothesisManagerConfig(
+            enable_top3_candidate_rescue=True,
+            top3_rescue_rank_window=8,
+            top3_rescue_bonus=0.09,
+            enable_candidate_rank_memory=True,
+            candidate_rank_memory_bonus=0.06,
+            candidate_rank_memory_decay=0.6,
+            enable_evidence_supported_rerank=True,
+            positive_evidence_support_weight=0.05,
+            evidence_family_diversity_weight=0.035,
+            contradiction_penalty_weight=0.055,
+        )
+    )
+
+
+# 验证 rank 4~8 且已有真实支持的候选，会获得 Top-3 rescue 与 evidence-supported bonus。
+def test_hypothesis_manager_rescues_supported_candidate_toward_top3() -> None:
+    manager = _build_top3_rescue_manager()
+    hypotheses = [
+        HypothesisScore(node_id="top1", label="Disease", name="第一候选", score=1.12, metadata={}),
+        HypothesisScore(node_id="top2", label="Disease", name="第二候选", score=1.04, metadata={}),
+        HypothesisScore(node_id="top3", label="Disease", name="第三候选", score=0.97, metadata={}),
+        HypothesisScore(
+            node_id="gold",
+            label="Disease",
+            name="金标准候选",
+            score=0.88,
+            metadata={
+                "positive_evidence_support_count": 2,
+                "positive_evidence_support_score": 0.75,
+                "positive_evidence_support_families": ["symptom", "pathogen"],
+                "exact_scope_anchor_score": 0.55,
+                "family_scope_anchor_score": 0.34,
+                "best_rank_seen": 3,
+                "consecutive_presence_count": 2,
+            },
+        ),
+        HypothesisScore(node_id="tail", label="Disease", name="尾部候选", score=0.84, metadata={}),
+    ]
+
+    reranked = manager.refresh_candidate_ranking(hypotheses, reset_candidate_raw_score=True)
+    gold = next(item for item in reranked if item.node_id == "gold")
+
+    assert gold.metadata["positive_evidence_support_bonus"] > 0.0
+    assert gold.metadata["top3_rescue_bonus"] > 0.0
+    assert gold.metadata["rank_memory_bonus"] > 0.0
+    assert gold.metadata["new_rank"] <= 3
+
+
+# 验证强 negative / contradiction 会压制 rescue，不会把脆弱候选硬拉回 Top-3。
+def test_hypothesis_manager_contradiction_blocks_top3_rescue() -> None:
+    manager = _build_top3_rescue_manager()
+    hypotheses = [
+        HypothesisScore(node_id="top1", label="Disease", name="第一候选", score=1.12, metadata={}),
+        HypothesisScore(node_id="top2", label="Disease", name="第二候选", score=1.03, metadata={}),
+        HypothesisScore(node_id="top3", label="Disease", name="第三候选", score=0.96, metadata={}),
+        HypothesisScore(
+            node_id="fragile",
+            label="Disease",
+            name="脆弱候选",
+            score=0.9,
+            metadata={
+                "positive_evidence_support_count": 2,
+                "positive_evidence_support_score": 0.72,
+                "positive_evidence_support_families": ["symptom", "pathogen"],
+                "exact_scope_anchor_score": 0.46,
+                "negative_evidence_support_count": 2,
+                "negative_evidence_support_score": 1.05,
+                "anchor_negative_score": 0.82,
+                "scope_mismatch_score": 0.42,
+                "best_rank_seen": 3,
+                "consecutive_presence_count": 2,
+            },
+        ),
+        HypothesisScore(node_id="tail", label="Disease", name="尾部候选", score=0.86, metadata={}),
+    ]
+
+    reranked = manager.refresh_candidate_ranking(hypotheses, reset_candidate_raw_score=True)
+    fragile = next(item for item in reranked if item.node_id == "fragile")
+
+    assert fragile.metadata["contradiction_penalty"] > 0.0
+    assert fragile.metadata["top3_rescue_bonus"] == 0.0
+    assert fragile.metadata["new_rank"] > 3
+
+
+# 验证 rank memory 不是无条件兜底：若已无正支持且存在明显冲突，不会把旧候选直接推回 Top-3。
+def test_hypothesis_manager_rank_memory_needs_current_support() -> None:
+    manager = _build_top3_rescue_manager()
+    hypotheses = [
+        HypothesisScore(node_id="top1", label="Disease", name="第一候选", score=1.08, metadata={}),
+        HypothesisScore(node_id="top2", label="Disease", name="第二候选", score=1.0, metadata={}),
+        HypothesisScore(node_id="top3", label="Disease", name="第三候选", score=0.96, metadata={}),
+        HypothesisScore(node_id="top4", label="Disease", name="第四候选", score=0.94, metadata={}),
+        HypothesisScore(node_id="top5", label="Disease", name="第五候选", score=0.91, metadata={}),
+        HypothesisScore(
+            node_id="stale",
+            label="Disease",
+            name="旧候选",
+            score=0.87,
+            metadata={
+                "best_rank_seen": 2,
+                "consecutive_presence_count": 4,
+                "anchor_negative_score": 0.75,
+                "scope_mismatch_score": 0.38,
+            },
+        ),
+    ]
+
+    reranked = manager.refresh_candidate_ranking(hypotheses, reset_candidate_raw_score=True)
+    stale = next(item for item in reranked if item.node_id == "stale")
+
+    assert stale.metadata["rank_memory_bonus"] == 0.0
+    assert stale.metadata["new_rank"] > 3
+
+
+# 验证弱 rescue 候选不会轻易压过明显更强的 Top-1 候选，避免把当前 Top-1 稳定性打坏。
+def test_hypothesis_manager_does_not_let_weak_rescue_overtake_strong_top1() -> None:
+    manager = _build_top3_rescue_manager()
+    hypotheses = [
+        HypothesisScore(
+            node_id="leader",
+            label="Disease",
+            name="强 Top1",
+            score=1.3,
+            metadata={
+                "positive_evidence_support_count": 2,
+                "positive_evidence_support_score": 0.62,
+                "positive_evidence_support_families": ["symptom"],
+            },
+        ),
+        HypothesisScore(node_id="top2", label="Disease", name="第二候选", score=1.02, metadata={}),
+        HypothesisScore(node_id="top3", label="Disease", name="第三候选", score=0.97, metadata={}),
+        HypothesisScore(
+            node_id="rescued",
+            label="Disease",
+            name="可救回候选",
+            score=0.94,
+            metadata={
+                "positive_evidence_support_count": 1,
+                "positive_evidence_support_score": 0.55,
+                "positive_evidence_support_families": ["pathogen", "symptom"],
+                "exact_scope_anchor_score": 0.42,
+                "best_rank_seen": 3,
+                "consecutive_presence_count": 2,
+            },
+        ),
+    ]
+
+    reranked = manager.refresh_candidate_ranking(hypotheses, reset_candidate_raw_score=True)
+
+    assert reranked[0].node_id == "leader"
+    rescued = next(item for item in reranked if item.node_id == "rescued")
+    assert rescued.metadata["top3_rescue_bonus"] > 0.0

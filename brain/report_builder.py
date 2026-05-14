@@ -34,12 +34,7 @@ class ReportBuilder:
             )
 
         hypotheses = [
-            {
-                "node_id": hypothesis.node_id,
-                "label": hypothesis.label,
-                "name": hypothesis.name,
-                "score": hypothesis.score,
-            }
+            self._build_public_hypothesis(hypothesis)
             for hypothesis in session_state.candidate_hypotheses
         ]
 
@@ -56,6 +51,53 @@ class ReportBuilder:
             "trajectory_count": len(session_state.trajectories),
             "metadata": self._build_public_metadata(session_state.metadata),
         }
+
+    def _build_public_hypothesis(self, hypothesis) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "node_id": hypothesis.node_id,
+            "label": hypothesis.label,
+            "name": hypothesis.name,
+            "score": hypothesis.score,
+        }
+        debug = self._build_public_hypothesis_debug(dict(hypothesis.metadata))
+        if len(debug) > 0:
+            payload["debug"] = debug
+        return payload
+
+    # 候选 debug 只导出 Top-3 rescue / memory / evidence-support 相关的轻量字段，供 replay 分析使用。
+    def _build_public_hypothesis_debug(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
+        debug_keys = (
+            "candidate_raw_score",
+            "positive_evidence_support_bonus",
+            "evidence_family_diversity_bonus",
+            "top3_rescue_bonus",
+            "rank_memory_bonus",
+            "contradiction_penalty",
+            "positive_support_signal",
+            "evidence_family_diversity_signal",
+            "contradiction_signal",
+            "old_rank",
+            "new_rank",
+            "best_rank_seen",
+            "consecutive_presence_count",
+            "positive_evidence_support_count",
+            "negative_evidence_support_count",
+            "positive_evidence_support_families",
+            "positive_support_evidence_names",
+            "negative_support_evidence_names",
+            "final_candidate_score",
+            "candidate_rescue_eligible",
+        )
+        debug: Dict[str, Any] = {}
+
+        for key in debug_keys:
+            if key not in metadata:
+                continue
+            sanitized = self._sanitize_lightweight_metadata_value(metadata.get(key), depth=1)
+            if sanitized is not None:
+                debug[key] = sanitized
+
+        return debug
 
     # 构造搜索阶段的中间报告，便于调试 rollout 与动作选择。
     def build_search_report(

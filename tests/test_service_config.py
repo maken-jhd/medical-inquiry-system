@@ -152,6 +152,16 @@ def test_load_brain_config_reads_yaml_file(tmp_path: Path) -> None:
                 "  early_exam_context_turn_limit: 2",
                 "candidate_feedback:",
                 "  enable_multi_hypothesis_feedback: true",
+                "  enable_top3_candidate_rescue: true",
+                "  top3_rescue_rank_window: 7",
+                "  top3_rescue_bonus: 0.09",
+                "  enable_candidate_rank_memory: true",
+                "  candidate_rank_memory_bonus: 0.06",
+                "  candidate_rank_memory_decay: 0.58",
+                "  enable_evidence_supported_rerank: true",
+                "  positive_evidence_support_weight: 0.05",
+                "  evidence_family_diversity_weight: 0.035",
+                "  contradiction_penalty_weight: 0.055",
                 "  max_related_hypotheses_per_evidence: 4",
             ]
         ),
@@ -215,6 +225,16 @@ def test_load_brain_config_reads_yaml_file(tmp_path: Path) -> None:
     assert config["a3"]["enable_early_exam_context_rescue"] is True
     assert config["a3"]["early_exam_context_turn_limit"] == 2
     assert config["candidate_feedback"]["enable_multi_hypothesis_feedback"] is True
+    assert config["candidate_feedback"]["enable_top3_candidate_rescue"] is True
+    assert config["candidate_feedback"]["top3_rescue_rank_window"] == 7
+    assert config["candidate_feedback"]["top3_rescue_bonus"] == 0.09
+    assert config["candidate_feedback"]["enable_candidate_rank_memory"] is True
+    assert config["candidate_feedback"]["candidate_rank_memory_bonus"] == 0.06
+    assert config["candidate_feedback"]["candidate_rank_memory_decay"] == 0.58
+    assert config["candidate_feedback"]["enable_evidence_supported_rerank"] is True
+    assert config["candidate_feedback"]["positive_evidence_support_weight"] == 0.05
+    assert config["candidate_feedback"]["evidence_family_diversity_weight"] == 0.035
+    assert config["candidate_feedback"]["contradiction_penalty_weight"] == 0.055
     assert config["candidate_feedback"]["max_related_hypotheses_per_evidence"] == 4
     assert "stop" not in config
 
@@ -312,6 +332,16 @@ def test_build_default_brain_maps_a3_and_repair_config() -> None:
                 "enable_multi_hypothesis_feedback": True,
                 "use_scope_weighted_feedback": True,
                 "max_related_hypotheses_per_evidence": 4,
+                "enable_top3_candidate_rescue": True,
+                "top3_rescue_rank_window": 7,
+                "top3_rescue_bonus": 0.09,
+                "enable_candidate_rank_memory": True,
+                "candidate_rank_memory_bonus": 0.06,
+                "candidate_rank_memory_decay": 0.58,
+                "enable_evidence_supported_rerank": True,
+                "positive_evidence_support_weight": 0.05,
+                "evidence_family_diversity_weight": 0.035,
+                "contradiction_penalty_weight": 0.055,
             },
         },
         llm_client=FakeAvailableLlmClient(),
@@ -352,6 +382,16 @@ def test_build_default_brain_maps_a3_and_repair_config() -> None:
     assert brain.deps.hypothesis_manager.config.enable_multi_hypothesis_feedback is True
     assert brain.deps.hypothesis_manager.config.use_scope_weighted_feedback is True
     assert brain.deps.hypothesis_manager.config.max_related_hypotheses_per_evidence == 4
+    assert brain.deps.hypothesis_manager.config.enable_top3_candidate_rescue is True
+    assert brain.deps.hypothesis_manager.config.top3_rescue_rank_window == 7
+    assert brain.deps.hypothesis_manager.config.top3_rescue_bonus == 0.09
+    assert brain.deps.hypothesis_manager.config.enable_candidate_rank_memory is True
+    assert brain.deps.hypothesis_manager.config.candidate_rank_memory_bonus == 0.06
+    assert brain.deps.hypothesis_manager.config.candidate_rank_memory_decay == 0.58
+    assert brain.deps.hypothesis_manager.config.enable_evidence_supported_rerank is True
+    assert brain.deps.hypothesis_manager.config.positive_evidence_support_weight == 0.05
+    assert brain.deps.hypothesis_manager.config.evidence_family_diversity_weight == 0.035
+    assert brain.deps.hypothesis_manager.config.contradiction_penalty_weight == 0.055
 
 
 # 验证 build_default_brain 也支持 statistical transition model 的配置装配。
