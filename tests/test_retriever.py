@@ -80,6 +80,29 @@ def test_retriever_returns_r2_expected_evidence() -> None:
     assert "acquisition_mode" in retriever.client.last_query
     assert rows[0]["acquisition_mode"] == "needs_lab_test"
     assert rows[0]["evidence_cost"] == "high"
+    assert retriever.client.last_params["known_evidence_ids"] == []
+
+
+# 验证 R2 现在也会把已确认 evidence_state 的节点从候选里排除，避免患者已说过还继续追问。
+def test_retriever_passes_known_evidence_ids_into_r2_query() -> None:
+    retriever = GraphRetriever(FakeNeo4jClient())
+    state = SessionState(
+        session_id="s2",
+        evidence_states={
+            "symptom_chalk": EvidenceState(
+                node_id="symptom_chalk",
+                polarity="present",
+                existence="exist",
+                resolution="clear",
+            )
+        },
+    )
+    hypothesis = HypothesisScore(node_id="broncho", label="Disease", name="支气管结石病", score=0.9)
+
+    retriever.retrieve_r2_expected_evidence(hypothesis, state)
+
+    assert "known_evidence_ids" in retriever.client.last_params
+    assert retriever.client.last_params["known_evidence_ids"] == ["symptom_chalk"]
 
 
 class SemanticFakeNeo4jClient(FakeNeo4jClient):

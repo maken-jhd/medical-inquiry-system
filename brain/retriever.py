@@ -659,9 +659,10 @@ class GraphRetriever:
         limit = top_k or self.config.r2_limit
         asked_ids = list(session_state.asked_node_ids)
         known_slot_ids = list(session_state.slots.keys())
+        known_evidence_ids = list(session_state.evidence_states.keys())
         hypothesis_id = hypothesis.node_id
 
-        # R2 只取“当前假设最值得继续验证、且还没问过/还没写入槽位”的证据节点。
+        # R2 只取“当前假设最值得继续验证、且还没问过/还没写入已知状态”的证据节点。
         rows = self.client.run_query(
             """
             CALL () {
@@ -670,6 +671,7 @@ class GraphRetriever:
                 AND type(r) IN $relation_types
                 AND NOT target.id IN $asked_ids
                 AND NOT target.id IN $known_slot_ids
+                AND NOT target.id IN $known_evidence_ids
                 AND any(label IN labels(target) WHERE label IN $target_labels)
               RETURN target, r, 1.0 AS direction_confidence
               UNION
@@ -678,6 +680,7 @@ class GraphRetriever:
                 AND type(r) IN $relation_types
                 AND NOT target.id IN $asked_ids
                 AND NOT target.id IN $known_slot_ids
+                AND NOT target.id IN $known_evidence_ids
                 AND any(label IN labels(target) WHERE label IN $target_labels)
               RETURN target, r, 0.65 AS direction_confidence
             }
@@ -733,6 +736,7 @@ class GraphRetriever:
                 "hypothesis_id": hypothesis_id,
                 "asked_ids": asked_ids,
                 "known_slot_ids": known_slot_ids,
+                "known_evidence_ids": known_evidence_ids,
                 "limit": limit,
                 "relation_types": list(self.config.r2_relation_types),
                 "target_labels": list(self.config.r2_target_labels),

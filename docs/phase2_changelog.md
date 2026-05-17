@@ -10,6 +10,44 @@
 - `phase2_execution_checklist.md` 更偏“路线设计与待办清单”
 - 本文更偏“已经发生过哪些阶段性变化、分别解决了什么问题”
 
+## 近期更新：2026-05-14 让患者已明确陈述的内容直接作为 confirmed evidence
+
+### 本次目标
+
+- 去掉“患者开场已经明确说过，但系统后面还要再确认一遍”的重复追问
+- 不再区分 low-cost / high-cost，只要患者已经明确说出，就直接按真实事实进入后续推理
+
+### 本次改动
+
+- [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - 新增 `patient_stated_semantic_trust` 机制
+  - 在进入 `run_reasoning_search()` / `no_tree_greedy` 前，会扫描当前 top hypotheses 的 R2 证据节点：
+    - 若与 `mention_context / slots / evidence_states` 中已有患者陈述语义对上
+    - 则直接补成 graph-grounded `evidence_state`
+    - 并立即反馈回 hypothesis 排名
+  - 同时在 service 侧额外过滤掉这些“已由患者明确陈述”的证据节点，避免 retriever/mock retriever 不一致时仍重复生成动作
+  - `pending_action` 回填 evidence_state 时，也支持从已有患者陈述里语义恢复目标节点
+- [brain/retriever.py](/Users/loki/Workspace/GraduationDesign/brain/retriever.py)
+  - `retrieve_r2_expected_evidence()` 现在会额外排除 `known_evidence_ids`
+  - 已经形成 `evidence_state` 的节点不会再被当作待验证 R2 候选返回
+- 文档更新：
+  - [brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
+  - 补充说明“患者已说过的内容会直接视为 confirmed evidence”
+- 测试补强：
+  - [tests/test_retriever.py](/Users/loki/Workspace/GraduationDesign/tests/test_retriever.py)
+  - [tests/test_service_search_impl_switch.py](/Users/loki/Workspace/GraduationDesign/tests/test_service_search_impl_switch.py)
+
+### 影响
+
+- 现在像“咳出白粉笔样物质”这类已经在 opening 中说过的证据，不会再因为第一次未成功对齐到图谱节点，就被系统重新发问
+- 这次改动不再保留“高成本结果要额外保守确认”的旧策略，而是统一采用“患者已明确陈述即可视为真值”的语义
+
+### 验证结果
+
+- 已执行：
+  - `conda run -n GraduationDesign python -m pytest tests/test_retriever.py tests/test_service_search_impl_switch.py -q`
+  - 结果：`10 passed`
+
 ## 近期更新：2026-05-14 把优化重点转到 candidate_hypotheses 的 Top-3 coverage
 
 ### 本次目标
@@ -7285,6 +7323,104 @@ python -m py_compile brain/simulation_engine.py brain/trajectory_evaluator.py br
 - 该案例的可解释性更强，后续若选它作为正文案例，可以更方便地提炼成论文中的路径对比文字
 - 低成本病例中“细节澄清型优势”的叙事更加完整
 
+## 七十六、2026-05-14：补充支气管结石病候选的逐轮问答详情
+
+### 本次目标
+
+- 将“支气管结石病”案例扩展为逐轮路径对比版本
+- 便于后续直接从候选文档中摘取完整问答过程写入论文正文
+
+### 本次更新
+
+- 更新：
+  - [docs/chapter5_case_candidates.md](/Users/loki/Workspace/GraduationDesign/docs/chapter5_case_candidates.md)
+
+### 具体改动
+
+- 在“候选2：支气管结石病”下新增“逐轮问答详情”小节
+- 分别补充 `MCTS`、纯大语言模型、`TextRAG`、`KGRAG` 的每一轮问题与对应回答
+- 结合逐轮路径，补写各方法最终为何分叉到不同诊断的说明
+
+### 结果影响
+
+- 该案例现在已经具备直接进入论文正文的细节密度
+- 后续如果选择“支气管结石病”作为主案例，不再需要重新翻原始 replay 结果补问答过程
+
+## 七十七、2026-05-14：将第5章正文案例分析替换为支气管结石病
+
+### 本次目标
+
+- 将第 `5.3` 节原有的“急性低氧性呼吸衰竭”案例替换为“支气管结石病”
+- 让正文案例与当前更偏好的代表性样例保持一致
+
+### 本次更新
+
+- 更新：
+  - [docs/chapter5.md](/Users/loki/Workspace/GraduationDesign/docs/chapter5.md)
+
+### 具体改动
+
+- 重写第 `5.3` 节案例引入，将代表性病例改为“支气管结石病”
+- 更新表 `5.5` 的病例名称、各方法提问路径概括与最终输出
+- 重新改写案例分析正文，突出：
+  - `MCTS` 如何在前两轮快速命中“末梢阻塞性肺炎”和“咳出白粉笔样物质”
+  - 三类基线如何被 HIV/AIDS 高频肺部感染模板持续牵引
+  - 检索增强方法在缺少动作价值比较时仍可能错过高特异性线索
+- 同步改写案例分析小结，使其与新案例保持一致
+
+### 结果影响
+
+- 第 `5.3` 节正文案例现在更突出“罕见但高价值线索被及时命中”的优势
+- 主案例与候选文档中的推荐结果保持一致，后续不需要再额外对齐两份材料
+
+## 七十八、2026-05-14：补齐第1章和第2章的 Markdown 章节文件
+
+### 本次目标
+
+- 将现有 `docx` 章节稿统一整理为 `docs/` 下的 `chapter+数字.md` 文件
+- 让论文章节材料在命名和存放位置上保持一致
+
+### 本次更新
+
+- 新增：
+  - [docs/chapter1.md](/Users/loki/Workspace/GraduationDesign/docs/chapter1.md)
+  - [docs/chapter2.md](/Users/loki/Workspace/GraduationDesign/docs/chapter2.md)
+
+### 具体改动
+
+- 将根目录下的《绪论.docx》转换整理为 `docs/chapter1.md`
+- 将根目录下的《相关技术与理论基础.docx》转换整理为 `docs/chapter2.md`
+- 对转换后的文本补充 Markdown 标题层级，使 `1.x / 1.x.x`、`2.x / 2.x.x` 结构可以直接继续编辑
+- 保持现有 `docs/chapter3.md` 至 `docs/chapter6.md` 不变，因此当前章节文件已形成连续命名
+- 未额外生成“总论文 docx”的 Markdown 副本，因为其内容与现有章节稿存在重叠，不适合作为新的单章文件落到 `chapter+数字` 命名体系中
+
+### 结果影响
+
+- `docs/` 目录下现已具备从 `chapter1.md` 到 `chapter6.md` 的连续章节文件
+- 后续若继续修改论文正文，可以统一在 `docs/chapter*.md` 体系中进行维护
+
+## 七十九、2026-05-14：更新第1章 1.4 节的论文组织结构说明
+
+### 本次目标
+
+- 将 `1.4 论文组织结构` 从旧版五章口径调整为当前六章结构
+- 使章节概述与现有 `chapter1` 至 `chapter6` 的正文安排保持一致
+
+### 本次更新
+
+- 更新：
+  - [docs/chapter1.md](/Users/loki/Workspace/GraduationDesign/docs/chapter1.md)
+
+### 具体改动
+
+- 将原本的占位句替换为完整的章节组织说明
+- 明确第 `3` 章为方法设计、第 `4` 章为系统设计与实现、第 `5` 章为实验与结果分析、第 `6` 章为结论与展望
+
+### 结果影响
+
+- 第 `1.4` 节现在已与当前论文的六章结构完全对齐
+- 后续导出或继续润色 `chapter1.md` 时，不再需要额外手动修正章节口径
+
 ## 六十九、2026-05-14：替换第5章案例分析病例，突出MCTS首个高区分动作的优势
 
 ### 本次目标
@@ -7359,3 +7495,67 @@ python -m py_compile brain/simulation_engine.py brain/trajectory_evaluator.py br
   - `22 passed`
 - `conda run -n GraduationDesign python -m pytest tests/test_trajectory_evaluator.py tests/test_router_control_flow.py -q`
   - `13 passed`
+
+## 2026-05-14 论文第 3 章方法口径收束
+
+### 变更文件
+
+- 更新：
+  - [docs/chapter3.md](/Users/loki/Workspace/GraduationDesign/docs/chapter3.md)
+
+### 具体改动
+
+- 将 `3.2.5 基于树搜索的问诊决策过程` 从旧版偏工程化、偏公式堆叠的写法，改为面向最终方法版本的学术表述
+- 删除容易让人误解为早期启发式实现细节的 `UCT / Score_MCTS / 固定三分支模拟` 叙述
+- 改写为“结构化状态上的局部树搜索 + 基于当前候选状态的未来回答分支估计 + 面向诊断收敛与最终接受的动作评估”口径
+- 在 `3.2.2` 补充“候选诊断会随真实会话证据持续重排”的说明
+- 在 `3.2.3` 补充“动作先验只作为搜索入口，最终下一问由局部树搜索进一步比较决定”的说明
+- 同步调整 `3.2.6` 与算法 3.1 中关于“当前最优答案”的表述，统一为“当前主候选 / 下一步优先动作”的口径
+- 更新 `3.4 本章小结`，使其与最新方法叙述保持一致
+- 进一步删除“单步启发式”等带有旧方法对照色彩的措辞，改为直接陈述当前方法定义
+
+## 2026-05-15 论文第 3 章定向口径修订
+
+### 变更文件
+
+- 更新：
+  - [docs/chapter3.md](/Users/loki/Workspace/GraduationDesign/docs/chapter3.md)
+
+### 具体改动
+
+- 将表 3.1 的节点类型、获取方式与证据成本改为中文口径，去除明显中英文混杂
+- 在 `3.2.3` 补充图谱获取方式与三类问诊动作的对应关系，使本体元数据与动作设计形成显式衔接
+- 重写表 3.4，将 `present / absent / unclear` 形式改为“阳性 / 阴性 / 不明确”中文表达，并补入检查类回答的处理规则
+- 在 `3.2.5` 显式区分一般验证动作与检查上下文动作的回答分支集合，补充 `not_done / done_positive / done_negative / done_unclear` 的方法定义
+- 在 `3.2.6` 统一“当前主候选”主语，减少“当前答案 / 候选答案”混用
+
+### 结果影响
+
+- 第 3 章与当前系统在回答分支建模、检查类问题处理和状态更新语义上更一致
+- 表格与正文的中文化程度进一步提高，更符合当前论文整体表述风格
+
+## 2026-05-15 第 5 章 MCTS 结果切换到 top3 candidate rescue v2
+
+### 变更文件
+
+- 更新：
+  - [docs/chapter5.md](/Users/loki/Workspace/GraduationDesign/docs/chapter5.md)
+
+### 具体改动
+
+- 将第 5 章中本文方法（MCTS）的整体对比结果切换为：
+  - `test_outputs/simulator_replay/benchmark_20260514_top3_candidate_coverage/modular_v2_statistical_belief_aware_relaxed_full227_top3_candidate_rescue_v2/benchmark_summary.json`
+- 同步替换表 5.1 中 MCTS 的 `top1 / top3 / 接受后精确正确率 / 错误接受率 / 平均轮次`
+- 同步替换表 5.3、表 5.4 中四类病例下 MCTS 的分项数值
+- 同步改写 5.2.1、5.2.2 中引用上述数值的文字分析，保证表格与正文一致
+
+### 结果影响
+
+- 第 5 章当前展示的 MCTS 指标已统一切换为新的 `top3 candidate rescue v2` 结果
+- 实验表格与文字分析不再混用旧版 benchmark 数值
+
+### 结果影响
+
+- 第 3 章将更聚焦“最终方法是什么”，不再暴露过多中间版本演化痕迹
+- 方法章与当前代码仓库中的最新思路更一致，但避免写入过细的工程实现细节
+- 第 3 章与第 4 章的章节边界更清晰：第 3 章讲方法，第 4 章讲系统组织与实现

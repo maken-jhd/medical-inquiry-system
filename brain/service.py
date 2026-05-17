@@ -1306,6 +1306,45 @@ class ConsultationBrain:
                 existing.source_turns.append(turn_index)
             return existing
 
+        semantic_match = self._find_patient_stated_match_for_row(
+            state,
+            {
+                "node_id": action.target_node_id,
+                "name": action.target_node_name,
+                "label": action.target_node_label,
+                "question_type_hint": action.metadata.get("question_type_hint"),
+                "relation_type": action.metadata.get("relation_type"),
+                "acquisition_mode": action.metadata.get("acquisition_mode"),
+                "evidence_cost": action.metadata.get("evidence_cost"),
+            },
+        )
+        if semantic_match is not None:
+            trusted = self._build_trusted_patient_evidence_state(
+                row={
+                    "node_id": action.target_node_id,
+                    "name": action.target_node_name,
+                    "label": action.target_node_label,
+                    "question_type_hint": action.metadata.get("question_type_hint"),
+                    "relation_type": action.metadata.get("relation_type"),
+                    "acquisition_mode": action.metadata.get("acquisition_mode"),
+                    "evidence_cost": action.metadata.get("evidence_cost"),
+                    "priority": action.prior_score,
+                },
+                hypothesis=HypothesisScore(
+                    node_id=str(action.hypothesis_id or ""),
+                    label=str(action.topic_id or ""),
+                    name=str(action.hypothesis_id or ""),
+                    score=0.0,
+                ),
+                semantic_match=semantic_match,
+            )
+            trusted.polarity = pending_action_result.polarity
+            trusted.existence = self._polarity_to_existence_compat(pending_action_result.polarity)
+            trusted.resolution = pending_action_result.resolution
+            trusted.reasoning = pending_action_result.reasoning
+            trusted.source_turns = [turn_index]
+            return trusted
+
         return EvidenceState(
             node_id=action.target_node_id,
             polarity=pending_action_result.polarity,
@@ -2201,6 +2240,8 @@ class ConsultationBrain:
 
         # 先拿到当前会话状态；这份 state 是“真实会话态”，后续 rollout 使用的则是从它派生出来的轻量分支快照。
         state = tracker.get_session(session_id)
+        self._trust_patient_stated_evidence(session_id)
+        state = tracker.get_session(session_id)
 
         # 搜索树按 session 复用：
         # - 若状态签名和当前 top hypothesis 没变，则继续沿用旧树
@@ -2416,6 +2457,7 @@ class ConsultationBrain:
         patient_context: PatientContext,
     ) -> SearchResult:
         tracker = self.deps.state_tracker
+        self._trust_patient_stated_evidence(session_id)
         state = tracker.get_session(session_id)
         current_hypothesis, alternatives = self._build_search_root_hypothesis_context(state)
         actions = self._build_actions_for_hypothesis_context(
@@ -3575,6 +3617,7 @@ class ConsultationBrain:
             return []
 
         rows = self.deps.retriever.retrieve_r2_expected_evidence(current_hypothesis, session_state)
+        rows = self._filter_known_verification_rows(session_state, rows)
         actions = self.deps.action_builder.build_verification_actions(
             rows,
             hypothesis_id=current_hypothesis.node_id,
@@ -3584,6 +3627,273 @@ class ConsultationBrain:
             session_state=session_state,
         )
         return actions[: self.deps.mcts_engine.config.max_child_nodes]
+
+    def _filter_known_verification_rows(
+        self,
+        session_state: SessionState,
+        rows: Sequence[dict],
+    ) -> list[dict]:
+        remaining: list[dict] = []
+
+        for row in rows:
+            node_id = str(row.get("node_id") or "").strip()
+            if len(node_id) == 0:
+                continue
+
+            if (
+                node_id in session_state.asked_node_ids
+                or node_id in session_state.slots
+                or node_id in session_state.evidence_states
+            ):
+                continue
+
+            if self._find_patient_stated_match_for_row(session_state, row) is not None:
+                continue
+
+            remaining.append(row)
+
+        return remaining
+
+    # 将患者已经明确说过的内容直接视为已确认事实：
+    # 只要后续某个候选证据节点能和当前会话中的提及语义对上，就补成真正的 evidence_state，
+    # 并在进入搜索前先把它反馈回 hypothesis 排名，避免系统再问一遍。
+    def _trust_patient_stated_evidence(self, session_id: str) -> int:
+        if not hasattr(self.deps.retriever, "retrieve_r2_expected_evidence"):
+            return 0
+
+        tracker = self.deps.state_tracker
+        state = tracker.get_session(session_id)
+
+        if len(state.candidate_hypotheses) == 0:
+            return 0
+
+        expand_limit = max(int(self.deps.hypothesis_manager.config.expand_top_k_hypotheses or 3), 5)
+        ranked_hypotheses = sorted(state.candidate_hypotheses, key=lambda item: (-item.score, item.name))[:expand_limit]
+        materialized_entries: list[dict] = []
+
+        for hypothesis in ranked_hypotheses:
+            try:
+                rows = self.deps.retriever.retrieve_r2_expected_evidence(hypothesis, state, top_k=12)
+            except TypeError:
+                rows = self.deps.retriever.retrieve_r2_expected_evidence(hypothesis, state)
+            except Exception:
+                continue
+
+            for row in rows:
+                node_id = str(row.get("node_id") or "").strip()
+                if len(node_id) == 0 or node_id in state.evidence_states:
+                    continue
+
+                semantic_match = self._find_patient_stated_match_for_row(state, row)
+                if semantic_match is None:
+                    continue
+
+                trusted_evidence_state = self._build_trusted_patient_evidence_state(
+                    row=row,
+                    hypothesis=hypothesis,
+                    semantic_match=semantic_match,
+                )
+                tracker.set_evidence_state(session_id, trusted_evidence_state)
+                self._apply_hypothesis_feedback(
+                    session_id,
+                    self._build_trusted_patient_evidence_action(hypothesis, row),
+                    trusted_evidence_state,
+                )
+                state = tracker.get_session(session_id)
+                materialized_entries.append(
+                    {
+                        "hypothesis_id": hypothesis.node_id,
+                        "hypothesis_name": hypothesis.name,
+                        "target_node_id": node_id,
+                        "target_node_name": str(row.get("name") or node_id),
+                        "source_name": str(semantic_match.get("source_name") or ""),
+                        "source_type": str(semantic_match.get("source_type") or ""),
+                        "polarity": str(semantic_match.get("polarity") or ""),
+                        "resolution": str(semantic_match.get("resolution") or ""),
+                    }
+                )
+
+        if len(materialized_entries) > 0:
+            state.metadata["trusted_patient_stated_evidence"] = materialized_entries[-24:]
+
+        return len(materialized_entries)
+
+    def _find_patient_stated_match_for_row(
+        self,
+        state: SessionState,
+        row: dict,
+    ) -> dict | None:
+        target_aliases = self._build_target_aliases_for_name(str(row.get("name") or row.get("node_id") or ""))
+        if len(target_aliases) == 0:
+            return None
+
+        for evidence in state.evidence_states.values():
+            matched_name = self._match_target_aliases(
+                target_aliases,
+                [
+                    evidence.metadata.get("target_node_name"),
+                    evidence.metadata.get("normalized_name"),
+                    evidence.metadata.get("graph_grounded_canonical_name"),
+                    evidence.node_id,
+                ],
+            )
+            if matched_name is not None:
+                return {
+                    "source_type": "evidence_state",
+                    "source_node_id": evidence.node_id,
+                    "source_name": matched_name,
+                    "polarity": evidence.effective_polarity(),
+                    "resolution": evidence.resolution,
+                    "evidence_text": str(evidence.metadata.get("patient_answer") or evidence.reasoning or matched_name),
+                }
+
+        for slot in state.slots.values():
+            matched_name = self._match_target_aliases(
+                target_aliases,
+                [
+                    slot.metadata.get("normalized_name"),
+                    slot.metadata.get("display_name"),
+                    slot.metadata.get("target_node_name"),
+                    slot.value,
+                    slot.node_id,
+                ],
+            )
+            if matched_name is not None:
+                return {
+                    "source_type": "slot",
+                    "source_node_id": slot.node_id,
+                    "source_name": matched_name,
+                    "polarity": slot.effective_polarity(),
+                    "resolution": slot.resolution,
+                    "evidence_text": "；".join(str(item) for item in slot.evidence if len(str(item).strip()) > 0) or matched_name,
+                }
+
+        for mention in state.mention_context.values():
+            matched_name = self._match_target_aliases(
+                target_aliases,
+                [
+                    mention.normalized_name,
+                    mention.display_name,
+                    mention.node_id,
+                ],
+            )
+            if matched_name is not None:
+                return {
+                    "source_type": "mention_context",
+                    "source_node_id": str(mention.node_id or ""),
+                    "source_name": matched_name,
+                    "polarity": mention.polarity,
+                    "resolution": "clear",
+                    "evidence_text": "；".join(str(item) for item in mention.evidence if len(str(item).strip()) > 0) or matched_name,
+                }
+
+        return None
+
+    def _build_target_aliases_for_name(self, target_name: str) -> set[str]:
+        aliases = {self._normalize_match_text(target_name)}
+        normalizer = getattr(getattr(self.deps, "evidence_parser", None), "normalizer", None)
+
+        if normalizer is not None and hasattr(normalizer, "normalize_graph_mention"):
+            normalized_name = str(normalizer.normalize_graph_mention(target_name) or "").strip()
+            if len(normalized_name) > 0:
+                aliases.add(self._normalize_match_text(normalized_name))
+
+                for method_name in ("candidate_feature_aliases", "candidate_exam_aliases"):
+                    method = getattr(normalizer, method_name, None)
+                    if callable(method):
+                        for alias in method(normalized_name):
+                            alias_text = self._normalize_match_text(alias)
+                            if len(alias_text) > 0:
+                                aliases.add(alias_text)
+
+        return {item for item in aliases if len(item) > 0}
+
+    def _match_target_aliases(
+        self,
+        target_aliases: set[str],
+        values: Sequence[object],
+    ) -> str | None:
+        candidate_values = [
+            str(item).strip()
+            for item in values
+            if len(str(item).strip()) > 0
+        ]
+
+        for raw_value in candidate_values:
+            normalized_value = self._normalize_match_text(raw_value)
+            if len(normalized_value) == 0:
+                continue
+
+            for alias in target_aliases:
+                if normalized_value == alias:
+                    return raw_value
+                if min(len(normalized_value), len(alias)) >= 4 and (
+                    normalized_value in alias or alias in normalized_value
+                ):
+                    return raw_value
+
+        return None
+
+    def _build_trusted_patient_evidence_state(
+        self,
+        *,
+        row: dict,
+        hypothesis: HypothesisScore | HypothesisCandidate,
+        semantic_match: dict,
+    ) -> EvidenceState:
+        polarity = str(semantic_match.get("polarity") or "present").strip() or "present"
+        resolution = str(semantic_match.get("resolution") or "clear").strip() or "clear"
+        evidence_text = str(semantic_match.get("evidence_text") or semantic_match.get("source_name") or "").strip()
+        target_name = str(row.get("name") or row.get("node_id") or "").strip()
+
+        return EvidenceState(
+            node_id=str(row.get("node_id") or "").strip(),
+            polarity=polarity,  # type: ignore[arg-type]
+            existence=self._polarity_to_existence_compat(polarity),
+            resolution=resolution,  # type: ignore[arg-type]
+            reasoning=f"患者已在当前会话中直接提到“{target_name}”，按已确认事实处理。",
+            source_turns=[],
+            metadata={
+                "source_stage": "PATIENT_STATED_SEMANTIC_TRUST",
+                "patient_stated_semantic_trust": True,
+                "target_node_name": target_name,
+                "target_node_label": str(row.get("label") or ""),
+                "question_type_hint": str(row.get("question_type_hint") or ""),
+                "relation_type": str(row.get("relation_type") or ""),
+                "acquisition_mode": str(row.get("acquisition_mode") or ""),
+                "evidence_cost": str(row.get("evidence_cost") or ""),
+                "hypothesis_id": hypothesis.node_id,
+                "patient_answer": evidence_text,
+                "supporting_span": evidence_text,
+                "semantic_match_source_type": str(semantic_match.get("source_type") or ""),
+                "semantic_match_source_node_id": str(semantic_match.get("source_node_id") or ""),
+                "semantic_match_source_name": str(semantic_match.get("source_name") or ""),
+            },
+        )
+
+    def _build_trusted_patient_evidence_action(
+        self,
+        hypothesis: HypothesisScore | HypothesisCandidate,
+        row: dict,
+    ) -> MctsAction:
+        node_id = str(row.get("node_id") or "").strip()
+        return MctsAction(
+            action_id=f"trust_patient_stated::{hypothesis.node_id}::{node_id}",
+            action_type="verify_evidence",
+            target_node_id=node_id,
+            target_node_label=str(row.get("label") or ""),
+            target_node_name=str(row.get("name") or node_id),
+            hypothesis_id=hypothesis.node_id,
+            topic_id=hypothesis.label,
+            prior_score=float(row.get("priority", 0.0) or 0.0),
+            metadata={
+                "relation_type": str(row.get("relation_type") or ""),
+                "question_type_hint": str(row.get("question_type_hint") or ""),
+                "acquisition_mode": str(row.get("acquisition_mode") or ""),
+                "evidence_cost": str(row.get("evidence_cost") or ""),
+                "patient_stated_semantic_trust": True,
+            },
+        )
 
     # 根据当前叶子所处路径扩展下一批 A3 验证动作。
     def _expand_actions_for_leaf(self, leaf: TreeNode, rollout_context: dict) -> list[MctsAction]:
@@ -4053,6 +4363,7 @@ class ConsultationBrain:
                 if item.node_id != action_hypothesis.node_id
             ][: self.deps.hypothesis_manager.config.expand_top_k_hypotheses]
             rows = self.deps.retriever.retrieve_r2_expected_evidence(action_hypothesis, state)
+            rows = self._filter_known_verification_rows(state, rows)
 
             # 每个 hypothesis 都重新跑一轮 R2 + action_builder，
             # 这样 repair 得到的动作仍然遵守正常搜索链路的排序与 exam_context 门控。
@@ -4944,6 +5255,7 @@ class ConsultationBrain:
             rows = self.deps.retriever.retrieve_r2_expected_evidence(hypothesis, state)
         except Exception:
             return []
+        rows = self._filter_known_verification_rows(state, rows)
 
         ranked = ranked_hypotheses or sorted(state.candidate_hypotheses, key=lambda item: (-item.score, item.name))[:3]
         expand_limit = int(
