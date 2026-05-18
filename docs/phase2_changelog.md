@@ -10,6 +10,57 @@
 - `phase2_execution_checklist.md` 更偏“路线设计与待办清单”
 - 本文更偏“已经发生过哪些阶段性变化、分别解决了什么问题”
 
+## 近期更新：2026-05-18 `simulator/` 分层重构、兼容壳保留与运行链路文档重写
+
+### 本次目标
+
+- 把 `simulator/` 从平铺模块重构成按运行职责分层的包结构
+- 保持 `ReplayEngine`、`VirtualPatientAgent`、`VirtualPatientCase`、病例 JSON/JSONL 与 benchmark schema 兼容
+- 重写 simulator 运行链路说明，并同步 README 与第二阶段文档
+
+### 本次改动
+
+- 目录重组：
+  - 新增 `simulator/app/`、`simulator/cases/`、`simulator/patient/`、`simulator/replay/`、`simulator/benchmarking/`、`simulator/audit/`、`simulator/catalog/`、`simulator/cache/`、`simulator/shared/`
+- replay 分层：
+  - 新增 [simulator/replay/types.py](/Users/loki/Workspace/GraduationDesign/simulator/replay/types.py)
+  - 新增 [simulator/replay/analysis.py](/Users/loki/Workspace/GraduationDesign/simulator/replay/analysis.py)
+  - 新增 [simulator/replay/io.py](/Users/loki/Workspace/GraduationDesign/simulator/replay/io.py)
+  - 新增 [simulator/replay/engine.py](/Users/loki/Workspace/GraduationDesign/simulator/replay/engine.py)
+  - [simulator/replay/runtime.py](/Users/loki/Workspace/GraduationDesign/simulator/replay/runtime.py) 现在只负责单病例回放编排
+- benchmark 分层：
+  - 新增 [simulator/benchmarking/types.py](/Users/loki/Workspace/GraduationDesign/simulator/benchmarking/types.py)
+  - 新增 [simulator/benchmarking/helpers.py](/Users/loki/Workspace/GraduationDesign/simulator/benchmarking/helpers.py)
+  - 新增 [simulator/benchmarking/metrics.py](/Users/loki/Workspace/GraduationDesign/simulator/benchmarking/metrics.py)
+  - 新增 [simulator/benchmarking/reports.py](/Users/loki/Workspace/GraduationDesign/simulator/benchmarking/reports.py)
+- 病人代理分层：
+  - `VirtualPatientAgent` 变为薄门面
+  - opening / matching / replies / llm 草稿分拆到 `simulator/patient/`
+- 顶层兼容壳保留：
+  - `simulator/case_schema.py`
+  - `simulator/generate_cases.py`
+  - `simulator/patient_agent.py`
+  - `simulator/replay_engine.py`
+  - `simulator/benchmark.py`
+  - `simulator/graph_case_generator.py`
+  - `simulator/graph_audit.py`
+  - `simulator/evidence_family_catalog.py`
+  - `simulator/path_cache_builder.py`
+- 文档更新：
+  - 重写 [simulator/README.md](/Users/loki/Workspace/GraduationDesign/simulator/README.md)
+  - 新增 [docs/simulator_runtime_call_chain_guide.md](/Users/loki/Workspace/GraduationDesign/docs/simulator_runtime_call_chain_guide.md)
+  - 更新 [README.md](/Users/loki/Workspace/GraduationDesign/README.md)
+  - 更新 [docs/virtual_patient_generation_scheme.md](/Users/loki/Workspace/GraduationDesign/docs/virtual_patient_generation_scheme.md)
+
+### 验证
+
+- `conda run -n GraduationDesign python -m pytest tests/test_patient_agent.py tests/test_replay_engine.py tests/test_benchmark.py tests/test_generate_cases.py -q`
+  - `22 passed`
+- `conda run -n GraduationDesign python -m pytest tests/test_graph_case_generator.py tests/test_graph_audit.py tests/test_evidence_family_catalog.py tests/test_simulator_structure.py -q`
+  - `41 passed`
+- `conda run -n GraduationDesign python -m pytest tests/test_build_smoke_case_subset.py tests/test_build_non_completed_smoke_set.py tests/test_run_batch_replay.py tests/test_run_baseline_replay.py -q`
+  - `29 passed`
+
 ## 近期更新：2026-05-17 `brain/` 分层重构、删除未接入残留并重写运行链路文档
 
 ### 本次目标

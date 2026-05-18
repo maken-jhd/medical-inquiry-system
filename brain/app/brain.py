@@ -3472,7 +3472,7 @@ class BrainRuntime:
         search_result.metadata["multi_hypothesis_feedback_hit_count"] = multi_count
         search_result.metadata["multi_hypothesis_feedback_hit_rate"] = round(multi_count / float(total_count), 4)
 
-    # 从当前槽位状态中收集已知特征名称，辅助 A1 进行更保守的抽取。
+    # 从当前会话的状态里，把系统已经知道的特征名称收集出来，返回一个去重后的字符串列表，供 A1 阶段做更保守的特征抽取（减少重复抽取、过度抽取和同义词漂移问题）。
     def _collect_known_feature_names(self, session_id: str) -> list[str]:
         state = self.deps.state_tracker.get_session(session_id)
         names: list[str] = []

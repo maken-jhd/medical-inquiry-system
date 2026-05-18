@@ -13,6 +13,20 @@
 
 本文档描述的是当前仓库内已经实现并可运行的方案，而不是纯粹的未来设想。
 
+## 代码结构说明
+
+当前 `simulator/` 已按职责拆成子包：
+
+- `simulator/cases/`：病例 schema、seed cases、IO、图谱病例生成
+- `simulator/patient/`：opening、槽位匹配、exam context、回复渲染、LLM 草稿
+- `simulator/replay/`：单病例回放 runtime、结果类型、analysis、JSONL 导出
+- `simulator/benchmarking/`：benchmark 摘要、analysis summary、异常病例报表
+- `simulator/audit/`：疾病级图谱审计与差异证据报告
+- `simulator/catalog/`：evidence family 分类与最低证据组建议
+- `simulator/cache/`：路径缓存构建
+
+顶层旧模块名如 `simulator/patient_agent.py`、`simulator/replay_engine.py`、`simulator/benchmark.py` 仍保留，但现在只是兼容壳；真实实现已经迁到子包。
+
 截至当前版本，图谱病例生成器已经从早期的局部质量修复，升级为“全证据族 catalog 约束 + evidence-role case QC”的生成方式：
 
 - 基于当前 Neo4j 图谱导出 `symptom / risk / detail / lab / imaging / pathogen` 六类证据族目录
@@ -91,21 +105,24 @@ test_outputs/graph_audit/all_diseases_20260420_disease_aliases_only/
 对应实现文件如下：
 
 - 图谱审计：
-  - [simulator/graph_audit.py](/Users/loki/Workspace/GraduationDesign/simulator/graph_audit.py)
+  - [simulator/audit/graph_audit.py](/Users/loki/Workspace/GraduationDesign/simulator/audit/graph_audit.py)
   - [scripts/audit_disease_ego_graphs.py](/Users/loki/Workspace/GraduationDesign/scripts/audit_disease_ego_graphs.py)
 - 图谱病例生成：
-  - [simulator/evidence_family_catalog.py](/Users/loki/Workspace/GraduationDesign/simulator/evidence_family_catalog.py)
-  - [simulator/graph_case_generator.py](/Users/loki/Workspace/GraduationDesign/simulator/graph_case_generator.py)
+  - [simulator/catalog/evidence_family_catalog.py](/Users/loki/Workspace/GraduationDesign/simulator/catalog/evidence_family_catalog.py)
+  - [simulator/cases/graph_generator.py](/Users/loki/Workspace/GraduationDesign/simulator/cases/graph_generator.py)
   - [scripts/export_disease_symptom_family_catalog.py](/Users/loki/Workspace/GraduationDesign/scripts/export_disease_symptom_family_catalog.py)
   - [scripts/export_disease_evidence_family_catalog.py](/Users/loki/Workspace/GraduationDesign/scripts/export_disease_evidence_family_catalog.py)
   - [scripts/generate_graph_virtual_patients.py](/Users/loki/Workspace/GraduationDesign/scripts/generate_graph_virtual_patients.py)
   - [scripts/sample_graph_virtual_patients.py](/Users/loki/Workspace/GraduationDesign/scripts/sample_graph_virtual_patients.py)
 - 病例 schema：
-  - [simulator/case_schema.py](/Users/loki/Workspace/GraduationDesign/simulator/case_schema.py)
+  - [simulator/cases/schema.py](/Users/loki/Workspace/GraduationDesign/simulator/cases/schema.py)
 - 病人代理：
-  - [simulator/patient_agent.py](/Users/loki/Workspace/GraduationDesign/simulator/patient_agent.py)
+  - [simulator/patient/runtime.py](/Users/loki/Workspace/GraduationDesign/simulator/patient/runtime.py)
+  - 兼容入口：[simulator/patient_agent.py](/Users/loki/Workspace/GraduationDesign/simulator/patient_agent.py)
 - 自动对战：
-  - [simulator/replay_engine.py](/Users/loki/Workspace/GraduationDesign/simulator/replay_engine.py)
+  - [simulator/replay/runtime.py](/Users/loki/Workspace/GraduationDesign/simulator/replay/runtime.py)
+  - [simulator/benchmarking/metrics.py](/Users/loki/Workspace/GraduationDesign/simulator/benchmarking/metrics.py)
+  - 兼容入口：[simulator/replay_engine.py](/Users/loki/Workspace/GraduationDesign/simulator/replay_engine.py)
   - [scripts/run_batch_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_batch_replay.py)
 
 ## 5. 设计原则
@@ -603,7 +620,8 @@ QC 的 evidence role 不是按具体疾病名写补丁，而是由证据组、fa
 
 实现文件：
 
-- [simulator/patient_agent.py](/Users/loki/Workspace/GraduationDesign/simulator/patient_agent.py)
+- [simulator/patient/runtime.py](/Users/loki/Workspace/GraduationDesign/simulator/patient/runtime.py)
+- 兼容入口：[simulator/patient_agent.py](/Users/loki/Workspace/GraduationDesign/simulator/patient_agent.py)
 
 ### 10.2 首轮开场机制
 
@@ -690,6 +708,7 @@ QC 的 evidence role 不是按具体疾病名写补丁，而是由证据组、fa
 当前自动对战入口主要是：
 
 - [scripts/run_batch_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_batch_replay.py)
+- [simulator/replay/runtime.py](/Users/loki/Workspace/GraduationDesign/simulator/replay/runtime.py)
 
 它现在支持：
 

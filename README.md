@@ -26,6 +26,7 @@
 - 旧版全量指南图谱备份：[knowledge_graph_bak/README.md](/Users/loki/Workspace/GraduationDesign/knowledge_graph_bak/README.md)
 - 第二阶段问诊大脑：[brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
 - 第二阶段问诊大脑详细运行链路指南（当前按 `turn_interpreter -> A1 / A2 / A3 -> verifier-only acceptance -> repair` 口径说明，且已细化到 `pending action / A2 刷新 / verifier guard / repair 分流` 级别）：[brain_runtime_call_chain_guide.md](/Users/loki/Workspace/GraduationDesign/docs/brain_runtime_call_chain_guide.md)
+- 第二阶段虚拟病人与回放详细运行链路指南：[simulator_runtime_call_chain_guide.md](/Users/loki/Workspace/GraduationDesign/docs/simulator_runtime_call_chain_guide.md)
 - Med-MCTS 论文实现与当前系统实现对照、启发参数来源与后续优化方向：[med_mcts_vs_current_system.md](/Users/loki/Workspace/GraduationDesign/docs/med_mcts_vs_current_system.md)
 - 诊断系统 benchmark 可执行实验设计：[diagnosis_benchmark_experiment_design.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_benchmark_experiment_design.md)
 - 论文实验与测试章节草稿：[thesis_experiment_and_test_section_draft.md](/Users/loki/Workspace/GraduationDesign/docs/thesis_experiment_and_test_section_draft.md)
@@ -59,8 +60,11 @@ GraduationDesign/
 ├── knowledge_graph_bak/          # 已废弃的旧版全量指南图谱备份
 ├── brain/                        # 第二阶段问诊大脑脚手架
 ├── baselines/                    # 外部 pure LLM / 文本 RAG baseline 目录
-├── simulator/                    # 虚拟病人、离线评测与图谱审计脚手架
-│   ├── graph_audit.py            # 疾病级局部子图与疾病对差异证据审计
+├── simulator/                    # 虚拟病人、回放、benchmark、图谱病例生成与审计
+│   ├── cases/                    # 病例 schema、seed cases、IO、图谱病例生成
+│   ├── patient/                  # opening、回答匹配、LLM 草稿
+│   ├── replay/                   # 单病例回放 runtime、结果类型、分析
+│   ├── benchmarking/             # benchmark 摘要、异常病例与 cohort 报表
 │   └── ...
 ├── frontend/                     # Streamlit 中期检查演示界面
 │   ├── app.py                    # 前端入口
@@ -324,18 +328,24 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 当前虚拟病人模块已经不只是 seed case 脚手架，而是形成了“图谱审计 -> 病例骨架 -> 病人代理 -> 自动对战”的闭环。详细设计说明见：
 
 - [virtual_patient_generation_scheme.md](/Users/loki/Workspace/GraduationDesign/docs/virtual_patient_generation_scheme.md)
+- [simulator_runtime_call_chain_guide.md](/Users/loki/Workspace/GraduationDesign/docs/simulator_runtime_call_chain_guide.md)
 
 当前相关核心文件包括：
 
 - 更详细的目录说明见：[simulator/README.md](/Users/loki/Workspace/GraduationDesign/simulator/README.md)
-- [simulator/case_schema.py](/Users/loki/Workspace/GraduationDesign/simulator/case_schema.py)
-- [simulator/generate_cases.py](/Users/loki/Workspace/GraduationDesign/simulator/generate_cases.py)
-- [simulator/evidence_family_catalog.py](/Users/loki/Workspace/GraduationDesign/simulator/evidence_family_catalog.py)
-- [simulator/graph_case_generator.py](/Users/loki/Workspace/GraduationDesign/simulator/graph_case_generator.py)
-- [simulator/patient_agent.py](/Users/loki/Workspace/GraduationDesign/simulator/patient_agent.py)
-- [simulator/replay_engine.py](/Users/loki/Workspace/GraduationDesign/simulator/replay_engine.py)
-- [simulator/benchmark.py](/Users/loki/Workspace/GraduationDesign/simulator/benchmark.py)
-- [simulator/path_cache_builder.py](/Users/loki/Workspace/GraduationDesign/simulator/path_cache_builder.py)
+- [simulator/cases](/Users/loki/Workspace/GraduationDesign/simulator/cases)
+- [simulator/patient](/Users/loki/Workspace/GraduationDesign/simulator/patient)
+- [simulator/replay](/Users/loki/Workspace/GraduationDesign/simulator/replay)
+- [simulator/benchmarking](/Users/loki/Workspace/GraduationDesign/simulator/benchmarking)
+- [simulator/audit](/Users/loki/Workspace/GraduationDesign/simulator/audit)
+- [simulator/catalog](/Users/loki/Workspace/GraduationDesign/simulator/catalog)
+- [simulator/cache](/Users/loki/Workspace/GraduationDesign/simulator/cache)
+- 顶层兼容壳仍保留：
+  - [simulator/case_schema.py](/Users/loki/Workspace/GraduationDesign/simulator/case_schema.py)
+  - [simulator/generate_cases.py](/Users/loki/Workspace/GraduationDesign/simulator/generate_cases.py)
+  - [simulator/patient_agent.py](/Users/loki/Workspace/GraduationDesign/simulator/patient_agent.py)
+  - [simulator/replay_engine.py](/Users/loki/Workspace/GraduationDesign/simulator/replay_engine.py)
+  - [simulator/benchmark.py](/Users/loki/Workspace/GraduationDesign/simulator/benchmark.py)
 - [baselines/llm_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/baselines/llm_consultation_brain.py)：纯 LLM 医生 baseline，实现 `start_session / process_turn / finalize`
 - [baselines/llm_text_rag_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/baselines/llm_text_rag_consultation_brain.py)：文本稀疏 RAG 医生 baseline，在纯 LLM 契约上叠加 `retrieved_documents`
 - [baselines/llm_kg_rag_consultation_brain.py](/Users/loki/Workspace/GraduationDesign/baselines/llm_kg_rag_consultation_brain.py)：KG RAG 医生 baseline，在纯 LLM 契约上叠加 `retrieved_kg_context`
@@ -377,7 +387,7 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 - `run_batch_replay.py` 当前已支持单病例 `failed` 语义：若 `brain` 抛出 LLM 领域错误，该病例会带 `error.code / error.stage / error.message / error.attempts` 落盘，其他病例继续运行；遇到 `APIConnectionError / Connection error` 时，batch 外层会在整例重试前先做一次冷却退避，并把累计冷却时长写入 `timing.batch_retry_cooldown_seconds_total`
 - `run_batch_replay.py` 默认支持断点续跑：若输出目录里已经有 `replay_results.jsonl`，会自动跳过已完成病例；如需强制重跑，可加 `--no-resume`
 - `run_batch_replay.py` 当前会记录病例级耗时信息：每个病例的 opening、初始 brain、逐轮 patient/brain、finalize 和总耗时会写入 `replay_results.jsonl`，并在 `benchmark_summary.json` / `status.json` 中聚合 `timing_summary`；同一份 `replay_results.jsonl` 还会补落 `case_type / case_qc_status / benchmark_qc_status / case_qc_reasons`，便于全量跑完后直接切 `eligible` 和各病例类型子集；运行日志对亚秒级耗时会保留更高精度，避免全部显示成 `0.00`
-- `simulator/replay_engine.py` 当前会先累计原始浮点耗时，再在落盘前统一 round；这能减少毫秒级病例里 `brain_turn_seconds_total` 被逐轮 round 放大的误导
+- `simulator/replay/runtime.py` 当前会先累计原始浮点耗时，再在落盘前统一 round；这能减少毫秒级病例里 `brain_turn_seconds_total` 被逐轮 round 放大的误导
 - `run_batch_replay.py` 当前在 `Ctrl+C` / `SIGTERM` 中断时会先写入 `status.json` / `run.log`，再强制退出进程，避免 `ThreadPoolExecutor` 的并发 worker 持续占用大量内存
 - `run_batch_replay.py` 当前输出的 `final_report.metadata` 已做轻量化处理，不再携带原始 `search_tree` 和 `last_search_result` 运行态对象，以降低批量回放的内存占用
 - `Pure LLM` baseline 当前已将模型输出契约收紧为 `decision / question_text / target_name / top3 / reasoning / compiled / final_answer`；`question_group / evidence_cost / decision_confidence` 改为程序端推断，减轻结构化输出负担，同时保留 replay 侧的动作分组与成本分析字段

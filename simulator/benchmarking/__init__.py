@@ -1,15 +1,12 @@
-"""保留旧导入路径的 benchmark 兼容壳。"""
+"""封装 benchmark 摘要、cohort 报告与 replay 分析报表。"""
 
-from __future__ import annotations
-
-from .benchmarking.metrics import benchmark_summary_to_payload, summarize_benchmark
-from .benchmarking.reports import (
+from .metrics import benchmark_summary_to_payload, summarize_benchmark
+from .reports import (
     build_benchmark_cohort_summary,
     build_non_completed_case_report,
     build_replay_analysis_summary,
 )
-from .benchmarking.types import BenchmarkSummary
-
+from .types import BenchmarkSummary
 
 __all__ = [
     "BenchmarkSummary",
