@@ -1,7 +1,7 @@
 """测试 observed evidence anchor 的候选重排与模拟证据隔离。"""
 
-from brain.evidence_anchor import EvidenceAnchorAnalyzer
-from brain.types import EvidenceState, HypothesisScore, SessionState
+from brain.state.anchors import EvidenceAnchorAnalyzer
+from brain.state import EvidenceState, HypothesisScore, SessionState
 
 
 # 真实病原体阳性应形成 strong anchor，并把对应疾病压过只靠泛证据的候选。

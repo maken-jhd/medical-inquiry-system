@@ -1,7 +1,7 @@
 """测试搜索树的节点扩展与回传统计。"""
 
-from brain.search_tree import SearchTree
-from brain.types import TreeNode
+from brain.search.tree import SearchTree
+from brain.state import TreeNode
 
 
 # 验证搜索树能创建父子关系并正确回传奖励。

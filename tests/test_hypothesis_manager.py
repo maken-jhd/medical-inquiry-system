@@ -1,7 +1,7 @@
 """测试 A2 假设管理中的竞争性重排、极性计分与 Top-3 候选保留。"""
 
-from brain.hypothesis_manager import HypothesisManager, HypothesisManagerConfig
-from brain.types import EvidenceState, HypothesisCandidate, HypothesisScore, PatientContext
+from brain.search import HypothesisManager, HypothesisManagerConfig
+from brain.state import EvidenceState, HypothesisCandidate, HypothesisScore, PatientContext
 
 
 class FakeLlmClient:

@@ -1,8 +1,8 @@
 """测试候选假设 belief mixture 的归一化与输出偏置效果。"""
 
-from brain.response_transition_model import ResponseTransitionModelConfig, StatisticalResponseTransitionModel
-from brain.transition_statistics import TransitionStatistics, build_normalized_hypothesis_belief
-from brain.types import HypothesisScore, MctsAction, SessionState
+from brain.search import ResponseTransitionModelConfig, StatisticalResponseTransitionModel
+from brain.search import TransitionStatistics, build_normalized_hypothesis_belief
+from brain.state import HypothesisScore, MctsAction, SessionState
 
 
 # 验证 score 会被归一化成稳定的 top-k belief 权重。

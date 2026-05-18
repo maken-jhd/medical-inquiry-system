@@ -17,7 +17,7 @@ REPO_ROOT = CURRENT_DIR.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from brain.errors import BrainDomainError
+from brain.shared import BrainDomainError
 from frontend.config_loader import (
     apply_config_to_environment,
     build_brain_config_overrides,

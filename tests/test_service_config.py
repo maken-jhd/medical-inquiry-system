@@ -3,11 +3,11 @@
 import json
 from pathlib import Path
 
-from brain.response_transition_model import StatisticalResponseTransitionModel
-from brain.reward_model import BeliefAwareRolloutRewardModel
-from brain.search_tree import SearchTree
+from brain.search import StatisticalResponseTransitionModel
+from brain.search import BeliefAwareRolloutRewardModel
+from brain.search.tree import SearchTree
 from brain.service import build_default_brain, load_brain_config
-from brain.types import MctsAction
+from brain.state import MctsAction
 
 
 class FakeAvailableLlmClient:

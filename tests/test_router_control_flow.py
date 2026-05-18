@@ -1,7 +1,7 @@
 """测试上一轮动作解释是否真正驱动下一阶段路由。"""
 
-from brain.router import ReasoningRouter
-from brain.types import HypothesisScore, MctsAction, PendingActionResult, SessionState
+from brain.search import ReasoningRouter
+from brain.state import HypothesisScore, MctsAction, PendingActionResult, SessionState
 
 
 # 验证存在且回答清晰且主假设优势明显时会进入终止阶段。

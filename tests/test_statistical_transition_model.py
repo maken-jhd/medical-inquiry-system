@@ -1,12 +1,12 @@
 """测试 statistical transition model 的分支输出与安全 fallback 行为。"""
 
-from brain.response_transition_model import (
+from brain.search import (
     HeuristicResponseTransitionModel,
     ResponseTransitionModelConfig,
     StatisticalResponseTransitionModel,
 )
-from brain.transition_statistics import TransitionStatistics
-from brain.types import HypothesisScore, MctsAction, SessionState
+from brain.search import TransitionStatistics
+from brain.state import HypothesisScore, MctsAction, SessionState
 
 
 def _build_statistics() -> TransitionStatistics:

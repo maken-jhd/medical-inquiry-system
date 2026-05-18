@@ -1,8 +1,8 @@
 """测试 belief-aware reward model 会利用候选 belief 与分支区分度。"""
 
-from brain.response_transition_model import TransitionBranch
-from brain.reward_model import BeliefAwareRolloutRewardModel, RolloutRewardModelConfig
-from brain.types import HypothesisScore, MctsAction, SessionState
+from brain.search import TransitionBranch
+from brain.search import BeliefAwareRolloutRewardModel, RolloutRewardModelConfig
+from brain.state import HypothesisScore, MctsAction, SessionState
 
 
 def _candidate_hypotheses() -> list[HypothesisScore]:

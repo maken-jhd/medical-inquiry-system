@@ -1,6 +1,6 @@
 """测试 verifier acceptance profile prompt 构造。"""
 
-from brain.llm_client import LlmClient
+from brain.integrations import LlmClient
 
 
 def test_verifier_acceptance_profiles_are_distinct() -> None:

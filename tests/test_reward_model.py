@@ -1,8 +1,8 @@
 """测试 rollout reward model 的基础拆解与惩罚项。"""
 
-from brain.response_transition_model import TransitionBranch
-from brain.reward_model import HeuristicRolloutRewardModel
-from brain.types import MctsAction, PatientContext, SessionState
+from brain.search import TransitionBranch
+from brain.search import HeuristicRolloutRewardModel
+from brain.state import MctsAction, PatientContext, SessionState
 
 
 # 验证 reward model 会输出 breakdown，并对高成本与重复动作施加惩罚。

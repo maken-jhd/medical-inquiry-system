@@ -2,7 +2,7 @@
 
 from collections import deque
 
-from brain.errors import LlmOutputInvalidError
+from brain.shared import LlmOutputInvalidError
 from simulator.case_schema import SlotTruth, VirtualPatientCase
 from simulator.patient_agent import VirtualPatientAgent
 from simulator import replay_engine

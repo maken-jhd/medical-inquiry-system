@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from brain.errors import LlmEmptyExtractionError, LlmUnavailableError
-from brain.med_extractor import MedExtractor
+from brain.shared import LlmEmptyExtractionError, LlmUnavailableError
+from brain.turn import MedExtractor
 
 
 def test_med_extractor_uses_llm_for_long_text() -> None:

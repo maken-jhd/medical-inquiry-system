@@ -6,7 +6,7 @@ import pytest
 
 from baselines.kg_rag_retriever import KgRagRetriever
 from baselines.llm_baseline_types import BaselineObservedFeature
-from brain.types import HypothesisCandidate
+from brain.state import HypothesisCandidate
 
 
 class FakeNeo4jClient:

@@ -9,8 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from brain.action_builder import ActionBuilder
-from brain.types import MctsAction
+from brain.search import ActionBuilder
+from brain.state import MctsAction
 from frontend.ui_adapter import (
     normalize_backend_turn,
     translate_guarded_block,

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from brain.entity_linker import EntityLinker
-from brain.llm_client import LlmClient
-from brain.med_extractor import MedExtractor
+from brain.integrations import EntityLinker
+from brain.integrations import LlmClient
+from brain.turn import MedExtractor
 
 from .kg_rag_retriever import KgRagCandidateDisease, KgRagHit, KgRagQueryResult, KgRagRetriever
 from .llm_baseline_types import BaselineFinalDecision, BaselineObservedFeature, BaselineSessionState

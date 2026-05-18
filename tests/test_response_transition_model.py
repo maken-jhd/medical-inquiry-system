@@ -1,7 +1,7 @@
 """测试 rollout transition model 的基础分支概率行为。"""
 
-from brain.response_transition_model import HeuristicResponseTransitionModel
-from brain.types import MctsAction, SessionState
+from brain.search import HeuristicResponseTransitionModel
+from brain.state import MctsAction, SessionState
 
 
 # 验证启发式 transition model 输出的是合法概率分布。

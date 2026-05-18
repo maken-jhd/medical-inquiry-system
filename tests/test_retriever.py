@@ -1,7 +1,7 @@
 """测试图谱检索器的 R1 / R2 基础行为。"""
 
-from brain.retriever import GraphRetriever, RetrievalConfig
-from brain.types import EvidenceState, HypothesisScore, KeyFeature, SessionState, SlotState
+from brain.search import GraphRetriever, RetrievalConfig
+from brain.state import EvidenceState, HypothesisScore, KeyFeature, SessionState, SlotState
 
 
 class FakeNeo4jClient:

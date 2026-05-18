@@ -1,7 +1,7 @@
 """测试轨迹评估器的分组评分与最佳答案选择。"""
 
-from brain.trajectory_evaluator import TrajectoryEvaluator, TrajectoryEvaluatorConfig
-from brain.types import HypothesisScore, PatientContext, ReasoningTrajectory
+from brain.search import TrajectoryEvaluator, TrajectoryEvaluatorConfig
+from brain.state import HypothesisScore, PatientContext, ReasoningTrajectory
 
 
 # 验证轨迹评估器会优先选择轨迹数量更多且得分更高的答案。

@@ -1,7 +1,7 @@
 """测试 verifier-only 最终接受控制器。"""
 
-from brain.acceptance_controller import VerifierAcceptanceController
-from brain.types import FinalAnswerScore, SessionState
+from brain.acceptance import VerifierAcceptanceController
+from brain.state import FinalAnswerScore, SessionState
 
 
 def _answer(metadata: dict) -> FinalAnswerScore:

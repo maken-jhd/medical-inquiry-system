@@ -1,9 +1,9 @@
 """测试 belief state signature 的稳定性与区分度。"""
 
-from brain.mcts_engine import MctsConfig, MctsEngine
-from brain.search_tree import SearchTree
-from brain.state_signature import BeliefStateSignatureBuilder, StateSignatureConfig
-from brain.types import MctsAction, SessionState, SlotState, TreeNode
+from brain.search import MctsConfig, MctsEngine
+from brain.search.tree import SearchTree
+from brain.state.signature import BeliefStateSignatureBuilder, StateSignatureConfig
+from brain.state import MctsAction, SessionState, SlotState, TreeNode
 
 
 def _build_state(session_id: str) -> SessionState:

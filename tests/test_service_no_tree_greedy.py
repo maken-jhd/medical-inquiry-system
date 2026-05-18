@@ -2,10 +2,10 @@
 
 from types import SimpleNamespace
 
-from brain.action_builder import ActionBuilder
+from brain.search import ActionBuilder
 from brain.service import BrainDependencies, ConsultationBrain, RepairPolicyConfig, SearchPolicyConfig
-from brain.state_tracker import StateTracker
-from brain.types import FinalAnswerScore, HypothesisScore, PatientContext
+from brain.state.tracker import StateTracker
+from brain.state import FinalAnswerScore, HypothesisScore, PatientContext
 
 
 class StaticRetriever:

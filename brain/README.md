@@ -1,455 +1,179 @@
 # brain
 
-`brain/` 目录承载第二阶段“问诊大脑”的核心代码。它建立在第一阶段已经完成的知识图谱底座之上，负责会话状态管理、图谱检索、候选动作生成、提问决策、终止判断与结果汇总。
-
-当前这一层的实现路线已经从最初的“FSM + DFS 追问”转向更接近论文的方法：
-
-- `A1`：核心症状提取
-- `A2`：假设生成
-- `A3`：证据验证
-- `pending action interpretation`：统一消化上一轮提问对应的患者回答
-- 外层再结合 `UCT`、局部 `Simulation` 与代码级路由
-
-当前默认实现已经具备下面这些关键特征：
-
-- `run_reasoning_search()` 会真正执行多次 `select -> expand -> simulate -> backpropagate`
-- `select_leaf()` 已按 tree policy 沿树向下选择，而不是简单摊平叶子排序
-- `rollout_from_tree_node()` 已支持浅层多步 rollout，并会显式记录 `A3 -> PENDING_ACTION -> ROUTE`
-- `process_turn()` 当前按“统一解释 -> generic merge -> pending-action-specific merge -> A1 / A2 / A3 -> verifier / repair”组织主流程
-- `route_after_pending_action` 现在主要负责把上一轮回答重新路由回 `A1 / A2 / A3 / FALLBACK`，最终 `completed` 不再由旧 `STOP` 路由直接决定
-- 默认构造已真正消费 [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml)
-
-当前抽取与解释链路还有一个新的固定约定：
-
-- 长文本抽取与解释采用 `LLM-first`：`MedExtractor`、`turn_interpreter`、`A1`、`exam_context` 不再静默退回规则词典
-- 仅保留极薄的确定性层：`有 / 没有 / 不太清楚` 这类短答仍可直接短路，避免每轮都支付一次 LLM 成本
-- `LLM` 结构化调用统一由 [llm_client.py](/Users/loki/Workspace/GraduationDesign/brain/llm_client.py) 负责一次重试；仍失败时抛出结构化领域错误，而不是伪装成正常问诊结果
-- 名称归一化集中收口到 [normalization.py](/Users/loki/Workspace/GraduationDesign/brain/normalization.py)，位置固定在“LLM 输出之后、Neo4j / EntityLinker 之前”
-- 默认构造当前要求 `llm_available=true`；如果本机未配置可用 LLM，`build_default_brain_from_env()` 会尽早报错，而不是进入“半规则半模型”的模糊状态
-- `process_turn()` 当前已切到“单轮只解释一次”的统一入口：
-  - 每轮先调用 `turn_interpreter`
-  - 再由同一份 `mentions` 同时派生 `PatientContext`、`A1 key_features`、`pending_action_result` 和会话级 `mention_context`
-  - 不再对同一句患者回答分别跑多套长文本解释器
-- 当前统一语义模型不再表达“医学 certainty”：
-  - `MedExtractor` 只输出患者提及项 `mention_state = present / absent / unclear`
-  - `A1` 只输出值得进入首轮检索的 `key_features + selection_decision`
-  - `pending_action / slot / evidence` 统一使用 `resolution = clear / hedged / unknown` 表达“当前回答是否清晰”
-  - 下游消费当前优先读取 `polarity`：
-    - `router` 优先按 `present / absent / unclear` 决定下一阶段
-    - `hypothesis_manager` 优先按 `EvidenceState.polarity` 做增减分
-    - `report_builder` 与展示侧会显式暴露 `polarity` 和会话级 `mention_context`
-
-当前需要明确区分三种工作模式：
-
-- `interactive`：交互式问诊模式，围绕当前会话生成下一问
-- `search`：论文风格的局部树搜索模式，围绕多个候选假设做 rollout
-- `fallback`：当 KG 或搜索不可靠时退回启发式选择器
-
-## 当前主线的近期校准重点
-
-当前 `modular_v2 + statistical transition + belief-aware reward + relaxed calibration` 主线，最近一轮没有继续扩展新的搜索策略，而是集中修两类已定位的问题：
-
-- `ranking-stage flip`
-  - 正确答案已经进入 Top-3，但 final answer aggregation 把 Top-1 排错
-- `Top-3 coverage loss`
-  - 候选还分散时，前 1~2 轮对 `lab / pathogen / detail` 的偏好略强，导致 gold 被过早挤出 Top-3
-
-因此当前实现里可以重点关注两层轻量校准：
-
-- [reward_model.py](/Users/loki/Workspace/GraduationDesign/brain/reward_model.py)
-  - belief-aware reward 新增 stage-aware coverage control
-  - 前期更偏向 coverage preservation，后期再恢复更强的区分性收缩
-- [trajectory_evaluator.py](/Users/loki/Workspace/GraduationDesign/brain/trajectory_evaluator.py)
-  - final ranking 新增 answer-specific support / scope consistency / multi-path consensus 等稳定化项
-  - 同时限制只靠单条尖锐路径抬高的脆弱答案组
-
-## 当前 statistical transition 的近期校准重点
-
-当前 `StatisticalResponseTransitionModel` 不再把离线统计表当成对 heuristic 的刚性替代，而是改成了更保守的 hybrid 形态：
-
-- 先继续使用 `min_total_count` 做 bucket 级 backoff，避免 1~2 条样本直接进入高优先级统计层
-- 再按 `total_count + backoff_level` 估计 statistical confidence，得到本轮混合权重 `λ`
-- 最终分支概率采用：
-  - `P_final = λ * P_statistical + (1 - λ) * P_heuristic`
-- 因此 statistical 当前更像：
-  - 高置信统计时的增益项
-  - 低置信统计时的可解释弱修正
-  - heuristic baseline 仍然是默认安全网
-
-## 目录职责
-
-`brain/` 当前主要负责以下几类工作：
-
-- 定义第二阶段统一的数据结构
-- 维护患者会话状态
-- 管理会话内存 DAG
-- 对接 Neo4j 图谱做 `R1 / R2` 检索
-- 生成候选动作并决定下一问
-- 使用 `UCT` 在候选动作中做动态平衡选择
-- 使用局部 `Simulation` 预演动作收益
-- 根据统一提及结果与上一轮动作解释执行路由和回溯
-- 生成阶段性报告或最终报告
-
-## 当前文件说明
-
-### 1. 类型与基础结构
-
-- [types.py](/Users/loki/Workspace/GraduationDesign/brain/types.py)
-  - 定义第二阶段通用数据结构。
-  - 包括患者提及项、槽位状态、回答清晰度、患者上下文、实体链接、候选假设、候选动作、搜索树节点、轨迹与 `pending_action_result / pending_action_decision`。
-
-- [llm_client.py](/Users/loki/Workspace/GraduationDesign/brain/llm_client.py)
-  - 统一封装第二阶段大模型结构化调用。
-  - 当前供 `MedExtractor`、`turn_interpreter`、`A1` 抽取、`A2` 假设排序、`exam_context` 解释和轨迹 verifier 复用。
-  - 当前会统一处理结构化 prompt 的单次重试，并把超时、输出非法、空抽取等情况转换为显式领域错误。
-  - 当前 `turn_interpreter` prompt 已明确区分高成本检查/疾病定义性证据的“未检查、没听说”和“结果明确阴性”，前者按 `unclear` 处理，避免缺槽位回答被误写成 hard negative。
-
-- [errors.py](/Users/loki/Workspace/GraduationDesign/brain/errors.py)
-  - 定义 LLM-first 链路下统一对外暴露的领域错误。
-  - 当前包含 `llm_unavailable`、`llm_timeout`、`llm_output_invalid`、`llm_empty_extraction`、`llm_stage_failed`。
-
-- [normalization.py](/Users/loki/Workspace/GraduationDesign/brain/normalization.py)
-  - 集中维护 alias、canonical name 和常见口语映射。
-  - 当前供 `MedExtractor`、`A1`、`exam_context` 和 `EntityLinker` 共用，避免各模块各自维护一套零散词典。
-  - 当前新增 `expand_graph_mentions()`，用于把患者口语表达扩展成若干图谱候选 surface form，例如 CD4 低值、HIV RNA 阳性、下肢/双足发麻、药物使用和腹型肥胖等接口层表达。
-  - 当前进一步补充高频通用医学表达扩展，例如高烧/高热、免疫力低下、BDG/β-D 葡聚糖升高、乙肝/HBV 感染、血糖偏高和甘油三酯偏高；这些扩展只服务于“患者表达 -> 图谱节点”的实体链接，不参与疾病推理规则。
-
-- [state_tracker.py](/Users/loki/Workspace/GraduationDesign/brain/state_tracker.py)
-  - 负责维护会话中的槽位状态。
-  - 支持三态记录（阳性 / 阴性 / 未知）以及 `resolution = clear / hedged / unknown` 的回答清晰度维度。
-  - 当前也负责保存轨迹列表与绑定搜索树。
-  - 当前已为 rollout / reroot 提供轻量状态快照，避免把 `search_tree`、`last_search_result` 等重量级运行时对象一并 deepcopy。
-  - 当前还会维护 `mention_context`，并按 `present > unclear > absent` 的优先级合并跨轮次提及项。
-
-- [evidence_anchor.py](/Users/loki/Workspace/GraduationDesign/brain/evidence_anchor.py)
-  - 新增 observed anchor 计算层，只消费真实会话中的 `slots / evidence_states`。
-  - 当前按 evidence role 与 anchor scope 两层计算锚点：role 区分 `disease_specific_anchor / definition_anchor / phenotype_support / risk_or_comorbidity / background_context`，scope 区分 `exact_scope / family_scope / phenotype_scope / background_scope / competing_scope`。
-  - 会把病原体、疾病特异化验/影像、定义性 detail 的真实阳性证据分为 `strong_anchor / definition_anchor / family_anchor / provisional_anchor`；只有精确 scope 才能形成强锚点，同病原但缺少部位/亚型信息时降为 `family_anchor`。
-  - HIV、CD4、发热、免疫抑制、年龄、既往史、HBV/HCV 共病背景等高连接证据会降为 `background_supported`；`blood_count` 不再因为 family tag 被全局升格为 definition anchor。
-  - 会过滤 rollout / simulation 来源的模拟阳性证据，并把明确否定的定义性检查结果标为 `negative_anchor`，供 A2 排序、repair 和最终评估共用。
-  - anchor 必须命中候选疾病自己的 KG evidence payload；仅带有历史 `hypothesis_id` 但没有 payload 匹配的证据不会给该候选加锚点。
-  - 当真实会话直接命中候选疾病节点本身时，会按疾病自身强锚点参与 A2 排序，避免被 CD4/HIV 等背景证据压住。
-  - 当前会把候选疾病名和真实证据名压成 `candidate_scope_facets / observed_scope_facets`，用于区分泛疾病、部位特异疾病、IRIS 与播散型疾病；真实证据作用域不足时会写入 `scope_mismatch_score / generic_scope_penalty / missing_scope_facets`。
-  - minimum evidence family coverage 只统计 `present + clear` 的已观察证据，`absent / unclear / hedged` 不会补足 coverage。
-  - 当前额外计算 `low_cost_supporting_evidence / low_cost_support_families / low_cost_profile_satisfied`：只有 `present + clear`、低成本、非背景、跨多个证据族的线索才会进入 low-cost evidence profile，供没有强检查锚点的诊断路径作为保守放行依据。
-
-- [session_dag.py](/Users/loki/Workspace/GraduationDesign/brain/session_dag.py)
-  - 负责维护单个患者会话的内存 DAG。
-  - 当前主要承担主题分支管理与节点开闭状态维护，不再是唯一调度器。
-
-- [neo4j_client.py](/Users/loki/Workspace/GraduationDesign/brain/neo4j_client.py)
-  - 对 Neo4j 查询做轻量封装。
-  - 供检索器和后续其他图谱查询逻辑复用。
-
-- [search_tree.py](/Users/loki/Workspace/GraduationDesign/brain/search_tree.py)
-  - 实现显式搜索树。
-  - 当前负责搜索节点管理、父子关系维护与 reward 回传。
-
-### 2. 检索、选择与结果汇总
-
-- [retriever.py](/Users/loki/Workspace/GraduationDesign/brain/retriever.py)
-  - 负责和知识图谱交互，提供候选节点、候选假设和验证证据的查询入口。
-  - 当前已经实现论文风格的 `R1 / R2` 双向检索基础版。
-  - `R1` 已增加方向语义权重与实体链接相似度融合。
-  - `R1` 当前会额外估计 `disease_specific_anchor_score`，让病原体、HIV RNA、关键检查结果等更能区分目标疾病的强证据，压过 CD4/HIV 背景这类共享泛证据。
-  - 强 observed anchor 进入后，`R1` 还会按病原/作用域关键词召回同族 sibling 疾病，避免 CMV、结核、隐球菌等同病原精细诊断因 top-k 太窄缺席 A2。
-  - `R2` 已支持方向优先、已问节点过滤与问题类型提示。
-
-- [question_selector.py](/Users/loki/Workspace/GraduationDesign/brain/question_selector.py)
-  - 负责对候选提问节点进行排序。
-  - 当前已经降级为 `cold-start / no-search` 的 fallback 选择器。
-
-- [acceptance_controller.py](/Users/loki/Workspace/GraduationDesign/brain/acceptance_controller.py)
-  - 当前替代历史 `stop_rules.py` 主链路，诊断 completed 只由 verifier-like 信号控制。
-  - 若 `verifier_mode` 是 `llm_verifier` 或 `observed_evidence_final_evaluator`，且 `verifier_should_accept=true`，返回 `final_answer_accepted`。
-  - 若 verifier 明确拒绝，返回 `verifier_rejected_stop`，并保留 `repair_reject_reason / path_control_reason`，让 repair 继续补关键证据。
-  - 不再读取 `BRAIN_ACCEPTANCE_PROFILE`，也不再叠加 turn、trajectory、anchor、consistency、agent_eval、final_score 等结构化 stop 阈值。
-
-- [report_builder.py](/Users/loki/Workspace/GraduationDesign/brain/report_builder.py)
-  - 用于生成结构化阶段报告、搜索报告和最终报告。
-  - 当前会额外输出 `trajectory_summary`、`why_this_answer_wins`、`evidence_for_best_answer` 等解释字段。
-  - 当前最终报告也会显式输出 `confirmed_slots[].polarity` 与会话级 `mention_context`，便于前端和 replay 直接展示统一提及语义。
-
-- [service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
-  - 第二阶段的总编排层。
-  - 当前已经串联 `turn_interpreter -> mention merge -> A1 -> A2 -> R2/A3 -> rollout -> report` 的搜索闭环。
-  - 当前也是读取 [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml) 并构造默认依赖的入口。
-  - 当前 `load_brain_config()` 也支持读取环境变量 `BRAIN_CONFIG_PATH`，可在 benchmark 中直接切到 [configs/brain_benchmark_opening_only.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain_benchmark_opening_only.yaml)、[configs/brain_benchmark_no_repair.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain_benchmark_no_repair.yaml) 或 [configs/brain_benchmark_greedy_clean.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain_benchmark_greedy_clean.yaml)，避免手改默认配置。
-  - 当前 benchmark 已支持 `search_policy.root_action_mode = mcts | greedy | no_tree_greedy`：
-    - `mcts`：完整树搜索
-    - `greedy`：仍保留树搜索，但根动作只按 rollout 后的局部先验贪心选择
-    - `no_tree_greedy`：完全跳过 select/expand/rollout/backprop，只按当前候选态动作先验选下一问
-  - 当前默认构造还支持顶层 `search_impl = legacy | modular_v2`：
-    - `legacy`：继续沿用旧版 inline heuristic MCTS
-    - `modular_v2`：启用新的 transition model / reward model / belief signature 骨架
-  - 当前 `modular_v2` 的 `transition_model.type` 已支持：
-    - `heuristic`：沿用上一轮拆出来的启发式三分支分布
-    - `statistical`：基于 graph cases + replay 统计、再结合 top-k hypothesis belief mixture 的条件化分支概率；当前已改成 count-aware + backoff-aware + heuristic fallback 的 hybrid 版本
-  - 当前 `modular_v2` 的 `reward_model.type` 已支持：
-    - `heuristic_v2`：保留原有 surrogate 公式，作为回归基线
-    - `belief_aware_v1`：显式消费 `candidate_hypotheses + belief_components`，并近似估计 branch 后的 `entropy / top1-top2 margin / acceptance risk`
-  - 当前 acceptance 还新增了一层轻量 `reward confidence proxy` 校准：
-    - 只在 `llm_verifier` 已想接受时生效
-    - 只消费 `belief_margin_proxy / acceptance_risk_proxy / branch_support_quality`
-    - 目标是压低 wrong accepted，而不是重写 verifier / stop 体系
-  - 当前 `search_policy` 还支持三项 clean greedy benchmark 开关：
-    - `disable_verifier_repair_for_greedy`
-    - `disable_early_exam_context_rescue_for_greedy`
-    - `disable_low_cost_explorer_for_greedy`
-  - 它们只在 `root_action_mode=greedy` 时生效，用于显式关闭 greedy 的 root 后处理覆盖器，避免 `repair / early exam rescue / low-cost explorer` 把 greedy root action 拉平。
-  - `process_turn()` 当前已按“统一解释本轮回答 -> 消化上一轮 pending action -> 判断本轮阶段 -> search / verifier / repair -> 输出下一问或最终报告”的顺序补充分段中文注释，便于顺着源码阅读控制流。
-  - 当前会先把可信实体链接回填到 `mention.node_id / normalized_name`，再派生 `PatientContext` 和 `A1`，保证 opening 证据、slot 更新、R1 和 mention_context 使用同一图谱锚点。
-  - 当前会把 `exam_context` 回答中的检查名与结果原文再次送入实体链接；可信命中 `LabFinding / ImagingFinding / Pathogen` 时直接写入 slot/evidence_state，且不再围绕 `__exam_context__::general` 重复追问。
-  - 当前第一批改造已落地两条动作仲裁规则：repair 动作在仍可问时不会再被 low-cost explorer 覆盖；前 2 轮且候选明显 exam-driven 时，会优先拉起 `collect_general_exam_context / collect_exam_context` 入口。
-  - 当前也支持在 benchmark 中暂时关闭 `enable_best_repair_action`，并通过 `protect_search_root_action_from_low_cost_explorer` 暴露 search root 本身，避免 low-cost explorer 立刻覆盖 `default_search_action / no_tree_greedy` 的下一问。
-  - 当前病原体阳性、影像/化验阳性、CD4 低值等强证据进入后，会设置 `force_a2_refresh` 和 `force_tree_refresh`，促使下一步重新执行 A2 并围绕新强证据收束。
-  - 当前会在 A2、repair、stop 前刷新 `observed_anchor_index`，让真实病原体/检查强锚点、同族锚点和背景证据分别进入候选排序；rollout 模拟阳性只保留为路径推演，不再污染真实 confirmed evidence。
-  - 当前第三批改造已把 `scope cluster rerank` 前移到 A2 observed-anchor rerank：`exact_scope / family_scope / generic` 会通过 `scope_cluster_bonus` 更早影响候选顺位，不再主要依赖 acceptance guard 兜底。
-  - 当前在证据揭示不足或 top 候选只靠背景支持时，会启用 low-cost explorer，从 top3 候选的 R2 中主动选择患者可直接回答、非背景且有区分度的问题。
-  - 当前 `search_report` / `final_reasoning_report` 会额外输出 `search_metadata`，可直接复盘 `selected_action_source`、early exam rescue 与 repair-explorer 仲裁结果。
-  - 当前新增两层轻量防空转保护：同一句问法不会再连续两轮原样重复；高成本检查若刚收到“没做过/阴性”反馈，会对同一家族问法做短期冷却。
-  - 当前第二批改造已把真实证据反馈、`exam_context` 反馈与 rollout 模拟反馈统一切到多 `hypothesis` fan-out 更新，并把 turn 级反馈摘要写入 `search_metadata.turn_evidence_feedback`。
-  - 当前第三批改造已把 `rollout_trajectory_count / answer_group_count / single_answer_group / rollout_branch_seed_counts` 写入 `search_metadata`，便于离线观察是否仍存在单答案塌缩。
-  - 当前 `missing_key_support` 在“当前答案零真实锚点 / 连续缺支持 / verifier 推荐高成本补缺但备选已有更强 observed anchor”时，会升级为 competition repair，而不是继续围绕当前错答案自修补。
-  - 当前 repair/action 从“追当前 top hypothesis”转为“补缺失证据角色”：背景证据支撑不足时优先寻找 `disease_specific_anchor / definition_anchor`，已有 `family_anchor / provisional_anchor` 时优先补 clear confirmation，存在更强 anchored alternative 时直接切向该候选。
-  - 当前会持久化 `repair_feedback_counts`：同一答案连续因为缺少关键支持、缺少真实 anchor 或轨迹不足被拒停时，后续 hypothesis 排序会逐轮增加降权；已有 observed anchor 的备选会获得更明确的 repair 抬分。
-  - 当前 verifier / repair 的主控制原因已收敛到 `missing_required_anchor / anchored_alternative_exists / hard_negative_key_evidence`；`strong_unresolved_alternative_candidates` 等细粒度原因继续保存在 metadata 中供复盘和消融使用。
-  - 当前 verifier 上下文会携带累计真实会话证据 `observed_session_evidence`，避免把 rollout 模拟路径里的阳性检查当作患者已经确认的事实。
-  - 当前会把检查、病原、影像、数值型 detail 的“没做过 / 没听说 / 没注意 / 不记得”统一后处理为 `unclear`；只有“阴性 / 未检出 / 未见异常 / 医生排除”等结果性否定才写成 `absent`。
-  - 当前若高成本检查连续两轮都只收到“没做过 / 没结果”类反馈，会优先退回低成本、定义性更强的证据问题，而不是继续围绕检查模板空转。
-  - 当 rollout 没有形成具体最终答案、或只形成 `UNKNOWN` 答案组时，当前会从 A2 候选态生成保守 `FinalAnswerScore`，避免 top hypothesis 已存在但 `best_answer=None`。
-  - 当 search/repair 仍没有下一问时，cold-start fallback 会先尝试扩展当前候选下仍可直接回答的低成本 R2 证据；只有没有低成本证据时，才退回全局冷启动问题，并降权 HIV/CD4/年龄等抽象背景探针。
-
-### 3. 核心解释与决策模块
-
-- [med_extractor.py](/Users/loki/Workspace/GraduationDesign/brain/med_extractor.py)
-  - 对齐论文中的 MedExtractor。
-  - 负责把患者原话拆成一般信息 `P` 和临床特征 `C`。
-  - 当前长文本只接受 LLM 结构化抽取；短答仍允许走极薄的 direct reply 规则。
-  - 当前会兼容真实观测到的 `clinical_features` 多种 payload 形态，如 `str / list[str] / dict-wrapped`，并统一收敛为提及项列表。
-
-- [evidence_parser.py](/Users/loki/Workspace/GraduationDesign/brain/evidence_parser.py)
-  - 对应 `A1` 与统一回答解释层。
-  - 当前主入口是 `interpret_turn()`，负责把患者回答统一解析成 `mentions`。
-  - 再由这些 `mentions` 派生首轮检索线索，并解释上一轮目标动作的回答结果。
-  - `A1` 当前只输出 `key_features + selection_decision`，不再输出 `uncertain_features / noise_features` 一类历史契约。
-  - 当前会输出 `supporting_span / negation_span / uncertain_span`，长回答统一走 `turn_interpreter`；`exam_context_interpretation` 仍保留给检查上下文动作。
-  - 当前对高成本检查 / 病原 / 定义性证据的否定短答，会优先交回 `turn_interpreter` prompt 做语义判断，避免“没做过检查”和“结果明确阴性”被同一个直通规则混在一起。
-  - 当前不再把长回答静默退回规则词典；LLM 失败会直接向上抛出领域错误。
-
-- [entity_linker.py](/Users/loki/Workspace/GraduationDesign/brain/entity_linker.py)
-  - 对齐论文里的实体链接与阈值过滤。
-  - 负责把 mention 对齐到图谱节点，并决定当前是否可信地启用 KG。
-  - 当前在入图前会先消费集中式 normalization 结果，减少 `艾滋病 -> HIV感染`、`咳嗽 -> 干咳` 这类名称不齐造成的漏连。
-  - 当前会对单个 mention 查询多个扩展 surface form，并在结果 metadata 中记录 `expanded_mentions / matched_mention / link_source / template_match`，便于排查患者表达到图谱节点的对接质量。
-
-- [hypothesis_manager.py](/Users/loki/Workspace/GraduationDesign/brain/hypothesis_manager.py)
-  - 对应 `A2` 假设生成。
-  - 负责整理由图谱检索得到的候选疾病，并维护主假设与备选假设。
-  - 当前已能结合患者上下文和证据类型做轻量重排。
-  - 若启用 LLM 排序，还会把 `supporting_features / conflicting_features / recommended_next_evidence` 写入 metadata。
-  - 当前会按 `evidence_node_ids / evidence_names / relation_types + observed anchor tier` 计算多候选反馈权重，不再只更新当前动作所属的单个 hypothesis。
-  - 当前还支持面向 Top-3 覆盖的轻量 candidate rerank：对 rank 4~8 且仍有真实支持的候选，可追加 `top3_rescue_bonus / rank_memory_bonus`，减少 gold 已召回却被挤出 Top-3 的情况。
-  - 若显式开启 `enable_evidence_supported_rerank`，候选 metadata 会记录 `positive_evidence_support_bonus / evidence_family_diversity_bonus / contradiction_penalty / old_rank / new_rank`，便于 replay 分析候选为什么被拉回或压下。
-  - 当前还会把患者在开场或历史回答里已经明确说过的证据，直接视为已确认事实：只要后续某个图谱证据节点与这些提及语义对上，就会自动补成 `evidence_state`，并从后续追问动作池中移除，避免“患者已经说了，系统还再问一遍”。
-  - 当前 repair 重排主要消费打薄后的 anchor-controlled 拒停原因，对缺少真实锚点、anchored alternative、硬反证和关键支持缺失分别施加不同分数调整。
-
-- [action_builder.py](/Users/loki/Workspace/GraduationDesign/brain/action_builder.py)
-  - 对应 `A3` 证据验证的动作生成层。
-  - 负责把图谱返回的验证证据转成“下一步可执行动作”。
-  - 当前已支持结合 competing hypotheses 估计 `discriminative_gain`。
-  - 当前也会消费 `recommended_next_evidence`，让动作更贴近鉴别诊断。
-  - 当前问句模板会按标签、`acquisition_mode` 与证据语义纠偏：眼底/头颅/胸部影像、HIV 相关抽血检查、呼吸道病原检查不再共用一刀切模板。
-  - 当前高成本检查聚合成 `collect_general_exam_context` 时，也会把推荐证据命中分、区分度和新颖度提到动作顶层，保证 repair scorer 真正读到 verifier 推荐缺口。
-  - 当前检查上下文已经带状态门控：`general` 已回答后不再生成 `collect_general_exam_context`，具体 `lab / imaging / pathogen` 已明确未做时会跳过对应高成本结果追问。
-
-- [router.py](/Users/loki/Workspace/GraduationDesign/brain/router.py)
-  - 对应上一轮动作解释后的代码级路由。
-  - 当前优先根据统一提及链路写入的 `polarity + resolution` 决定继续验证、回溯、切换假设或终止。
-  - 当前已支持把 `pending_action_result` 转换为显式 `PendingActionDecision`。
-
-### 4. 搜索与前瞻模块
-
-- [mcts_engine.py](/Users/loki/Workspace/GraduationDesign/brain/mcts_engine.py)
-  - 负责按 `UCT` 公式在候选动作和树节点中做动态选择。
-  - 当前已支持状态签名、tree policy、子节点扩展和 reward 回传。
-  - 当前也支持 `select_root_action_greedy()`，用于在 benchmark 中隔离根动作的贪心选择策略。
-  - 当前在 `search_impl=modular_v2` 下会通过 `state_signature_builder` 为 root / child 构造更接近 belief state 的签名，而不是继续只用 action path id。
-
-- [simulation_engine.py](/Users/loki/Workspace/GraduationDesign/brain/simulation_engine.py)
-  - 负责对候选动作做浅层局部预演。
-  - 当前会估算 `positive / negative / doubtful` 三种回答分支的收益。
-  - 当前已支持从树节点出发做浅层多步 rollout。
-  - rollout 内部的模拟证据反馈现在也复用多候选 fan-out 规则，避免路径评估只围绕当前 hypothesis 单点自嗨。
-  - 当前第三批已支持 `multi-branch rollout`：同一个 child action 至少保留 `positive + negative/doubtful` 两类 seed，并在低真实锚点但正向分支垄断时施加 `anti_collapse_penalty`。
-  - 当前在 `search_impl=modular_v2` 下，`SimulationEngine` 会改为依赖可插拔 `transition model + reward model + branch selection mode`，legacy inline heuristic 仍保留为回归基线。
-  - 当前还会把每步 selected branch 的 reward breakdown 压成 trajectory 级 proxy，例如：
-    - `belief_margin_proxy`
-    - `uncertainty_reduction_proxy`
-    - `acceptance_risk_proxy`
-    - `branch_support_quality`
-    - `top1_top3_separation_proxy`
-    - `competitor_elimination_proxy`
-    - `discriminative_support_quality`
-    - `alternative_preservation_proxy`
-    供最终 acceptance 做轻量校准。
-
-- [response_transition_model.py](/Users/loki/Workspace/GraduationDesign/brain/response_transition_model.py)
-  - 负责把当前动作和会话状态映射成 rollout 分支概率分布。
-  - 当前包含三类实现：
-    - `HeuristicResponseTransitionModel`
-    - `StatisticalResponseTransitionModel`
-    - `LearnedResponseTransitionModel` 占位接口
-  - `StatisticalResponseTransitionModel` 当前会先从 graph cases / replay 构建粗粒度条件统计，再用 top-k hypothesis belief mixture 计算 `P(y | s, a)`。
-  - 当前 statistical path 不再生硬覆盖 heuristic：
-    - 先按 `min_total_count` 做 backoff
-    - 再按 `total_count + backoff_level` 估计 statistical confidence
-    - 通过 hybrid mixing 决定 statistical 与 heuristic 的最终占比
-  - 当前 statistical branch metadata 还会额外暴露 disease-conditioned branch likelihood，供 belief-aware reward 近似构造 branch posterior。
-  - 当前 metadata 还会补充：
-    - `statistical_total_count`
-    - `statistical_backoff_level`
-    - `statistical_backoff_discount`
-    - `statistical_confidence`
-    - `heuristic_confidence_share`
-    - `hybrid_transition_lambda`
-    - `hybrid_transition_source`
-  - 当动作同时带多个 family tag 时，当前会优先选“更具体、统计更扎实”的 verify 分布，而不是只消费第一个 family。
-  - 对普通问诊动作，当前输出 `positive / negative / doubtful`。
-  - 对 `collect_exam_context` 动作，当前内部先估计 `done / not_done` 与结果分布，再映射成 `done_positive / done_negative / done_unclear / not_done`。
-
-- [reward_model.py](/Users/loki/Workspace/GraduationDesign/brain/reward_model.py)
-  - 负责把 rollout branch 转成单步 reward。
-  - 当前同时保留：
-    - `HeuristicRolloutRewardModel`
-    - `BeliefAwareRolloutRewardModel`
-  - `BeliefAwareRolloutRewardModel` 当前不会重跑统计表，而是直接复用 transition branch metadata 中的 `belief_components`，近似估计：
-    - branch 后 `belief entropy` 是否下降
-    - `top1-top2 margin` 是否被拉开
-    - `top1-top3 separation` 是否被拉开
-    - 竞争诊断是否被有效压低
-    - 在拉开第一名的同时，是否仍保住健康的 `Top-3` 候选覆盖
-    - 当前分支是否会提升 premature acceptance risk
-  - 当前 posterior surrogate 还支持 `prior` 与 `raw posterior` 的软插值更新，避免一轮统计 likelihood 就把边缘高质量候选过早压掉。
-
-- [transition_statistics.py](/Users/loki/Workspace/GraduationDesign/brain/transition_statistics.py)
-  - 负责离线统计构建与在线 mixture 辅助。
-  - 当前集中维护：
-    - graph case / replay 统计加载
-    - `disease + evidence_family + question_type` 的普通问诊分布
-    - `disease + exam_kind / test_type` 的检查上下文分布
-    - `evidence_tags -> canonical family` 的轻量回退映射
-    - top-k hypothesis belief 归一化
-    - action 到 `question_type / family / exam_kind / test_type` 的集中映射
-
-- [reward_model.py](/Users/loki/Workspace/GraduationDesign/brain/reward_model.py)
-  - 负责计算单个 rollout 分支的一步 reward。
-  - 当前默认实现 `HeuristicRolloutRewardModel` 已显式拆出 `information gain surrogate / turn cost / repeat penalty / high-cost penalty / uncertainty penalty`，便于后续换成 learned reward。
-
-- [state_signature.py](/Users/loki/Workspace/GraduationDesign/brain/state_signature.py)
-  - 负责把 `slots / asked nodes / active topics / exam context / top hypotheses / pending context` 压缩成稳定的 belief signature。
-  - 当前既服务 root reroot，也服务 modular_v2 child 节点的近似 post-action signature。
-
-- [trajectory_evaluator.py](/Users/loki/Workspace/GraduationDesign/brain/trajectory_evaluator.py)
-  - 对齐论文最后的轨迹聚合器。
-  - 当前负责按最终答案聚类轨迹，并计算 `consistency / diversity / agent_evaluation`。
-  - `diversity` 已从“唯一动作数”升级为基于轨迹相似度的组内平均差异。
-  - `agent_evaluation` 当前支持 `fallback` 与可选 `llm_verifier` 两种模式。
-  - 当前 `llm_verifier` 的最早调用窗口仍由 `TrajectoryEvaluatorConfig` 控制：如果 `turn_index` 或 `trajectory_count` 还未达到配置窗口，就先延后 verifier，临时使用 fallback 评分，避免早期 A3 追问每轮都重复触发高成本 verifier。
-  - 当前 `trajectory_agent_verifier` 会显式区分 `observed_session_evidence` 与 `simulated_trajectory_evidence`；若接受理由只依赖 rollout 模拟阳性强证据、真实会话没有当前答案的特异支持，会被二次 guard 改为 `missing_key_support` 拒停。
-  - 当前 LLM verifier 接受后还会经过 deterministic scope guard；若答案粒度与真实证据作用域不一致，会改为 `strong_alternative_not_ruled_out` 并把缺失作用域写入推荐补证据。
-  - 当前 trajectory 聚合会读取 `observed_anchor_index`，把 exact/family observed anchor 转成 `observed_anchor_agent_bonus`，并对“只有 rollout 模拟关键阳性、没有真实 anchor”的答案施加 `simulated_key_evidence_penalty`。
-  - 当前第三批已支持动态 final score 权重：单答案且低真实锚点时，会下调 `consistency / diversity`、提高 `agent_evaluation` 比重，并对低锚点单答案触发 `single_answer_group_score_cap`。
-  - 当前第三批也会把 `generic_scope_penalty / scope_requirement_missing_score / scope_cluster_bonus` 真正扣进 `final_score`，让部位漂移、IRIS 漂移和泛病名漂移更早在排序阶段暴露出来。
-  - 当前还会把 rollout 侧的 `alternative_preservation_proxy` 纳入 final answer discriminative bonus，避免排序只奖励“最尖锐”的单答案压缩。
-  - 当前支持 `score_candidate_hypotheses_without_trajectories()`，用于在轨迹聚合断层时把现有候选疾病转成 answer score；该 fallback 会运行 observed-evidence final evaluator，接受结果会直接交给 `VerifierAcceptanceController`。
-
-### 5. 辅助文件
-
-- [__init__.py](/Users/loki/Workspace/GraduationDesign/brain/__init__.py)
-  - Python 包初始化文件。
-
-## 当前实现状态
-
-目前 `brain/` 的状态可以概括为：
-
-- 类型系统已搭好
-- 基础状态机和会话图已搭好
-- MedExtractor、实体链接、搜索树和轨迹评估器都已有第一轮实现
-- 图谱检索入口已和当前图谱 schema 做了第一轮对齐
-- A1/A2/A3 与 `pending action interpretation` 的第一批模块已建立
-- UCT、局部 simulation 和轨迹评分都已接成默认主路径
-- `service.py` 已经能够跑通多次 rollout 的最小搜索闭环
-- 已清理仓库内无引用的历史兼容接口与残留辅助函数，当前 `service / retriever / evidence_parser / acceptance_controller / normalization` 默认只保留主链路仍在消费的入口
-- 但还没有完全复现论文中的更深 rollout、完整 verifier 和最终轨迹判别器
-
-也就是说，当前目录已经从“空脚手架”进入“可持续填充核心逻辑”的阶段。
-
-补充说明：
-
-- 当前 `brain/` 中较长或较复杂的函数，已经统一补充了函数内部关键步骤前的中文块级注释。
-- 这些注释重点解释“当前阶段在做什么、为什么这样分支、状态写回到哪里”，方便按调用链阅读 `service / retriever / evidence_parser / simulation_engine / acceptance_controller` 等核心模块。
-
-## 与 Med-MCTS 论文的对齐状态
-
-| 组件 | 当前状态 | 说明 |
-|---|---|---|
-| MedExtractor | 基础版完成 | 已有 `patient_text -> (P, C)` |
-| A1 | 部分完成 | 已切换为 LLM-first 抽取，短答保留极薄规则短路 |
-| A2 | 部分完成 | 已支持患者上下文 + R1 候选排序 |
-| A3 | 部分完成 | 已支持 R2 检索、动作构造、区分性 gain 与问题生成 |
-| Pending action interpretation | 部分完成 | 已支持统一 mentions 驱动的目标回答解释与显式路由 |
-| R1 / R2 | 基础版完成 | 已与真实 Neo4j 联调，R1 已增加方向语义 |
-| Search Tree | 基础版完成 | 已有显式树、tree policy 和回传统计 |
-| Rollout | 浅层版完成 | 已支持多次 rollout 与局部多步路径输出 |
-| Path Evaluation | 基础版完成 | 已支持一致性 / 相似度驱动多样性 / agent score |
-| 完整论文复现 | 未完成 | 当前仍处于“结构对齐 + 轻量实现”阶段 |
-
-## 与其他目录的关系
-
-- 详细运行链路说明：
-  - [brain_runtime_call_chain_guide.md](/Users/loki/Workspace/GraduationDesign/docs/brain_runtime_call_chain_guide.md)
-  - 当前文档已按 `turn_interpreter -> A1 / A2 / A3 -> verifier-only acceptance -> repair` 的实现口径重写，并进一步细化到 `pending action` 分型写回、`A2` 刷新条件、verifier guard 与 repair 动作分流，可直接对照 `process_turn()` 阅读。
-
-- 论文对照与启发式参数说明：
-  - [med_mcts_vs_current_system.md](/Users/loki/Workspace/GraduationDesign/docs/med_mcts_vs_current_system.md)
-  - 当前文档集中说明 Med-MCTS 论文实现与本系统动态问诊实现的差异，并整理启发式参数的主要来源、当前定位和后续优化方向。
-
-- 当前诊断算法三批落地清单：
-  - [diagnosis_algorithm_batch_execution_checklist.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_algorithm_batch_execution_checklist.md)
-  - 当前文档按 `P1+P2 -> P3+P6 -> P4+P5+P7` 三批节奏拆分具体修改点、预期指标与回放验收方式，适合作为本轮算法落地入口。
-
-- 当前诊断系统待办清单：
-  - [diagnosis_system_todolist.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_system_todolist.md)
-
-- 第一阶段知识图谱底座：
-  - [knowledge_graph/README.md](/Users/loki/Workspace/GraduationDesign/knowledge_graph/README.md)
-
-- 虚拟病人与离线评测：
-  - [simulator/README.md](/Users/loki/Workspace/GraduationDesign/simulator/README.md)
-
-- 第二阶段测试：
-  - [tests/README.md](/Users/loki/Workspace/GraduationDesign/tests/README.md)
-
-## 当前可直接使用的脚本
-
-- [run_brain_demo.py](/Users/loki/Workspace/GraduationDesign/scripts/run_brain_demo.py)
-  - 运行最小命令行问诊演示。
-
-- [run_retriever_smoke.py](/Users/loki/Workspace/GraduationDesign/scripts/run_retriever_smoke.py)
-  - 直接连本地 Neo4j，检查当前图谱标签、关系分布以及 `R1 / R2` 是否能返回结果。
-
-- [run_batch_replay.py](/Users/loki/Workspace/GraduationDesign/scripts/run_batch_replay.py)
-  - 运行真实端到端 smoke：问诊大脑 + 虚拟病人 + 搜索报告 + benchmark 汇总。
-
-## 代码注释规范
-
-本目录已统一采用中文注释规范：
-
-- 每个文件顶部有中文文件说明
-- 每个类有中文说明
-- 每个函数上方都应有中文用途注释
-- 模块级常量，尤其是标签集合、关系集合、family tag、状态枚举和阈值分组，定义前也应补充中文用途注释，解释这组常量的分组依据与下游用途。
-- 对较长或较复杂的函数，还应在函数内部关键步骤前补充中文块级注释，优先解释阶段切换、状态更新、排序依据、fallback 与 repair 分支。
-
-后续新增文件和函数时，也应继续遵守这一规范。
+`brain/` 是第二阶段“问诊大脑”的核心目录。当前版本已经从旧的平铺模块结构重构为按运行阶段分层的包结构，目标是让调试入口、职责边界和代码导航都更清晰。
+
+## 当前稳定入口
+
+外部稳定调用面仍保持不变：
+
+- [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - 对 frontend / replay / scripts 暴露稳定入口
+- `build_default_brain_from_env()`
+- `ConsultationBrain.process_turn(session_id, patient_text)`
+- `ConsultationBrain.finalize(session_id)`
+
+当前实现中：
+
+- `brain/service.py` 只做公共导出
+- [brain/app/brain.py](/Users/loki/Workspace/GraduationDesign/brain/app/brain.py) 保存
+  - `ConsultationBrain` 薄门面
+  - `BrainRuntime` 运行时实现
+- facade 会把主链分别委托给 3 个协调器：
+  - [brain/turn/coordinator.py](/Users/loki/Workspace/GraduationDesign/brain/turn/coordinator.py)
+  - [brain/search/coordinator.py](/Users/loki/Workspace/GraduationDesign/brain/search/coordinator.py)
+  - [brain/acceptance/coordinator.py](/Users/loki/Workspace/GraduationDesign/brain/acceptance/coordinator.py)
+
+## 目录分层
+
+### 1. `app/`
+
+- 门面、依赖注入、默认构造、运行时主实现
+- 关键文件：
+  - [brain/app/brain.py](/Users/loki/Workspace/GraduationDesign/brain/app/brain.py)
+
+### 2. `turn/`
+
+- 负责本轮解释与状态写回
+- 关键文件：
+  - [brain/turn/parser.py](/Users/loki/Workspace/GraduationDesign/brain/turn/parser.py)
+  - [brain/turn/extractor.py](/Users/loki/Workspace/GraduationDesign/brain/turn/extractor.py)
+  - [brain/turn/coordinator.py](/Users/loki/Workspace/GraduationDesign/brain/turn/coordinator.py)
+
+### 3. `search/`
+
+- 负责 `R1 / R2` 检索、A2、A3、MCTS、rollout、trajectory evaluation
+- 关键文件：
+  - [brain/search/retriever.py](/Users/loki/Workspace/GraduationDesign/brain/search/retriever.py)
+  - [brain/search/hypothesis_manager.py](/Users/loki/Workspace/GraduationDesign/brain/search/hypothesis_manager.py)
+  - [brain/search/action_builder.py](/Users/loki/Workspace/GraduationDesign/brain/search/action_builder.py)
+  - [brain/search/mcts.py](/Users/loki/Workspace/GraduationDesign/brain/search/mcts.py)
+  - [brain/search/simulation.py](/Users/loki/Workspace/GraduationDesign/brain/search/simulation.py)
+  - [brain/search/evaluator.py](/Users/loki/Workspace/GraduationDesign/brain/search/evaluator.py)
+  - [brain/search/coordinator.py](/Users/loki/Workspace/GraduationDesign/brain/search/coordinator.py)
+
+### 4. `acceptance/`
+
+- 负责 verifier acceptance 与 completed 判定
+- 关键文件：
+  - [brain/acceptance/controller.py](/Users/loki/Workspace/GraduationDesign/brain/acceptance/controller.py)
+  - [brain/acceptance/coordinator.py](/Users/loki/Workspace/GraduationDesign/brain/acceptance/coordinator.py)
+
+### 5. `state/`
+
+- 负责会话状态、阶段结果、anchor、state signature
+- 类型已从旧 `types.py` 拆分为：
+  - [brain/state/runtime.py](/Users/loki/Workspace/GraduationDesign/brain/state/runtime.py)
+  - [brain/state/results.py](/Users/loki/Workspace/GraduationDesign/brain/state/results.py)
+- 其他关键文件：
+  - [brain/state/tracker.py](/Users/loki/Workspace/GraduationDesign/brain/state/tracker.py)
+  - [brain/state/anchors.py](/Users/loki/Workspace/GraduationDesign/brain/state/anchors.py)
+  - [brain/state/signature.py](/Users/loki/Workspace/GraduationDesign/brain/state/signature.py)
+
+### 6. `integrations/`
+
+- 负责与外部系统交互
+- 关键文件：
+  - [brain/integrations/llm.py](/Users/loki/Workspace/GraduationDesign/brain/integrations/llm.py)
+  - [brain/integrations/neo4j.py](/Users/loki/Workspace/GraduationDesign/brain/integrations/neo4j.py)
+  - [brain/integrations/entity_linker.py](/Users/loki/Workspace/GraduationDesign/brain/integrations/entity_linker.py)
+
+### 7. `reporting/`
+
+- 负责结构化结果与最终报告输出
+- 关键文件：
+  - [brain/reporting/report_builder.py](/Users/loki/Workspace/GraduationDesign/brain/reporting/report_builder.py)
+
+### 8. `shared/`
+
+- 放纯函数级公共能力
+- 当前主要包括：
+  - [brain/shared/errors.py](/Users/loki/Workspace/GraduationDesign/brain/shared/errors.py)
+  - [brain/shared/normalization.py](/Users/loki/Workspace/GraduationDesign/brain/shared/normalization.py)
+
+### 9. `config/`
+
+- 提供配置加载入口
+- 关键文件：
+  - [brain/config/loader.py](/Users/loki/Workspace/GraduationDesign/brain/config/loader.py)
+
+## 当前主链
+
+当前一轮问诊的真实主链是：
+
+1. `ConsultationBrain.process_turn()`
+2. `TurnCoordinator.process_turn()`
+3. `BrainRuntime._process_turn_impl()`
+4. `turn_interpreter -> mention merge -> pending action merge`
+5. `SearchCoordinator.run_reasoning_search()`
+6. `BrainRuntime._run_reasoning_search_impl()`
+7. `A2 -> A3 -> MCTS/greedy/no_tree_greedy -> trajectory evaluator`
+8. `AcceptanceCoordinator.finalize_from_search()`
+9. `BrainRuntime._finalize_from_search_impl()`
+10. `verifier acceptance / repair / rescue -> next question or final report`
+
+详细说明见：
+
+- [docs/brain_runtime_call_chain_guide.md](/Users/loki/Workspace/GraduationDesign/docs/brain_runtime_call_chain_guide.md)
+
+## 当前仍保留的实验能力
+
+为了保证 benchmark / ablation 不回退，当前依然保留下面这些配置入口：
+
+- `search_impl = legacy | modular_v2`
+- `search_policy.root_action_mode = mcts | greedy | no_tree_greedy`
+- `transition_model.type = heuristic | statistical`
+- `reward_model.type = heuristic_v2 | belief_aware_v1`
+- `repair`、`candidate_feedback`、`acceptance_calibration` 等现有 YAML 键名全部兼容
+
+默认配置仍来自：
+
+- [configs/brain.yaml](/Users/loki/Workspace/GraduationDesign/configs/brain.yaml)
+
+并且仍支持：
+
+- `BRAIN_CONFIG_PATH`
+
+## 当前重点行为约定
+
+### 1. LLM-first
+
+- 长文本解释走 `LLM-first`
+- 仅保留极薄的短答直通规则
+- LLM 不可用时会抛显式领域错误，不再静默伪装成正常问诊结果
+
+### 2. 单轮只解释一次
+
+- 当前每轮先统一解释 `mentions`
+- 再由同一份解释结果派生 `PatientContext`、`A1`、`pending_action_result`
+
+### 3. 患者已明确说过的内容直接视为 confirmed evidence
+
+- 只要患者已有陈述能和当前 `R2` 节点语义对上
+- 就直接补成 graph-grounded `evidence_state`
+- 并从后续追问动作池里剔除，避免重复问
+
+### 4. completed 只由 verifier-like 信号驱动
+
+- 当前是否完成，不再走旧 stop-rule 主链
+- 最终由 `TrajectoryEvaluator + VerifierAcceptanceController` 联合决定
+
+## 已删除的历史残留
+
+以下内容已不再属于当前主链：
+
+- `brain/types.py`
+- `brain/session_dag.py`
+- `LearnedResponseTransitionModel` 占位实现
+
+## 推荐阅读顺序
+
+如果你现在要 debug，建议按下面顺序读：
+
+1. [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+2. [brain/app/brain.py](/Users/loki/Workspace/GraduationDesign/brain/app/brain.py)
+3. [docs/brain_runtime_call_chain_guide.md](/Users/loki/Workspace/GraduationDesign/docs/brain_runtime_call_chain_guide.md)
+4. [brain/turn/parser.py](/Users/loki/Workspace/GraduationDesign/brain/turn/parser.py)
+5. [brain/search/hypothesis_manager.py](/Users/loki/Workspace/GraduationDesign/brain/search/hypothesis_manager.py)
+6. [brain/search/mcts.py](/Users/loki/Workspace/GraduationDesign/brain/search/mcts.py)
+7. [brain/search/evaluator.py](/Users/loki/Workspace/GraduationDesign/brain/search/evaluator.py)
+8. [brain/acceptance/controller.py](/Users/loki/Workspace/GraduationDesign/brain/acceptance/controller.py)

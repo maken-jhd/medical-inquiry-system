@@ -1,11 +1,11 @@
 """测试 verifier 拒停后的 repair action 分流。"""
 
-from brain.action_builder import ActionBuilder
-from brain.hypothesis_manager import HypothesisManager
-from brain.mcts_engine import MctsEngine
+from brain.search import ActionBuilder
+from brain.search import HypothesisManager
+from brain.search import MctsEngine
 from brain.service import BrainDependencies, ConsultationBrain, RepairPolicyConfig
-from brain.state_tracker import StateTracker
-from brain.types import FinalAnswerScore, HypothesisScore, MctsAction, PendingActionResult, SearchResult, SessionState, StopDecision
+from brain.state.tracker import StateTracker
+from brain.state import FinalAnswerScore, HypothesisScore, MctsAction, PendingActionResult, SearchResult, SessionState, StopDecision
 
 
 class RepairFakeRetriever:

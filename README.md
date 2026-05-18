@@ -267,25 +267,35 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 
 ## 第二阶段：问诊大脑
 
-第二阶段已经不再只是脚手架，而是具备了更贴近论文的最小可运行实现：
+第二阶段当前已经重构为按运行阶段分层的问诊大脑，实现更容易顺着主链 debug：
 
 - 更详细的目录说明见：[brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
-- [brain/types.py](/Users/loki/Workspace/GraduationDesign/brain/types.py)：状态、候选问题、假设分数等核心数据结构
-- [brain/state_tracker.py](/Users/loki/Workspace/GraduationDesign/brain/state_tracker.py)：会话状态追踪器
-- [brain/session_dag.py](/Users/loki/Workspace/GraduationDesign/brain/session_dag.py)：会话内存 DAG / DFS 追问骨架
-- [brain/neo4j_client.py](/Users/loki/Workspace/GraduationDesign/brain/neo4j_client.py)：Neo4j 查询封装
-- [brain/retriever.py](/Users/loki/Workspace/GraduationDesign/brain/retriever.py)：冷启动、正向假设、反向验证检索，当前已支持 `R1 / R2` 方向语义权重与实体链接相似度融合
-- [scripts/run_retriever_smoke.py](/Users/loki/Workspace/GraduationDesign/scripts/run_retriever_smoke.py)：真实 Neo4j 图谱联调脚本
-- [brain/question_selector.py](/Users/loki/Workspace/GraduationDesign/brain/question_selector.py)：下一问打分与选择器
-- [brain/mcts_engine.py](/Users/loki/Workspace/GraduationDesign/brain/mcts_engine.py)：基于 UCT 的动作与树节点选择器
-- [brain/simulation_engine.py](/Users/loki/Workspace/GraduationDesign/brain/simulation_engine.py)：支持多分支浅层 rollout 的 simulation 预演器
-- [brain/med_extractor.py](/Users/loki/Workspace/GraduationDesign/brain/med_extractor.py)：患者原话到 `(P, C)` 的结构化抽取层
-- [brain/entity_linker.py](/Users/loki/Workspace/GraduationDesign/brain/entity_linker.py)：mention 到 KG 节点的阈值化链接器
-- [brain/search_tree.py](/Users/loki/Workspace/GraduationDesign/brain/search_tree.py)：显式搜索树结构
-- [brain/trajectory_evaluator.py](/Users/loki/Workspace/GraduationDesign/brain/trajectory_evaluator.py)：轨迹聚合与最终答案评分器
-- [brain/acceptance_controller.py](/Users/loki/Workspace/GraduationDesign/brain/acceptance_controller.py)：verifier-only 最终接受控制；只根据 LLM verifier / observed-evidence final evaluator 的 `verifier_should_accept` 决定是否 completed，拒绝时继续进入 repair
-- [brain/report_builder.py](/Users/loki/Workspace/GraduationDesign/brain/report_builder.py)：结构化结果汇总
-- [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)：`A1 / A2 / A3 + pending action + verifier/repair` 问诊编排层
+- 稳定外部入口：
+  - [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py)
+  - `build_default_brain_from_env()`
+  - `ConsultationBrain.process_turn()`
+- 门面与运行时：
+  - [brain/app/brain.py](/Users/loki/Workspace/GraduationDesign/brain/app/brain.py)
+- turn 层：
+  - [brain/turn/parser.py](/Users/loki/Workspace/GraduationDesign/brain/turn/parser.py)
+  - [brain/turn/extractor.py](/Users/loki/Workspace/GraduationDesign/brain/turn/extractor.py)
+- search 层：
+  - [brain/search/retriever.py](/Users/loki/Workspace/GraduationDesign/brain/search/retriever.py)
+  - [brain/search/hypothesis_manager.py](/Users/loki/Workspace/GraduationDesign/brain/search/hypothesis_manager.py)
+  - [brain/search/action_builder.py](/Users/loki/Workspace/GraduationDesign/brain/search/action_builder.py)
+  - [brain/search/mcts.py](/Users/loki/Workspace/GraduationDesign/brain/search/mcts.py)
+  - [brain/search/simulation.py](/Users/loki/Workspace/GraduationDesign/brain/search/simulation.py)
+  - [brain/search/evaluator.py](/Users/loki/Workspace/GraduationDesign/brain/search/evaluator.py)
+- acceptance / reporting 层：
+  - [brain/acceptance/controller.py](/Users/loki/Workspace/GraduationDesign/brain/acceptance/controller.py)
+  - [brain/reporting/report_builder.py](/Users/loki/Workspace/GraduationDesign/brain/reporting/report_builder.py)
+- state / integrations 层：
+  - [brain/state/runtime.py](/Users/loki/Workspace/GraduationDesign/brain/state/runtime.py)
+  - [brain/state/results.py](/Users/loki/Workspace/GraduationDesign/brain/state/results.py)
+  - [brain/state/tracker.py](/Users/loki/Workspace/GraduationDesign/brain/state/tracker.py)
+  - [brain/integrations/llm.py](/Users/loki/Workspace/GraduationDesign/brain/integrations/llm.py)
+  - [brain/integrations/neo4j.py](/Users/loki/Workspace/GraduationDesign/brain/integrations/neo4j.py)
+  - [brain/integrations/entity_linker.py](/Users/loki/Workspace/GraduationDesign/brain/integrations/entity_linker.py)
 
 ## 当前与 Med-MCTS 的对齐状态
 
@@ -376,7 +386,7 @@ NEO4J_PASSWORD=你的密码 conda run -n GraduationDesign python scripts/audit_d
 - `KG RAG` baseline 当前已落地最小代码骨架：`KgRagRetriever` 会直接连接当前活跃 Neo4j 搜索图谱，围绕当前 top 候选疾病拉取 `candidate profile + expected evidence`，并按“每个候选病种独立分组配额”裁剪注入块：`symptom<=5`、`lab<=4`、`imaging<=2`、`pathogen<=2`、`risk<=2`、`detail<=2`；当显式开启 `--kg-enable-symptom-candidate-recall` 时，还会基于 baseline 已观察到的 opening/明确肯定短答特征，通过 `retrieve_r1_candidates()` 额外反查 `retrieved_kg_candidate_diseases`；`KgRagConsultationBrain` 会在纯 LLM 同一 ask / final 契约上同时注入 `retrieved_kg_context` 与可选的症状反查候选疾病列表，并把 `retrieved_node_ids / retrieved_disease_names / retrieval_mode / retrieval_query / retrieved_candidate_disease_names_from_symptoms` 等字段写回 replay metadata；当前插件默认关闭，只作为对照实验中的可插拔辅助召回
 - 病人代理当前已改为“骨架驱动开场”：首轮输入优先由 `patient_agent.open_case(case)` 基于 opening slots 生成，而不是直接把 `chief_complaint` 当作唯一入口
 - `brain/service.py` 当前对主诉澄清增加了防重复保护：若已经追问过一次 `chief complaint` 但仍无任何可推理线索，会以 `repeated_chief_complaint_without_signal` 终止，避免 bad opening 在 intake 环节空转 8 轮
-- `brain/med_extractor.py` 与 `brain/evidence_parser.py` 当前补了 competitive 病例常见症状 / 风险词典，并对字符串型 `clinical_features` 输出增加了容错；即使 LLM schema 返回较松，也不至于把整段特征直接丢掉
+- `brain/turn/extractor.py` 与 `brain/turn/parser.py` 当前补了 competitive 病例常见症状 / 风险词典，并对字符串型 `clinical_features` 输出增加了容错；即使 LLM schema 返回较松，也不至于把整段特征直接丢掉
 - `simulator/graph_case_generator.py` 当前会过滤 `competitive` 病例里 `HIV感染 / HIV感染者 / 抗逆转录病毒治疗 / 免疫功能低下` 这类背景 opening，并优先回退到目标病自己的症状、具体检查结果或疾病名
 - 在配置了可用 LLM 时，病人代理会使用受约束的 LLM 表达；否则自动退回规则模板
 - 当前 LLM 调用已支持显式 `enable_thinking` 开关，默认值为 `false`，避免依赖服务端默认行为

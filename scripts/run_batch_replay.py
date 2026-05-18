@@ -21,7 +21,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from brain.llm_client import LlmClient
+from brain.integrations import LlmClient
 from brain.service import build_default_brain_from_env
 from frontend.config_loader import apply_config_to_environment, load_frontend_config
 from simulator.benchmark import (

@@ -1,7 +1,7 @@
 """测试实体链接器能否将特征名称对齐到图谱节点。"""
 
-from brain.entity_linker import EntityLinker
-from brain.types import ClinicalFeatureItem
+from brain.integrations import EntityLinker
+from brain.state import ClinicalFeatureItem
 
 
 class FakeNeo4jClient:

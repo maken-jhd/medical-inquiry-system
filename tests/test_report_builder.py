@@ -1,9 +1,9 @@
 """测试最终推理报告会输出解释性字段与统一 mention 语义。"""
 
-from brain.report_builder import ReportBuilder
-from brain.search_tree import SearchTree
-from brain.types import FinalAnswerScore, MctsAction, MentionContextItem, ReasoningTrajectory, SearchResult, SessionState, SlotState, StopDecision
-from brain.types import TreeNode
+from brain.reporting import ReportBuilder
+from brain.search.tree import SearchTree
+from brain.state import FinalAnswerScore, MctsAction, MentionContextItem, ReasoningTrajectory, SearchResult, SessionState, SlotState, StopDecision
+from brain.state import TreeNode
 
 
 # 验证 build_final_reasoning_report 会包含答案胜出原因与路径摘要。

@@ -1,7 +1,7 @@
 """测试 repair-aware A3 动作构造 metadata。"""
 
-from brain.action_builder import ActionBuilder
-from brain.types import ExamContextState, HypothesisScore, MctsAction, SessionState
+from brain.search import ActionBuilder
+from brain.state import ExamContextState, HypothesisScore, MctsAction, SessionState
 
 
 # 验证 A3 动作会显式区分 verifier 推荐证据、原 hypothesis 推荐证据和共同命中信号。

@@ -1,11 +1,11 @@
 """测试 service 层在 verifier 介入后的停止控制流。"""
 
-from brain.action_builder import ActionBuilder
-from brain.question_selector import QuestionSelector
-from brain.report_builder import ReportBuilder
+from brain.search import ActionBuilder
+from brain.search import QuestionSelector
+from brain.reporting import ReportBuilder
 from brain.service import BrainDependencies, ConsultationBrain
-from brain.state_tracker import StateTracker
-from brain.types import (
+from brain.state.tracker import StateTracker
+from brain.state import (
     A1ExtractionResult,
     FinalAnswerScore,
     HypothesisScore,

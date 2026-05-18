@@ -1,7 +1,7 @@
 """测试 reward-side confidence proxy 的轻量 acceptance 校准。"""
 
-from brain.acceptance_controller import AcceptanceCalibrationConfig, VerifierAcceptanceController
-from brain.types import FinalAnswerScore
+from brain.acceptance import AcceptanceCalibrationConfig, VerifierAcceptanceController
+from brain.state import FinalAnswerScore
 
 
 def _answer(**metadata) -> FinalAnswerScore:

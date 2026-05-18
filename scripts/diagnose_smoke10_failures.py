@@ -14,11 +14,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from brain.evidence_parser import EvidenceParser
-from brain.errors import LlmEmptyExtractionError, LlmOutputInvalidError
-from brain.llm_client import LlmClient
-from brain.med_extractor import MedExtractor
-from brain.types import A1ExtractionResult, KeyFeature
+from brain.turn import EvidenceParser
+from brain.shared import LlmEmptyExtractionError, LlmOutputInvalidError
+from brain.integrations import LlmClient
+from brain.turn import MedExtractor
+from brain.state import A1ExtractionResult, KeyFeature
 from frontend.config_loader import apply_config_to_environment, load_frontend_config
 
 

@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from brain.transition_statistics import TransitionStatisticsBuilder, TransitionStatisticsConfig
-from brain.transition_statistics import TransitionStatistics
+from brain.search import TransitionStatisticsBuilder, TransitionStatisticsConfig
+from brain.search import TransitionStatistics
 
 
 def _write_mock_statistics_sources(tmp_path: Path) -> tuple[Path, Path, Path]:

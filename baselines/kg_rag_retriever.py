@@ -5,9 +5,9 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
-from brain.neo4j_client import Neo4jClient
-from brain.retriever import GraphRetriever
-from brain.types import ClinicalFeatureItem, HypothesisCandidate, SessionState
+from brain.integrations import Neo4jClient
+from brain.search import GraphRetriever
+from brain.state import ClinicalFeatureItem, HypothesisCandidate, SessionState
 
 from .llm_baseline_types import BaselineObservedFeature
 

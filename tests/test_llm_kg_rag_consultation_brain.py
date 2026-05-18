@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from brain.types import ClinicalFeatureItem, PatientContext
+from brain.state import ClinicalFeatureItem, PatientContext
 
 from baselines.kg_rag_retriever import KgRagCandidateDisease, KgRagHit, KgRagQueryResult
 from baselines.llm_baseline_types import BaselineHypothesisCandidate

@@ -6,8 +6,8 @@ from dataclasses import asdict
 import re
 from typing import Any
 
-from brain.errors import LlmUnavailableError
-from brain.llm_client import LlmClient
+from brain.shared import LlmUnavailableError
+from brain.integrations import LlmClient
 
 from .llm_baseline_types import (
     BASELINE_EVIDENCE_COSTS,

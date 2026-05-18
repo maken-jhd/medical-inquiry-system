@@ -1,8 +1,8 @@
 """问诊大脑模块的统一导出入口。"""
 
-from .service import ConsultationBrain
-from .state_tracker import StateTracker
-from .types import HypothesisScore, QuestionCandidate, SessionState, SlotState
+from .app import ConsultationBrain
+from .state import HypothesisScore, QuestionCandidate, SessionState, SlotState
+from .state.tracker import StateTracker
 
 __all__ = [
     "ConsultationBrain",

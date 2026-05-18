@@ -1,8 +1,8 @@
 """测试 UCT 选择器的基础动作排序行为。"""
 
-from brain.mcts_engine import MctsEngine
-from brain.search_tree import SearchTree
-from brain.types import ActionStats, MctsAction, SessionState, SimulationOutcome, StateVisitStats, TreeNode
+from brain.search import MctsEngine
+from brain.search.tree import SearchTree
+from brain.state import ActionStats, MctsAction, SessionState, SimulationOutcome, StateVisitStats, TreeNode
 
 
 # 验证 UCT 选择器会优先选择 simulation 收益更高的动作。

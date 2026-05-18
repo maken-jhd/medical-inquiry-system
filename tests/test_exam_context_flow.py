@@ -1,12 +1,12 @@
 """测试检查上下文动作在 service 层的状态更新、追问分流和阶段性结束。"""
 
-from brain.action_builder import ActionBuilder
-from brain.evidence_parser import EvidenceParser
-from brain.hypothesis_manager import HypothesisManager
-from brain.report_builder import ReportBuilder
+from brain.search import ActionBuilder
+from brain.turn import EvidenceParser
+from brain.search import HypothesisManager
+from brain.reporting import ReportBuilder
 from brain.service import BrainDependencies, ConsultationBrain
-from brain.state_tracker import StateTracker
-from brain.types import ExamContextState, HypothesisScore, LinkedEntity, MctsAction, PatientContext
+from brain.state.tracker import StateTracker
+from brain.state import ExamContextState, HypothesisScore, LinkedEntity, MctsAction, PatientContext
 
 
 class ExamFlowRetriever:

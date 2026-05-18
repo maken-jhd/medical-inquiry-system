@@ -1,0 +1,372 @@
+"""负责基于 UCT 在候选动作和搜索树节点中执行选择与回传。"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+import hashlib
+from math import log, sqrt
+from typing import Iterable, Optional, Sequence
+
+from .tree import SearchTree
+from ..state.signature import BeliefStateSignatureBuilder
+from ..state import MctsAction, SessionState, SimulationOutcome, TreeNode
+
+
+@dataclass
+class MctsConfig:
+    """保存 UCT 选择阶段的核心超参数。"""
+
+    search_impl: str = "legacy"
+    exploration_constant: float = 2.0
+    prior_weight: float = 0.35
+    simulation_weight: float = 0.45
+    unvisited_bonus: float = 0.2
+    num_rollouts: int = 8
+    max_depth: int = 6
+    max_child_nodes: int = 4
+    discount_factor: float = 1.0
+    max_kg_triplets: int = 15
+    discriminative_gain_weight: float = 0.1
+
+
+class MctsEngine:
+    """根据历史统计和 simulation 结果选择下一步动作。"""
+
+    # 初始化 UCT 选择器配置。
+    def __init__(
+        self,
+        config: MctsConfig | None = None,
+        state_signature_builder: BeliefStateSignatureBuilder | None = None,
+    ) -> None:
+        self.config = config or MctsConfig()
+        self.state_signature_builder = state_signature_builder or BeliefStateSignatureBuilder()
+
+    # 构造当前状态的稳定签名，供访问统计与缓存复用。
+    def build_state_signature(
+        self,
+        session_state: SessionState,
+        hypothesis_id: Optional[str] = None,
+    ) -> str:
+        if self._uses_modular_v2():
+            return self.state_signature_builder.build(
+                session_state,
+                hypothesis_id=hypothesis_id,
+            )
+        return self._build_legacy_state_signature(session_state, hypothesis_id=hypothesis_id)
+
+    # 为 child action 构造近似 post-action belief signature，避免继续直接退回 path id。
+    def build_child_state_signature(
+        self,
+        session_state: SessionState,
+        action: MctsAction,
+    ) -> str:
+        if self._uses_modular_v2():
+            return self.state_signature_builder.build_post_action_signature(session_state, action)
+        return f"{action.action_id}"
+
+    # legacy 版本继续沿用最早的轻量状态签名逻辑，方便做回归对照。
+    def _build_legacy_state_signature(
+        self,
+        session_state: SessionState,
+        hypothesis_id: Optional[str] = None,
+    ) -> str:
+        positive_slots = sorted(
+            f"{slot.node_id}:{slot.effective_polarity()}:{slot.resolution}"
+            for slot in session_state.slots.values()
+            if slot.effective_polarity() == "present"
+        )
+        negative_slots = sorted(
+            f"{slot.node_id}:{slot.effective_polarity()}:{slot.resolution}"
+            for slot in session_state.slots.values()
+            if slot.effective_polarity() == "absent"
+        )
+        unclear_slots = sorted(
+            f"{slot.node_id}:{slot.effective_polarity()}:{slot.resolution}"
+            for slot in session_state.slots.values()
+            if slot.effective_polarity() == "unclear"
+        )
+        active_topics = sorted(session_state.active_topics)
+        payload = "|".join(
+            [
+                f"H={hypothesis_id or 'NONE'}",
+                f"P={';'.join(positive_slots)}",
+                f"N={';'.join(negative_slots)}",
+                f"U={';'.join(unclear_slots)}",
+                f"T={';'.join(active_topics)}",
+                f"Q={session_state.metadata.get('pending_action_id', '')}",
+            ]
+        )
+        return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+    def _uses_modular_v2(self) -> bool:
+        return str(self.config.search_impl or "legacy").strip().lower() == "modular_v2"
+
+    # 按照 UCT 对候选动作打分并返回当前最优动作。
+    def select_action(
+        self,
+        actions: Iterable[MctsAction],
+        session_state: SessionState,
+        simulation_outcomes: Iterable[SimulationOutcome] | None = None,
+        state_signature: Optional[str] = None,
+    ) -> Optional[MctsAction]:
+        action_list = list(actions)
+
+        if len(action_list) == 0:
+            return None
+
+        parent_signature = state_signature or self.build_state_signature(session_state)
+        parent_visits = session_state.state_visit_stats.get(parent_signature)
+        parent_visit_count = parent_visits.visit_count if parent_visits is not None else 0
+        simulation_map = {
+            outcome.action_id: outcome for outcome in (simulation_outcomes or [])
+        }
+
+        ranked = sorted(
+            action_list,
+            key=lambda action: (
+                -self.score_action(action, session_state, parent_visit_count, simulation_map.get(action.action_id)),
+                action.target_node_name,
+            ),
+        )
+        return ranked[0]
+
+    # 在搜索树中选择当前最值得继续向下扩展的叶子节点。
+    def select_leaf(self, tree: SearchTree) -> Optional[TreeNode]:
+        # select 阶段只解决“下一次 rollout 应该从哪条分支继续往下看”。
+        if tree.root_id is None:
+            return None
+
+        current = tree.get_node(tree.root_id)
+
+        while True:
+            # 当前节点自己已经终止时，说明这条分支不再值得继续扩展。
+            if current.terminal:
+                return None
+
+            # 没有 child 就是真正可扩展的叶子，直接返回给 expand + rollout 使用。
+            if len(current.children_ids) == 0:
+                return current
+
+            # tree policy 只在“仍可继续”的孩子里挑选；
+            # 已 terminal 的 child 不再参与 UCT 打分。
+            children = [
+                tree.get_node(child_id)
+                for child_id in current.children_ids
+                if not tree.get_node(child_id).terminal
+            ]
+
+            if len(children) == 0:
+                # 如果所有孩子都已经终止，把当前节点也标记为 terminal，避免后续反复访问空分支。
+                tree.mark_terminal(current.node_id, {"terminal_reason": "all_children_terminal"})
+                return None
+
+            parent_visit_count = max(current.visit_count, 1)
+            current = sorted(
+                children,
+                key=lambda item: (
+                    -self.score_tree_node(item, parent_visit_count),
+                    item.depth,
+                    item.node_id,
+                ),
+            )[0]
+
+            # 一旦遇到未访问过的节点，或它本身还是叶子，就交给 rollout 阶段处理。
+            if current.visit_count == 0 or len(current.children_ids) == 0:
+                return current
+
+    # 将候选动作扩展为搜索树中的子节点。
+    def expand_node(
+        self,
+        tree: SearchTree,
+        parent_node_id: str,
+        actions: Iterable[MctsAction],
+        session_state: SessionState | None = None,
+    ) -> list[TreeNode]:
+        # expand 只负责把动作挂成 child node，本身不做路径预演和奖励评估。
+        parent = tree.get_node(parent_node_id)
+        created: list[TreeNode] = []
+
+        for index, action in enumerate(actions):
+            # 扩展宽度由 max_child_nodes 控制，避免单个叶子分叉过多拖慢 rollout。
+            if index >= self.config.max_child_nodes:
+                break
+
+            child_id = f"{parent.node_id}::{action.action_id}"
+
+            if child_id in tree.nodes:
+                # 同一动作已经扩过时直接复用，避免重复创建节点打乱 visit/value 统计。
+                child = tree.get_node(child_id)
+                if self._uses_modular_v2() and session_state is not None:
+                    child.state_signature = self.build_child_state_signature(session_state, action)
+                    child.metadata["state_signature_source"] = "belief_state_post_action"
+                created.append(child)
+                continue
+
+            child_state_signature = child_id
+            state_signature_source = "action_path_id"
+            if self._uses_modular_v2() and session_state is not None:
+                child_state_signature = self.build_child_state_signature(session_state, action)
+                state_signature_source = "belief_state_post_action"
+
+            # child 节点只保存继续搜索所需的最小元数据：
+            # 动作本体、目标节点、prior 分数和当前 hypothesis 绑定关系。
+            child = TreeNode(
+                node_id=child_id,
+                state_signature=child_state_signature,
+                parent_id=parent.node_id,
+                action_from_parent=action.action_id,
+                stage="A3",
+                depth=parent.depth + 1,
+                metadata={
+                    "action": action,
+                    "hypothesis_id": action.hypothesis_id,
+                    "topic_id": action.topic_id,
+                    "target_node_id": action.target_node_id,
+                    "target_node_name": action.target_node_name,
+                    "prior_score": action.prior_score,
+                    "discriminative_gain": float(action.metadata.get("discriminative_gain", 0.0) or 0.0),
+                    "state_signature_source": state_signature_source,
+                },
+            )
+            tree.add_node(child)
+            tree.add_edge(parent.node_id, child.node_id)
+            created.append(child)
+
+        return created
+
+    # 将奖励值从叶子节点沿父链回传到根节点。
+    def backpropagate(self, tree: SearchTree, node_id: str, reward: float) -> None:
+        # 真实的 visit_count / average_value 更新都由 tree 对象统一维护，避免引擎侧分散改状态。
+        tree.backpropagate(node_id, reward)
+
+    # 计算单个动作的 UCT 分数。
+    def score_action(
+        self,
+        action: MctsAction,
+        session_state: SessionState,
+        parent_visit_count: int,
+        simulation_outcome: SimulationOutcome | None = None,
+    ) -> float:
+        stats = session_state.action_stats.get(action.action_id)
+        q_value = stats.average_value if stats is not None else 0.0
+        visit_count = stats.visit_count if stats is not None else 0
+        simulation_reward = simulation_outcome.expected_reward if simulation_outcome is not None else 0.0
+        prior_score = action.prior_score * self.config.prior_weight
+        discriminative_bonus = self._action_discriminative_gain(action) * self.config.discriminative_gain_weight
+
+        blended_value = q_value + simulation_reward * self.config.simulation_weight + prior_score + discriminative_bonus
+
+        if visit_count == 0:
+            exploration = self.config.exploration_constant * sqrt(log(parent_visit_count + 2))
+            return blended_value + exploration + self.config.unvisited_bonus
+
+        exploration = self.config.exploration_constant * sqrt(
+            log(parent_visit_count + 2) / visit_count
+        )
+        return blended_value + exploration
+
+    # 按树节点访问统计计算用于 tree policy 的 UCT 分数。
+    def score_tree_node(self, node: TreeNode, parent_visit_count: int) -> float:
+        prior_score = float(node.metadata.get("prior_score", 0.0)) * self.config.prior_weight
+        discriminative_bonus = self._node_discriminative_gain(node) * self.config.discriminative_gain_weight
+
+        if node.visit_count == 0:
+            exploration = self.config.exploration_constant * sqrt(log(parent_visit_count + 2))
+            return prior_score + discriminative_bonus + exploration + self.config.unvisited_bonus
+
+        exploration = self.config.exploration_constant * sqrt(
+            log(parent_visit_count + 2) / node.visit_count
+        )
+        return node.average_value + prior_score + discriminative_bonus + exploration
+
+    # 收集根节点下仍可用于真实下一问选择的孩子，统一处理“已问过目标”的过滤。
+    def _collect_selectable_root_children(
+        self,
+        tree: SearchTree,
+        excluded_target_node_ids: Sequence[str] | None = None,
+    ) -> list[TreeNode]:
+        if tree.root_id is None:
+            return []
+
+        root = tree.get_node(tree.root_id)
+        excluded_ids = set(excluded_target_node_ids or [])
+        children: list[TreeNode] = []
+
+        for child_id in root.children_ids:
+            child = tree.get_node(child_id)
+            action = child.metadata.get("action")
+
+            if not isinstance(action, MctsAction):
+                continue
+
+            # 根节点选真实下一问时，显式排除已经问过的 target，减少重复追问。
+            if action.target_node_id in excluded_ids:
+                continue
+
+            children.append(child)
+
+        return children
+
+    # 从根节点的子节点中选择当前平均价值最高的动作。
+    def select_root_action(
+        self,
+        tree: SearchTree,
+        excluded_target_node_ids: Sequence[str] | None = None,
+    ) -> Optional[MctsAction]:
+        # mcts 根动作偏 exploitation，更看重 rollout 后的平均价值而不是初始 prior。
+        children = self._collect_selectable_root_children(
+            tree,
+            excluded_target_node_ids=excluded_target_node_ids,
+        )
+        if len(children) == 0:
+            return None
+
+        # 根节点选择更偏 exploitation：
+        # 先看 average_value，再看 visit_count，最后才看 prior_score。
+        best_child = sorted(
+            children,
+            key=lambda item: (
+                -item.average_value,
+                -item.visit_count,
+                -self._node_discriminative_gain(item),
+                -float(item.metadata.get("prior_score", 0.0)),
+                item.node_id,
+            ),
+        )[0]
+        action = best_child.metadata.get("action")
+        return action if isinstance(action, MctsAction) else None
+
+    # greedy 模式只看 root action 的局部先验，不消费 rollout 平均价值做根动作选择。
+    def select_root_action_greedy(
+        self,
+        tree: SearchTree,
+        excluded_target_node_ids: Sequence[str] | None = None,
+    ) -> Optional[MctsAction]:
+        # greedy 变体刻意保留“只看局部动作分”的基线行为，用来和完整 MCTS 做实验对照。
+        children = self._collect_selectable_root_children(
+            tree,
+            excluded_target_node_ids=excluded_target_node_ids,
+        )
+        if len(children) == 0:
+            return None
+
+        best_child = sorted(
+            children,
+            key=lambda item: (
+                -(float(item.metadata.get("prior_score", 0.0)) + self._node_discriminative_gain(item) * self.config.discriminative_gain_weight),
+                -self._node_discriminative_gain(item),
+                -float(item.metadata.get("prior_score", 0.0)),
+                -item.visit_count,
+                item.node_id,
+            ),
+        )[0]
+        action = best_child.metadata.get("action")
+        return action if isinstance(action, MctsAction) else None
+
+    # 将动作里的区分性增益压成一个轻量 bonus，避免 root action 长期偏向“看起来安全但不拉开差距”的问题。
+    def _action_discriminative_gain(self, action: MctsAction) -> float:
+        raw_value = float(action.metadata.get("discriminative_gain", 0.0) or 0.0)
+        return max(min(raw_value, 1.5), 0.0)
+
+    def _node_discriminative_gain(self, node: TreeNode) -> float:
+        return max(min(float(node.metadata.get("discriminative_gain", 0.0) or 0.0), 1.5), 0.0)

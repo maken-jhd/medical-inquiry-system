@@ -21,7 +21,7 @@ from baselines.llm_kg_rag_consultation_brain import KgRagConsultationBrain
 from baselines.llm_text_rag_consultation_brain import TextRagConsultationBrain
 from baselines.kg_rag_retriever import KgRagRetriever
 from baselines.text_rag_retriever import SparseTextRagRetriever
-from brain.llm_client import LlmClient
+from brain.integrations import LlmClient
 from frontend.config_loader import apply_config_to_environment, load_frontend_config
 from scripts import run_batch_replay
 from simulator.generate_cases import build_seed_cases, load_cases_jsonl, write_cases_jsonl

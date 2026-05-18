@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from brain.errors import LlmEmptyExtractionError, LlmUnavailableError
-from brain.evidence_parser import EvidenceParser
-from brain.types import MctsAction, PatientContext
+from brain.shared import LlmEmptyExtractionError, LlmUnavailableError
+from brain.turn import EvidenceParser
+from brain.state import MctsAction, PatientContext
 
 
 def test_a1_raises_when_llm_returns_no_key_features() -> None:

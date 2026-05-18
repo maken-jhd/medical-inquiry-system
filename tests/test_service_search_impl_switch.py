@@ -1,18 +1,18 @@
 """测试 service 层能够在 legacy 与 modular_v2 skeleton 间切换。"""
 
-from brain.action_builder import ActionBuilder
-from brain.evidence_parser import EvidenceParser
-from brain.hypothesis_manager import HypothesisManager
-from brain.mcts_engine import MctsConfig, MctsEngine
-from brain.response_transition_model import HeuristicResponseTransitionModel
-from brain.reward_model import HeuristicRolloutRewardModel
-from brain.router import ReasoningRouter
+from brain.search import ActionBuilder
+from brain.turn import EvidenceParser
+from brain.search import HypothesisManager
+from brain.search import MctsConfig, MctsEngine
+from brain.search import HeuristicResponseTransitionModel
+from brain.search import HeuristicRolloutRewardModel
+from brain.search import ReasoningRouter
 from brain.service import BrainDependencies, ConsultationBrain, RepairPolicyConfig, SearchPolicyConfig
-from brain.simulation_engine import SimulationConfig, SimulationEngine
-from brain.state_signature import BeliefStateSignatureBuilder
-from brain.state_tracker import StateTracker
-from brain.trajectory_evaluator import TrajectoryEvaluator
-from brain.types import HypothesisScore, MentionContextItem, PatientContext
+from brain.search import SimulationConfig, SimulationEngine
+from brain.state.signature import BeliefStateSignatureBuilder
+from brain.state.tracker import StateTracker
+from brain.search import TrajectoryEvaluator
+from brain.state import HypothesisScore, MentionContextItem, PatientContext
 
 
 class StaticRetriever:

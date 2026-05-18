@@ -1,7 +1,7 @@
 """测试下一问选择器的基础排序逻辑。"""
 
-from brain.question_selector import QuestionSelector
-from brain.types import QuestionCandidate, SessionState
+from brain.search import QuestionSelector
+from brain.state import QuestionCandidate, SessionState
 
 
 # 验证选择器会优先选择尚未问过的候选问题。

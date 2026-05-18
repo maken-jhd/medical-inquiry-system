@@ -21,19 +21,15 @@
 ## 当前文件说明
 
 - [test_state_tracker.py](/Users/loki/Workspace/GraduationDesign/tests/test_state_tracker.py)
-  - 测试 `brain/state_tracker.py`
+  - 测试 `brain/state/tracker.py`
   - 主要覆盖槽位状态初始化、更新、证据追加等基础行为
 
-- [test_session_dag.py](/Users/loki/Workspace/GraduationDesign/tests/test_session_dag.py)
-  - 测试 `brain/session_dag.py`
-  - 主要覆盖主题分支管理、节点状态流转等逻辑
-
 - [test_retriever.py](/Users/loki/Workspace/GraduationDesign/tests/test_retriever.py)
-  - 测试 `brain/retriever.py`
+  - 测试 `brain/search/retriever.py`
   - 当前已覆盖 `R1 / R2` 的最小行为验证，包含方向语义融合后的 `R1` 基本路径
 
 - [test_question_selector.py](/Users/loki/Workspace/GraduationDesign/tests/test_question_selector.py)
-  - 测试 `brain/question_selector.py`
+  - 测试 `brain/search/fallback.py`
   - 主要用于验证候选提问排序逻辑和优先级规则
 
 - [test_patient_agent.py](/Users/loki/Workspace/GraduationDesign/tests/test_patient_agent.py)
@@ -44,24 +40,27 @@
   - 测试 `simulator/replay_engine.py`
   - 主要验证自动回放引擎能否驱动一个最小的问诊闭环并支持批量回放
 
+- [test_brain_coordinators.py](/Users/loki/Workspace/GraduationDesign/tests/test_brain_coordinators.py)
+  - 测试 facade 重构后 `TurnCoordinator / SearchCoordinator / AcceptanceCoordinator` 的最小委托关系
+
 - [test_mcts_engine.py](/Users/loki/Workspace/GraduationDesign/tests/test_mcts_engine.py)
-  - 测试 `brain/mcts_engine.py`
+  - 测试 `brain/search/mcts.py`
   - 主要验证 `UCT` 选择器是否会优先选择更高综合收益的动作，以及 tree policy 是否会沿树向下选择叶子
 
 - [test_mcts_state_signature.py](/Users/loki/Workspace/GraduationDesign/tests/test_mcts_state_signature.py)
-  - 测试 `brain/state_signature.py` 与 modular child signature
+  - 测试 `brain/state/signature.py` 与 modular child signature
   - 主要覆盖 belief signature 的稳定性、区分度，以及 `modular_v2` child 节点不再直接使用 path id
 
 - [test_simulation_engine.py](/Users/loki/Workspace/GraduationDesign/tests/test_simulation_engine.py)
-  - 测试 `brain/simulation_engine.py`
+  - 测试 `brain/search/simulation.py`
   - 主要验证局部 simulation 对不同关系类型动作的收益估计是否合理，以及 rollout 是否会展开多步路径
 
 - [test_response_transition_model.py](/Users/loki/Workspace/GraduationDesign/tests/test_response_transition_model.py)
-  - 测试 `brain/response_transition_model.py`
+  - 测试 `brain/search/transition_model.py`
   - 主要覆盖回答分支概率是否归一化，以及 red flag / asked_before / relation_type 等启发是否仍生效
 
 - [test_transition_statistics.py](/Users/loki/Workspace/GraduationDesign/tests/test_transition_statistics.py)
-  - 测试 `brain/transition_statistics.py`
+  - 测试 `brain/search/transition_statistics.py`
   - 主要覆盖 graph cases / replay / evidence catalog 的最小统计构建，以及条件分布的 backoff
 
 - [test_hypothesis_belief_mixture.py](/Users/loki/Workspace/GraduationDesign/tests/test_hypothesis_belief_mixture.py)
@@ -72,16 +71,16 @@
   - 主要覆盖普通问诊分支、exam_context done/result 映射，以及统计不足时的 heuristic fallback
 
 - [test_reward_model.py](/Users/loki/Workspace/GraduationDesign/tests/test_reward_model.py)
-  - 测试 `brain/reward_model.py`
+  - 测试 `brain/search/reward_model.py`
   - 主要覆盖 reward breakdown、重复动作惩罚、高成本惩罚和不同分支 reward 差异
   - 当前也会覆盖 belief top-k 放宽、soft posterior surrogate 与 alternative preservation bonus
 
 - [test_evidence_parser.py](/Users/loki/Workspace/GraduationDesign/tests/test_evidence_parser.py)
-  - 测试 `brain/evidence_parser.py`
+  - 测试 `brain/turn/parser.py`
   - 当前已覆盖 target-aware A4 解释、否定片段提取和 uncertain span 提取
 
 - [test_router_control_flow.py](/Users/loki/Workspace/GraduationDesign/tests/test_router_control_flow.py)
-  - 测试 `brain/router.py`
+  - 测试 `brain/search/router.py`
   - 当前已覆盖 `STOP / A2` 等核心路由分支以及 A4 输出 metadata
 
 - [test_service_config.py](/Users/loki/Workspace/GraduationDesign/tests/test_service_config.py)
@@ -94,7 +93,7 @@
   - 主要验证两条搜索骨架都可运行，并且 modular child signature 已切到 belief-state 近似表示
 
 - [test_report_builder.py](/Users/loki/Workspace/GraduationDesign/tests/test_report_builder.py)
-  - 测试 `brain/report_builder.py`
+  - 测试 `brain/reporting/report_builder.py`
   - 当前已覆盖 `trajectory_summary / why_this_answer_wins / evidence_for_best_answer` 等解释性字段
 
 - [test_generate_cases.py](/Users/loki/Workspace/GraduationDesign/tests/test_generate_cases.py)
@@ -117,7 +116,7 @@
 当前还没有系统性覆盖的部分包括：
 
 - `brain/service.py` 的完整 A1-A4 编排闭环
-- `brain/retriever.py` 与真实 Neo4j 数据库的稳定集成测试
+- `brain/search/retriever.py` 与真实 Neo4j 数据库的稳定集成测试
 - `simulator/replay_engine.py` 的端到端自动对战测试
 - `path_cache_builder.py` 的结果一致性测试
 

@@ -9,9 +9,9 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from brain.neo4j_client import Neo4jClient
-from brain.retriever import GraphRetriever
-from brain.types import HypothesisScore, SessionState
+from brain.integrations import Neo4jClient
+from brain.search import GraphRetriever
+from brain.state import HypothesisScore, SessionState
 
 
 DISEASE_LABELS = ("Disease",)

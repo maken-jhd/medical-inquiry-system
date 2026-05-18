@@ -9,7 +9,7 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any, Iterable, List, Optional
 
-from brain.errors import BrainDomainError
+from brain.shared import BrainDomainError
 from brain.service import ConsultationBrain
 
 from .case_schema import VirtualPatientCase

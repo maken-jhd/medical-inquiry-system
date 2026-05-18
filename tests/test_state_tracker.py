@@ -1,8 +1,8 @@
 """测试状态追踪器对槽位状态与轻量快照的维护能力。"""
 
-from brain.state_tracker import StateTracker
-from brain.search_tree import SearchTree
-from brain.types import ReasoningTrajectory, SearchResult, SlotUpdate
+from brain.state.tracker import StateTracker
+from brain.search.tree import SearchTree
+from brain.state import ReasoningTrajectory, SearchResult, SlotUpdate
 
 
 # 验证状态追踪器能够正确写入并读取槽位状态。

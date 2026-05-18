@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from brain.llm_client import LlmClient
+from brain.integrations import LlmClient
 
 from .llm_baseline_types import BaselineFinalDecision, BaselineSessionState
 from .llm_consultation_brain import PureLlmConsultationBrain

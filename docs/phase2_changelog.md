@@ -10,6 +10,40 @@
 - `phase2_execution_checklist.md` 更偏“路线设计与待办清单”
 - 本文更偏“已经发生过哪些阶段性变化、分别解决了什么问题”
 
+## 近期更新：2026-05-17 `brain/` 分层重构、删除未接入残留并重写运行链路文档
+
+### 本次目标
+
+- 把 `brain/` 从“平铺模块 + 超重 service 编排”重构成按运行阶段分层的包结构
+- 保持 `ConsultationBrain`、`process_turn()`、`finalize()` 与 benchmark 配置兼容
+- 删除已不在当前主链中的残留模块，并同步把运行链路文档改成与真实代码一致
+
+### 本次改动
+
+- 目录重组：
+  - 新增 `brain/app/`、`brain/turn/`、`brain/search/`、`brain/acceptance/`、`brain/state/`、`brain/integrations/`、`brain/reporting/`、`brain/config/`、`brain/shared/`
+  - [brain/service.py](/Users/loki/Workspace/GraduationDesign/brain/service.py) 收敛为稳定入口
+  - 重编排主体迁入 [brain/app/brain.py](/Users/loki/Workspace/GraduationDesign/brain/app/brain.py)
+- 编排拆分：
+  - 新增 `TurnCoordinator`、`SearchCoordinator`、`AcceptanceCoordinator`
+  - `ConsultationBrain` 现在是薄门面，主链按 coordinator -> runtime 组织
+- 类型拆分：
+  - 删除 `brain/types.py`
+  - 拆为 [brain/state/runtime.py](/Users/loki/Workspace/GraduationDesign/brain/state/runtime.py) 与 [brain/state/results.py](/Users/loki/Workspace/GraduationDesign/brain/state/results.py)
+- 残留清理：
+  - 删除 `brain/session_dag.py`
+  - 删除 `tests/test_session_dag.py`
+  - 删除 `LearnedResponseTransitionModel` 占位实现
+- 文档更新：
+  - 重写 [docs/brain_runtime_call_chain_guide.md](/Users/loki/Workspace/GraduationDesign/docs/brain_runtime_call_chain_guide.md)
+  - 重写 [brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
+  - 更新根 [README.md](/Users/loki/Workspace/GraduationDesign/README.md) 中 `brain/` 章节
+
+### 验证
+
+- `conda run -n GraduationDesign python -m pytest tests/test_service_config.py tests/test_service_search_impl_switch.py tests/test_service_stop_flow.py tests/test_service_no_tree_greedy.py tests/test_service_repair_flow.py tests/test_retriever.py tests/test_hypothesis_manager.py tests/test_simulation_engine.py tests/test_trajectory_evaluator.py tests/test_acceptance_controller.py tests/test_evidence_parser.py -q`
+  - `96 passed`
+
 ## 近期更新：2026-05-14 让患者已明确陈述的内容直接作为 confirmed evidence
 
 ### 本次目标
