@@ -106,16 +106,19 @@ SUPPORTED_SEARCH_IMPLS = {"legacy", "modular_v2"}
 BRAIN_CONFIG_PATH_ENV_VAR = "BRAIN_CONFIG_PATH"
 
 
+# 规范化 root_action_mode 配置，保证只落在当前支持的策略集合内。
 def _normalize_root_action_mode(value: object) -> str:
     mode = str(value or "mcts").strip().lower()
     return mode if mode in SUPPORTED_ROOT_ACTION_MODES else "mcts"
 
 
+# 规范化搜索实现版本开关，兼容旧配置中的大小写和空值。
 def _normalize_search_impl(value: object) -> str:
     search_impl = str(value or "legacy").strip().lower()
     return search_impl if search_impl in SUPPORTED_SEARCH_IMPLS else "legacy"
 
 
+# 将单路径或路径列表配置统一规整成 tuple，便于后续批量加载统计产物。
 def _normalize_optional_path_list(value: object) -> tuple[str, ...]:
     if isinstance(value, str):
         normalized = value.strip()
@@ -244,6 +247,7 @@ class BrainRuntime:
         stop_decision = StopDecision(False, "verifier_not_ready")
         return self.deps.report_builder.build_final_report(state, stop_decision)
 
+    # 把本轮 A1/turn_interpreter 抽取出来的 MentionItem，进一步和知识图谱实体对齐，补齐 node_id、标准名称、可信链接信息，并返回本轮“肯定存在”的图谱链接结果。
     def _prepare_turn_mentions(
         self,
         turn_result: TurnInterpretationResult,
@@ -365,6 +369,7 @@ class BrainRuntime:
         )
         return pending_action_result
 
+    # 判断某个待验证目标是否属于“没做过/没看到结果应按 unclear 处理”的检查型证据。
     def _is_no_result_unclear_target(self, action: MctsAction) -> bool:
         label = str(action.target_node_label or "")
         question_type = str(action.metadata.get("question_type_hint") or "")
@@ -406,6 +411,7 @@ class BrainRuntime:
 
         return False
 
+    # 识别患者回答里是否表达了“没做 / 不知道 / 没留意结果”这类 no-result 语义。
     def _patient_text_expresses_no_result(self, patient_text: str) -> bool:
         normalized = self._normalize_match_text(patient_text)
         return any(
@@ -437,6 +443,7 @@ class BrainRuntime:
             )
         )
 
+    # 识别患者回答里是否明确表达了阴性、正常或已被排除的负向结果。
     def _patient_text_expresses_explicit_negative_result(self, patient_text: str) -> bool:
         normalized = self._normalize_match_text(patient_text)
         return any(
@@ -457,6 +464,7 @@ class BrainRuntime:
             )
         )
 
+    # 将当前轮统一提及结果压成 slot updates，供 tracker 统一写回槽位状态。
     def _build_slot_updates_from_mentions(
         self,
         mentions: Iterable[ClinicalFeatureItem],
@@ -489,6 +497,7 @@ class BrainRuntime:
 
         return updates
 
+    # 把 mention 层的图谱落点直接写成 evidence_state，供后续 A2/A3/verifier 复用。
     def _apply_generic_evidence_states_from_mentions(
         self,
         session_id: str,
@@ -572,6 +581,7 @@ class BrainRuntime:
             state.metadata["force_a2_refresh_source"] = "pending_action"
             state.metadata["force_a2_refresh_evidence"] = [action.target_node_name]
 
+    # 判断某条 slot update 是否属于足以触发假设重排的强阳性图谱证据。
     def _is_strong_positive_evidence_update(self, update: SlotUpdate) -> bool:
         if update.status != "true" and update.polarity != "present":
             return False
@@ -599,6 +609,7 @@ class BrainRuntime:
         normalized = self._normalize_match_text(normalized_name)
         return any(keyword in normalized for keyword in ("hivrna", "病毒载量", "cd4", "病原", "pcr", "阳性", "检出"))
 
+    # 将 present / absent / unclear 极性映射成 slot 层使用的 true / false / unknown。
     def _polarity_to_slot_status(self, polarity: str) -> str:
         if polarity == "present":
             return "true"
@@ -606,6 +617,7 @@ class BrainRuntime:
             return "false"
         return "unknown"
 
+    # 将当前统一极性兼容回旧 evidence_state.existence 枚举。
     def _polarity_to_existence_compat(self, polarity: str) -> str:
         if polarity == "present":
             return "exist"
@@ -613,6 +625,7 @@ class BrainRuntime:
             return "non_exist"
         return "unknown"
 
+    # 将当前统一极性兼容回旧 clear / hedged resolution 表达。
     def _polarity_to_resolution_compat(self, polarity: str) -> str:
         if polarity in {"present", "absent"}:
             return "clear"
@@ -989,6 +1002,7 @@ class BrainRuntime:
         payloads: list[dict] = []
         seen_mentions: set[str] = set()
 
+        # 将检查名和结果原文统一收集成 linker payload，并去掉重复 mention。
         def add(mention: str, *, source_field: str, result: ExamMentionedResult | None = None) -> None:
             text = str(mention or "").strip()
             if len(text) == 0 or text in seen_mentions:
@@ -1723,6 +1737,7 @@ class BrainRuntime:
 
         return ""
 
+    # 读取某类检查当前是否已做过，供问句去重和 exam_context gating 使用。
     def _exam_context_availability_for_action(self, state: SessionState, exam_kind: str) -> str:
         context = state.exam_context.get(exam_kind)
 
@@ -1960,6 +1975,7 @@ class BrainRuntime:
             candidates,
             [*observed_anchor_candidates, *scope_sibling_candidates],
         )
+        # 把 R1 召回的一批候选疾病，压缩整理成“当前主假设 + 若干备选假设”（内部有轻量竞争性重排）
         a2_result = self.deps.hypothesis_manager.run_a2_hypothesis_generation(patient_context, candidates)
         if len(force_reason) > 0:
             a2_result.metadata.update(
@@ -2029,6 +2045,7 @@ class BrainRuntime:
         self.deps.state_tracker.set_candidate_hypotheses(session_id, ranked)
         return ranked
 
+    # 将 anchor analyzer 的重排结果重新写成 hypothesis scores，供后续搜索直接消费。
     def _apply_observed_anchor_rerank_to_scores(
         self,
         session_id: str,
@@ -2560,11 +2577,13 @@ class BrainRuntime:
         config = getattr(engine, "config", None)
         return _normalize_search_impl(getattr(config, "search_impl", "legacy"))
 
+    # 读取当前 rollout 使用的 transition model 类型，主要供调试和 metadata 透传。
     def _current_transition_model_type(self) -> str:
         simulation_engine = self.deps.simulation_engine
         config = getattr(simulation_engine, "config", None)
         return str(getattr(config, "transition_model_type", "legacy_inline"))
 
+    # 读取当前 rollout 使用的 reward model 类型，主要供调试和 benchmark 归档。
     def _current_reward_model_type(self) -> str:
         simulation_engine = self.deps.simulation_engine
         config = getattr(simulation_engine, "config", None)
@@ -2736,11 +2755,13 @@ class BrainRuntime:
         tracker = self.deps.state_tracker
         # 单轮入口先推进轮次，再统一执行一次 turn_interpreter。
         # 之后所有分支都只消费这一份 mentions 结果，避免重复解释同一回答。
+        # 轮数+1
         turn_index = tracker.increment_turn(session_id)
         tracker.get_session(session_id).metadata["current_turn_evidence_feedback"] = []
         pending_action = tracker.get_pending_action(session_id)
         known_feature_names = self._collect_known_feature_names(session_id)
         try:
+            # 抽取病人病症
             turn_result = self.deps.evidence_parser.interpret_turn(patient_text, pending_action=pending_action)
         except LlmEmptyExtractionError as exc:
             # qwen3.5-flash 偶尔会对“症状轻微，来问问”这类稀疏开场返回空 mentions；
@@ -2757,20 +2778,27 @@ class BrainRuntime:
         # 高成本检查、病原和测量型 detail 的“没做过/没听说”不是结果阴性；
         # 在统一 mentions 写入状态前先改回 unclear，避免形成 hard negative。
         self._normalize_no_result_mentions_for_pending_action(turn_result, pending_action, patient_text)
+        # 把本轮 A1/turn_interpreter 抽取出来的 MentionItem，进一步和知识图谱实体对齐，补齐 node_id、标准名称、可信链接信息，并返回本轮“肯定存在”的图谱链接结果。
         linked_entities = self._prepare_turn_mentions(turn_result, pending_action)
+        # 把统一解释结果包装成PatientContext
         patient_context = self.deps.evidence_parser.build_patient_context_from_turn(turn_result, patient_text)
         a1_result = self.deps.evidence_parser.run_a1_key_symptom_extraction(
             patient_context,
             known_feature_names=known_feature_names,
         )
+        # 将当前轮统一提及结果压成 slot updates，供 tracker 统一写回槽位状态。
         generic_updates = self._build_slot_updates_from_mentions(turn_result.mentions, turn_index=turn_index)
 
         # 统一提及项先合并进会话上下文，再写入通用 slots/evidence_states，
         # 让 present / unclear / absent 都能被后续检索、重排与冲突分析复用。
+        # 按 present > unclear > absent 的优先级合并本轮提及项，形成会话级上下文。
         tracker.merge_mention_items(session_id, turn_result.mentions, turn_index=turn_index)
         if len(generic_updates) > 0:
+            # 更新槽位
             tracker.apply_slot_updates(session_id, generic_updates)
+        # 把 mention 层的图谱落点直接写成 evidence_state
         self._apply_generic_evidence_states_from_mentions(session_id, turn_result.mentions, turn_index=turn_index)
+        # 病原体阳性、影像/化验阳性等强证据进入后，强制下一轮重跑 A2 并刷新 search tree。
         self._mark_a2_refresh_if_strong_updates(
             session_id,
             generic_updates,
@@ -2783,6 +2811,7 @@ class BrainRuntime:
         # - slot / evidence state 更新
         # - route 决策
         # 也就是说，真正的状态刷新发生在 A1/A2/A3 之前。
+        # 根据上一轮待验证动作更新证据状态、槽位状态和路由决策。
         pending_action_result, pending_action_decision, route_after_pending_action, pending_action_updates = self.update_from_pending_action(
             session_id,
             patient_context,
@@ -2823,6 +2852,7 @@ class BrainRuntime:
 
         # 这是基于“当前 session_state 里有没有槽位 / hypothesis”得到的朴素阶段判断，
         # 后面还会与 pending_action 的 route 决策合并，形成真正的 `effective_stage`。
+        # 没线索回 A1，有线索没候选去 A2，有候选就允许进入 A3。
         route_after_slot_update = self.deps.router.route_after_slot_update(state)
 
         # A1 现在只是同一份 mentions 的“首轮检索视图”，因此每轮都可稳定派生，
@@ -2856,6 +2886,7 @@ class BrainRuntime:
                 priority_rank=2,
                 reason="pending_exam_result_followup",
             )
+        # 如果已经追问过一次主诉，但本轮仍无任何有效线索，则停止重复 intake，避免空转。
         elif self._should_stop_after_repeated_chief_complaint(
             session_id,
             patient_context,
@@ -2889,6 +2920,7 @@ class BrainRuntime:
             )
         else:
             # 常规主路径：需要时刷新 A2；若已有候选诊断，则进入 A3 的局部树搜索。
+            # 是否要重新执行a2
             should_run_a2 = self._should_refresh_a2(
                 tracker.get_session(session_id),
                 effective_stage=effective_stage,
@@ -3410,6 +3442,7 @@ class BrainRuntime:
         evidence_state.metadata["related_hypothesis_ids"] = list(feedback_weights.keys())
         return feedback_weights
 
+    # 若动作明确绑定某个 hypothesis，就把反馈范围收敛到该假设，避免无关 fan-out。
     def _feedback_focus_ids(self, action: MctsAction) -> list[str] | None:
         if action.hypothesis_id is None or len(str(action.hypothesis_id).strip()) == 0:
             return None
@@ -3583,6 +3616,7 @@ class BrainRuntime:
         base_state = leaf.metadata.get("rollout_state")
 
         if isinstance(base_state, SessionState):
+            # 这个 leaf 里保存过分支状态
             rollout_state = deepcopy(base_state)
         else:
             rollout_state = tracker.get_rollout_session_copy(session_id)
@@ -3631,8 +3665,11 @@ class BrainRuntime:
         if current_hypothesis is None:
             return []
 
+        # R2检索
         rows = self.deps.retriever.retrieve_r2_expected_evidence(current_hypothesis, session_state)
+        # 过滤
         rows = self._filter_known_verification_rows(session_state, rows)
+        # 构造 A3 问诊动作
         actions = self.deps.action_builder.build_verification_actions(
             rows,
             hypothesis_id=current_hypothesis.node_id,
@@ -3643,6 +3680,7 @@ class BrainRuntime:
         )
         return actions[: self.deps.mcts_engine.config.max_child_nodes]
 
+    # 过滤掉已经问过、已经确认过，或患者当前会话里其实已经说过的验证候选。
     def _filter_known_verification_rows(
         self,
         session_state: SessionState,
@@ -3737,6 +3775,7 @@ class BrainRuntime:
 
         return len(materialized_entries)
 
+    # 在现有 session state 中查找是否已有对象语义上命中当前候选证据节点。
     def _find_patient_stated_match_for_row(
         self,
         state: SessionState,
@@ -3808,6 +3847,7 @@ class BrainRuntime:
 
         return None
 
+    # 为候选证据名构造一组归一化别名，供“患者已经说过”的语义命中判断使用。
     def _build_target_aliases_for_name(self, target_name: str) -> set[str]:
         aliases = {self._normalize_match_text(target_name)}
         normalizer = getattr(getattr(self.deps, "evidence_parser", None), "normalizer", None)
@@ -3827,6 +3867,7 @@ class BrainRuntime:
 
         return {item for item in aliases if len(item) > 0}
 
+    # 用精确或轻量包含规则，在多种候选文本里查找能命中目标别名的那一项。
     def _match_target_aliases(
         self,
         target_aliases: set[str],
@@ -3853,6 +3894,7 @@ class BrainRuntime:
 
         return None
 
+    # 将“患者已经明确说过”的证据物化成真正的 EvidenceState，供后续链路直接复用。
     def _build_trusted_patient_evidence_state(
         self,
         *,
@@ -3890,6 +3932,7 @@ class BrainRuntime:
             },
         )
 
+    # 为 trusted patient evidence 构造一个伪 verify_action，复用现有 hypothesis feedback 逻辑。
     def _build_trusted_patient_evidence_action(
         self,
         hypothesis: HypothesisScore | HypothesisCandidate,
@@ -4250,6 +4293,7 @@ class BrainRuntime:
             ),
         )[:3]
 
+    # 从 competition 候选里挑出当前最值得切换关注的对手假设。
     def _select_best_competition_repair_candidate(self, candidates: list[dict]) -> dict | None:
         if len(candidates) == 0:
             return None
@@ -4795,6 +4839,7 @@ class BrainRuntime:
 
         return "background_context" if self._is_background_action_name(normalized_name, evidence_tags) else "phenotype_support"
 
+    # 给 repair 动作角色分配固定优先级，便于在多个候选间稳定排序。
     def _repair_action_role_priority(self, role: str) -> float:
         return {
             "disease_specific_anchor": 1.0,
@@ -4805,6 +4850,7 @@ class BrainRuntime:
             "background_context": 0.0,
         }.get(role, 0.2)
 
+    # 判断某个动作名称是否更像背景信息而不是高判别力证据。
     def _is_background_action_name(self, normalized_name: str, evidence_tags: set[str]) -> bool:
         if len(evidence_tags & {"immune_status", "general_risk", "underlying_infection"}) > 0:
             return True
@@ -5100,6 +5146,7 @@ class BrainRuntime:
     # 当输入线索过少导致 A2/A3 暂无候选动作时，退回全局冷启动问题，避免会话空转。
     def _choose_cold_start_probe_action(self, session_id: str) -> MctsAction | None:
         state = self.deps.state_tracker.get_session(session_id)
+        # 进入r2阶段，查找当前假设的支持证据，供下一个问题提问
         low_cost_rows = self._collect_remaining_low_cost_r2_candidates(state)
 
         # 如果已经有候选诊断，优先扩展这些候选下仍可直接询问的低成本证据；
@@ -5213,6 +5260,7 @@ class BrainRuntime:
 
         return score
 
+    # 识别 cold-start probe 中的背景型候选，避免首问被低价值问题占满。
     def _is_background_probe_candidate(self, candidate: QuestionCandidate) -> bool:
         text = self._normalize_match_text(" ".join([candidate.name, candidate.label, str(candidate.metadata.get("question_type_hint", ""))]))
         return any(
@@ -5772,6 +5820,7 @@ class BrainRuntime:
             and action.target_node_label == "ClinicalAttribute"
         )
 
+    # 判断当前阶段是否值得用 low-cost explorer 覆盖默认 root action。
     def _should_use_low_cost_explorer(self, state: SessionState, selected_action: MctsAction | None) -> bool:
         if len(state.candidate_hypotheses) == 0:
             return False
@@ -5794,6 +5843,7 @@ class BrainRuntime:
 
         return observed_anchor_score <= background_score + 0.15 and exact_anchor_score < 0.35
 
+    # 统计当前会话里已经观察到多少条较明确的 present 证据，用于 explorer 门控。
     def _observed_present_clear_count(self, state: SessionState) -> int:
         count = 0
 
@@ -5807,6 +5857,7 @@ class BrainRuntime:
 
         return count
 
+    # 判断某个动作是否属于无需高成本检查即可继续观察到的低成本问题。
     def _is_low_cost_observable_action(self, action: MctsAction | None) -> bool:
         if action is None:
             return False
@@ -5826,6 +5877,7 @@ class BrainRuntime:
             "PopulationGroup",
         }
 
+    # 为 low-cost explorer 候选打分，优先保留高判别、低背景、与近期问法不重复的动作。
     def _score_low_cost_explorer_action(self, action: MctsAction | None, *, recent_evidence_tags: list[str]) -> float:
         if action is None:
             return -1.0
@@ -6060,6 +6112,7 @@ class BrainRuntime:
 class ConsultationBrain:
     """保留稳定公共契约的问诊大脑门面。"""
 
+    # 装配 runtime 与三大 coordinator，对外只暴露稳定门面方法。
     def __init__(self, deps: BrainDependencies) -> None:
         # ConsultationBrain 只保留稳定公共契约，真正实现都委托给 runtime + coordinators。
         self.runtime = BrainRuntime(deps)
@@ -6068,29 +6121,36 @@ class ConsultationBrain:
         self.search_coordinator = SearchCoordinator(self.runtime)
         self.acceptance_coordinator = AcceptanceCoordinator(self.runtime)
 
+    # 将未显式挂在门面上的属性继续透传给底层 runtime，兼容旧调用代码。
     def __getattr__(self, name: str) -> Any:
         return getattr(self.runtime, name)
 
+    # 门面入口：创建一条新的问诊会话。
     def start_session(self, session_id: str) -> SessionState:
         # 对外稳定入口：创建并返回一条新的会话状态。
         return self.runtime.start_session(session_id)
 
+    # 门面入口：基于当前会话态生成最终报告。
     def finalize(self, session_id: str) -> dict:
         # 对外稳定入口：从当前会话态生成最终报告。
         return self.acceptance_coordinator.finalize(session_id)
 
+    # 门面入口：显式运行一次 reasoning search，常用于回放或调试。
     def run_reasoning_search(self, session_id: str, patient_context: PatientContext) -> SearchResult:
         # 对外稳定入口：显式触发一次搜索，常用于调试或回放。
         return self.search_coordinator.run_reasoning_search(session_id, patient_context)
 
+    # 门面入口：把 search_result 收口为下一条待提问动作。
     def choose_next_question_from_search(self, session_id: str, search_result: SearchResult) -> MctsAction | None:
         # 对外稳定入口：把搜索结果收口成一条可继续追问的动作。
         return self.search_coordinator.choose_next_question_from_search(session_id, search_result)
 
+    # 门面入口：直接基于既有 search_result 生成 final reasoning report。
     def finalize_from_search(self, session_id: str, search_result: SearchResult) -> dict:
         # 对外稳定入口：直接基于现成的 search_result 生成 reasoning report。
         return self.acceptance_coordinator.finalize_from_search(session_id, search_result)
 
+    # 门面入口：处理一轮患者输入，并返回下一问或终局输出。
     def process_turn(self, session_id: str, patient_text: str) -> dict:
         # 对外最常用入口：处理一轮患者输入并返回下一问或最终报告。
         return self.turn_coordinator.process_turn(session_id, patient_text)

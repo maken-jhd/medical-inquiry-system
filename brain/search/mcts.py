@@ -267,13 +267,16 @@ class MctsEngine:
 
     # 按树节点访问统计计算用于 tree policy 的 UCT 分数。
     def score_tree_node(self, node: TreeNode, parent_visit_count: int) -> float:
+        # 先验分
         prior_score = float(node.metadata.get("prior_score", 0.0)) * self.config.prior_weight
+        # 鉴别收益加分
         discriminative_bonus = self._node_discriminative_gain(node) * self.config.discriminative_gain_weight
 
         if node.visit_count == 0:
             exploration = self.config.exploration_constant * sqrt(log(parent_visit_count + 2))
             return prior_score + discriminative_bonus + exploration + self.config.unvisited_bonus
 
+        # uct计算原则，父访问次数/当前访问次数
         exploration = self.config.exploration_constant * sqrt(
             log(parent_visit_count + 2) / node.visit_count
         )

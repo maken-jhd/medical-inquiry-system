@@ -64,6 +64,7 @@ class ActionBuilder:
             contradiction_priority = float(row.get("contradiction_priority", 0.0))
             relation_weight = float(row.get("relation_weight", 0.0))
             raw_question_type_hint = str(row.get("question_type_hint", "symptom"))
+            # 解析证据获取方式和成本，如direct_ask / low
             acquisition_mode, evidence_cost = self._resolve_acquisition_info(row, raw_question_type_hint)
             question_type_hint = self._normalize_question_type_hint(
                 raw_question_type_hint,
@@ -71,7 +72,9 @@ class ActionBuilder:
                 str(row.get("label", "")),
             )
             exam_kind = self._infer_exam_kind(acquisition_mode, question_type_hint, str(row.get("label", "")))
+            # 计算备选假设重叠度
             alternative_overlap = self._estimate_alternative_overlap(row, alternatives)
+            # 判断当前动作是否命中了主假设推荐的区分性证据。
             recommended_bonus, recommended_match_score, evidence_tags = self._estimate_recommended_bonus(
                 row,
                 preferred_evidence,
@@ -84,6 +87,7 @@ class ActionBuilder:
                 row,
                 hypothesis_preferred_evidence,
             )
+            # 如果 verifier 和 hypothesis 都觉得某个证据值得补问，那它的联合推荐分更高。
             joint_recommended_match_score = self._estimate_joint_recommended_match(
                 verifier_recommended_match_score,
                 hypothesis_recommended_match_score,
@@ -103,8 +107,10 @@ class ActionBuilder:
                 priority += self.config.red_flag_bonus
 
             priority += recommended_bonus
+            # 这个证据是否容易获取。
             accessibility_bias = self._compute_accessibility_bias(acquisition_mode, evidence_cost)
             priority += accessibility_bias
+            # 低成本鉴别加分
             low_cost_discriminative_bonus = self._low_cost_discriminative_bonus(
                 acquisition_mode=acquisition_mode,
                 evidence_cost=evidence_cost,
@@ -113,7 +119,9 @@ class ActionBuilder:
                 target_name=str(row.get("name", row.get("node_id", ""))),
             )
             priority += low_cost_discriminative_bonus
+            # 估计患者负担
             patient_burden = self._estimate_patient_burden(acquisition_mode, evidence_cost, question_type_hint)
+            # 估计可回答性
             answerability_score = self._estimate_answerability_score(
                 action_type=self.config.default_action_type,
                 acquisition_mode=acquisition_mode,

@@ -76,6 +76,7 @@ class HypothesisManager:
             candidates,
             key=lambda item: (-item.score, item.name),
         )
+        # 轻量竞争性重排
         ranked_candidates = self._rerank_candidates_with_competition(sorted_candidates)
 
         primary_hypothesis: Optional[HypothesisCandidate] = None

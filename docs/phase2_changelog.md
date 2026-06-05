@@ -10,6 +10,24 @@
 - `phase2_execution_checklist.md` 更偏“路线设计与待办清单”
 - 本文更偏“已经发生过哪些阶段性变化、分别解决了什么问题”
 
+## 近期更新：2026-05-19 新增虚拟病人构建过程文档
+
+### 本次目标
+
+- 补一份专门面向实现理解和调试的“虚拟病人构建过程”说明
+- 把图谱病例骨架生成、开场构建、truth 匹配、隐藏回答与 replay 接入拆开讲清楚
+
+### 本次改动
+
+- 新增 [docs/virtual_patient_construction_process.md](/Users/loki/Workspace/GraduationDesign/docs/virtual_patient_construction_process.md)
+  - 说明 `VirtualPatientCase / SlotTruth` 结构
+  - 说明 `seed cases` 与 `graph-driven cases` 两条来源
+  - 说明 `GraphCaseGenerator.generate_from_audit_root() -> _build_profile() -> _build_case()` 的真实骨架构建链
+  - 说明 `VirtualPatientRuntime.open_case()` 与 `answer_question()` 如何把骨架变成运行时病人
+  - 补充常见调试入口与阅读顺序
+- 更新 [README.md](/Users/loki/Workspace/GraduationDesign/README.md) 文档索引
+- 更新 [simulator/README.md](/Users/loki/Workspace/GraduationDesign/simulator/README.md) 文档入口
+
 ## 近期更新：2026-05-18 `simulator/` 分层重构、兼容壳保留与运行链路文档重写
 
 ### 本次目标

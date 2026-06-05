@@ -230,6 +230,7 @@ class SimulationEngine:
         negative_reward = 0.0
         doubtful_reward = 0.0
 
+        # 先让 transition model 产出回答分支，再逐分支调用 reward model 评估本步收益。
         for branch in branches:
             reward_evaluation = self.reward_model.evaluate_branch(
                 session_state=session_state,
@@ -242,16 +243,19 @@ class SimulationEngine:
             )
             reward = max(float(reward_evaluation.reward), 0.0)
             weighted_reward = branch.probability * reward
+            # 鉴别诊断收益
             discriminative_branch_bonus = self._estimate_branch_discriminative_bonus(
                 action=action,
                 branch=branch,
                 reward_breakdown=reward_evaluation.metadata,
             )
+            # 备选假设保留收益
             alternative_preservation_branch_bonus = self._estimate_branch_alternative_preservation_bonus(
                 action=action,
                 branch=branch,
                 reward_breakdown=reward_evaluation.metadata,
             )
+            # 阶段感知覆盖收益
             stage_aware_coverage_branch_bonus = self._estimate_branch_stage_aware_coverage_bonus(
                 action=action,
                 branch=branch,
@@ -263,6 +267,7 @@ class SimulationEngine:
                 + alternative_preservation_branch_bonus
                 + stage_aware_coverage_branch_bonus
             )
+            # expected_reward 保留“概率加权 reward”，而 branch 选择额外把覆盖/鉴别 bonus 并入 selection_score。
             expected_reward += weighted_reward
             discriminative_action_bonus += discriminative_branch_bonus
             alternative_preservation_action_bonus += alternative_preservation_branch_bonus
@@ -290,6 +295,7 @@ class SimulationEngine:
             elif branch.branch_name == "doubtful":
                 doubtful_reward = reward
 
+        # trajectory 最终分数除了 raw expected reward，还会额外计入动作级鉴别/覆盖 bonus。
         expected_reward += (
             discriminative_action_bonus
             + alternative_preservation_action_bonus
@@ -454,6 +460,7 @@ class SimulationEngine:
             return []
 
         hypothesis = self._resolve_hypothesis(node, state, current_hypothesis)
+        # 先模拟一次当前动作，得到初始 outcome
         initial_outcome = self.simulate_action(
             action,
             state,
@@ -461,12 +468,15 @@ class SimulationEngine:
             patient_context=patient_context,
             candidate_hypotheses=state.candidate_hypotheses,
         )
+        # 根据初始 outcome 构造 branch_payloads
         branch_payloads = self._build_branch_payloads(action, initial_outcome)
+        # 选择要保留的 branch seeds
         branch_seeds = self._select_rollout_branch_seeds(branch_payloads)
 
         trajectories: list[ReasoningTrajectory] = []
         for seed in branch_seeds:
             trajectories.append(
+                # 对每个 branch_seed 各自 rollout 一条轨迹
                 self._rollout_from_tree_node_with_seed(
                     node,
                     state,
@@ -692,6 +702,7 @@ class SimulationEngine:
         if isinstance(branch_estimates, list) and len(branch_estimates) > 0:
             payloads: list[dict] = []
 
+            # modular_v2 优先复用 reward model 已拆好的 branch_estimates，避免再次手写分支结构。
             for item in branch_estimates:
                 if not isinstance(item, dict):
                     continue
@@ -730,6 +741,7 @@ class SimulationEngine:
             if len(payloads) > 0:
                 return payloads
 
+        # legacy 或 branch_estimates 缺失时，退回统一的三分支结构，保证下游 router/rollout 不分实现版本。
         positive_probability = float(outcome.metadata.get("positive_probability", self.config.positive_branch_probability))
         negative_probability = float(outcome.metadata.get("negative_probability", 1.0 - positive_probability))
         doubtful_probability = float(outcome.metadata.get("doubtful_probability", self.config.doubtful_branch_probability))
@@ -806,6 +818,7 @@ class SimulationEngine:
         selected: list[dict] = []
         selected_branches: set[str] = set()
 
+        # 统一去重加入 branch payload，避免多次塞进同一分支。
         def add_payload(payload: dict | None) -> None:
             if payload is None:
                 return
@@ -839,6 +852,7 @@ class SimulationEngine:
 
         return selected[:budget]
 
+    # 在一组 branch payload 中按名字查找指定分支，供 seed rollout 和诊断调试复用。
     def _find_branch_payload(self, branch_payloads: list[dict], branch_name: str) -> dict | None:
         for payload in branch_payloads:
             if str(payload.get("branch") or "") == branch_name:
@@ -864,6 +878,7 @@ class SimulationEngine:
         early_broad_bonuses: list[float] = []
         early_over_collapse_penalties: list[float] = []
 
+        # 从每个 branch 的 reward_breakdown 中抽取 acceptance / discrimination / coverage proxy。
         for payload in branch_payloads:
             breakdown = payload.get("reward_breakdown", {})
             if not isinstance(breakdown, dict):
@@ -908,6 +923,7 @@ class SimulationEngine:
             if isinstance(early_over_collapse_penalty, (int, float)):
                 early_over_collapse_penalties.append(float(early_over_collapse_penalty))
 
+        # 如果这一组 rollout branch 没留下任何 proxy，就不向 trajectory metadata 写空壳字段。
         if (
             len(belief_margins) == 0
             and len(uncertainty_reductions) == 0
@@ -919,6 +935,7 @@ class SimulationEngine:
         ):
             return {}
 
+        # 把多分支 proxy 压成 trajectory 级均值或一致性分数，供最终 acceptance 轻量消费。
         margin_mean = sum(belief_margins) / len(belief_margins) if len(belief_margins) > 0 else 0.0
         risk_mean = sum(acceptance_risks) / len(acceptance_risks) if len(acceptance_risks) > 0 else 0.0
         support_mean = sum(support_qualities) / len(support_qualities) if len(support_qualities) > 0 else 0.0
@@ -979,12 +996,14 @@ class SimulationEngine:
             ),
         }
 
+    # 按当前 branch_selection_mode 从分支集合中选出下一步 rollout 要走的回答分支。
     def _select_best_branch_payload(self, branch_payloads: list[dict], action_id: str) -> dict:
         mode = str(self.config.branch_selection_mode or "greedy").strip().lower()
 
         if mode == "sampled":
             return self._sample_branch_payload(branch_payloads, action_id)
 
+        # expectation_ready 模式优先看分支概率，给后续真正的 chance node rollout 留接口。
         if mode == "expectation_ready":
             return sorted(
                 branch_payloads,
@@ -1008,6 +1027,7 @@ class SimulationEngine:
             return sorted(branch_payloads, key=lambda item: item["branch"])[0]
         return Random(seed).choices(branch_payloads, weights=weights, k=1)[0]
 
+    # 为 sampled rollout 生成稳定 seed，保证同一批 branch payload 的采样结果可复现。
     def _build_branch_selection_seed(self, branch_payloads: list[dict], action_id: str) -> int:
         payload = "|".join(
             f"{action_id}:{item.get('branch')}:{round(float(item.get('probability', 0.0) or 0.0), 4)}"
@@ -1060,9 +1080,11 @@ class SimulationEngine:
         )
         return penalty, "low_observed_anchor_positive_branch_collapse_risk"
 
+    # 统一读取 branch payload 的 selection_score，没有时退回 weighted_reward。
     def _payload_selection_score(self, payload: dict) -> float:
         return float(payload.get("selection_score", payload.get("weighted_reward", 0.0)) or 0.0)
 
+    # 估计某个回答分支对“拉开 top 候选差距”和“压制竞争病”的额外收益。
     def _estimate_branch_discriminative_bonus(
         self,
         *,
@@ -1081,6 +1103,7 @@ class SimulationEngine:
         probability = max(float(branch.probability), 0.0)
         question_type_hint = str(action.metadata.get("question_type_hint", "") or "")
 
+        # modular_v2 会把 reward surrogate 额外折算成 branch selection bonus，强调鉴别价值而不仅是单步 reward。
         bonus = probability * (
             top3_separation_gain * 0.22
             + competitor_elimination * 0.24
@@ -1088,6 +1111,7 @@ class SimulationEngine:
             + discriminative_support * 0.14
             + action_discriminative_gain * 0.08
         )
+        # detail 问法若没明显拉开候选差距，就适当压一点，避免 rollout 过度偏爱低价值细节问题。
         if (
             question_type_hint == "detail"
             and top3_separation_gain < 0.035
@@ -1232,6 +1256,7 @@ class SimulationEngine:
             },
         )
 
+        # 再把这条模拟证据投影到相关 hypothesis 上，得到更新后的候选排序。
         related_ids = [action.hypothesis_id] if action.hypothesis_id is not None else None
         feedback_weights = hypothesis_manager.resolve_evidence_feedback_weights(
             state.candidate_hypotheses,
@@ -1259,6 +1284,7 @@ class SimulationEngine:
         decision: object,
         hypothesis_manager: HypothesisManager,
     ) -> tuple[HypothesisCandidate | HypothesisScore | None, list[HypothesisScore]]:
+        # 每次 route 后都按“更新后的状态”重新抽 top hypotheses，而不是沿用旧备选集。
         ranked = hypothesis_manager.select_expandable_hypotheses(state.candidate_hypotheses, top_k=3)
         ranked_alternatives = [
             item
@@ -1268,6 +1294,7 @@ class SimulationEngine:
 
         next_stage = getattr(decision, "next_stage", "A3")
 
+        # route 回到 A2 时，允许当前 rollout 主视角切到更高分的备选假设。
         if next_stage == "A2":
             next_hypothesis = ranked_alternatives[0] if len(ranked_alternatives) > 0 else current_hypothesis
             remaining = ranked_alternatives[1:] if len(ranked_alternatives) > 1 else []
@@ -1330,9 +1357,11 @@ class SimulationEngine:
 
         return 0.0
 
+    # 判断当前 simulation 是否走 modular_v2 路径，供分支 bonus 和 rollout 逻辑做门控。
     def _uses_modular_v2(self) -> bool:
         return str(self.config.search_impl or "legacy").strip().lower() == "modular_v2"
 
+    # 为 legacy 模式构造统一的 branch_estimate 负载，便于下游复用同一套 payload 结构。
     def _build_legacy_branch_estimate(
         self,
         *,
@@ -1365,6 +1394,7 @@ class SimulationEngine:
         normalized_polarity = polarity if polarity in {"present", "absent", "unclear"} else "unclear"
         normalized_resolution = resolution if resolution in {"clear", "hedged"} else "hedged"
 
+        # 先按 branch_name 做标准化映射，兼容 verify 和 exam_context 两套分支命名。
         if branch_name in {"positive", "done_positive"}:
             normalized_polarity = "present"
             normalized_resolution = "clear"
@@ -1375,6 +1405,7 @@ class SimulationEngine:
             normalized_polarity = "unclear"
             normalized_resolution = "hedged"
 
+        # 再把标准化后的 branch 重新投影成 router / pending_action 共用的结构化回答结果。
         if normalized_polarity == "present":
             return PendingActionResult(
                 action_type=action.action_type,

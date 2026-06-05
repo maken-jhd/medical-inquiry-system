@@ -187,11 +187,13 @@ class EvidenceParser:
             metadata={"source": "turn_interpreter", **dict(turn_result.metadata)},
         )
 
+    # 将统一 mentions 过滤、去重后压成 A1 仍在消费的 key_features 列表。
     def _build_a1_result_from_turn(
         self,
         turn_result: TurnInterpretationResult,
         known_feature_names: Optional[Sequence[str]] = None,
     ) -> A1ExtractionResult:
+        # 先屏蔽上游已经见过的特征，避免同一轮回答重复入池。
         known_names = {
             self.normalizer.normalize_graph_mention(str(item))
             for item in (known_feature_names or [])
@@ -200,6 +202,7 @@ class EvidenceParser:
         key_features: List[KeyFeature] = []
         seen_normalized_names: set[str] = set()
 
+        # 只把 present 的稳定提及转成 A1 可继续检索的正向线索。
         for mention in turn_result.mentions:
             if mention.polarity != "present":
                 continue
@@ -226,6 +229,7 @@ class EvidenceParser:
             metadata={"source": "turn_interpreter", **dict(turn_result.metadata)},
         )
 
+    # 将“有/没有/不确定”短答直接包装成针对 pending target 的单条 mention。
     def _build_direct_reply_turn_result(
         self,
         patient_text: str,
@@ -264,6 +268,7 @@ class EvidenceParser:
             metadata={"source": "direct_reply_rule", "direct_reply": direct_reply},
         )
 
+    # 将 LLM 返回的 mentions payload 规整成统一的 TurnInterpretationResult。
     def _coerce_turn_payload(
         self,
         payload: dict,
@@ -278,6 +283,7 @@ class EvidenceParser:
                 message="turn_interpreter 收到的 payload 不是 JSON object。",
             )
 
+        # 兼容新旧 prompt 字段名，统一读取 mentions 列表。
         raw_mentions = payload.get("mentions", payload.get("clinical_features", payload.get("key_features", [])))
         mentions: list[MentionItem] = []
 
@@ -292,6 +298,7 @@ class EvidenceParser:
                 message="turn_interpreter 的 mentions 字段不是数组。",
             )
 
+        # 逐项把字符串或对象形式的提及规整为 MentionItem。
         for item in raw_mentions:
             if isinstance(item, str):
                 raw_name = item
@@ -328,6 +335,7 @@ class EvidenceParser:
                 )
             )
 
+        # verify_evidence 场景若没有稳定命中目标节点，就补一个 unclear mention 交给后续状态机消费。
         if pending_action is not None and pending_action.action_type == "verify_evidence":
             matched = self._find_best_target_mention(mentions, pending_action)
             if matched is None:
@@ -347,6 +355,7 @@ class EvidenceParser:
                     )
                 )
 
+        # 没有任何稳定提及时，让上游按空抽取 fallback 处理。
         if len(mentions) == 0:
             raise LlmEmptyExtractionError(
                 stage="turn_interpreter",
@@ -361,6 +370,7 @@ class EvidenceParser:
             metadata={"source": "llm"},
         )
 
+    # 围绕当前 pending target，从统一 mentions 中解析出 A4 可消费的结构化结果。
     def _build_pending_action_result_from_turn(
         self,
         turn_result: TurnInterpretationResult,
@@ -369,6 +379,7 @@ class EvidenceParser:
     ) -> PendingActionResult:
         matched = self._find_best_target_mention(turn_result.mentions, action)
 
+        # 没有命中目标提及时，统一按 unclear / hedged 返回。
         if matched is None:
             return PendingActionResult(
                 action_type=action.action_type,
@@ -393,6 +404,7 @@ class EvidenceParser:
             or turn_result.metadata.get("direct_reply")
             or ""
         ).strip()
+        # 将命中 mention 的极性压成 pending_action 兼容字段。
         if matched.polarity == "present":
             return PendingActionResult(
                 action_type=action.action_type,
@@ -448,6 +460,7 @@ class EvidenceParser:
             },
         )
 
+    # 对外暴露的 pending_action 解释入口，便于上游直接复用统一 target 解析逻辑。
     def derive_pending_action_result(
         self,
         turn_result: TurnInterpretationResult,
@@ -457,6 +470,7 @@ class EvidenceParser:
         # 若上游已经拿到了统一 turn_result，这里只做“目标感知解释”，不再重新解析患者原文。
         return self._build_pending_action_result_from_turn(turn_result, action, patient_text)
 
+    # 对外暴露的目标 mention 查询入口，供调试和旧调用链直接使用。
     def find_target_mention(
         self,
         mentions: Sequence[MentionItem],
@@ -464,6 +478,7 @@ class EvidenceParser:
     ) -> MentionItem | None:
         return self._find_best_target_mention(mentions, action)
 
+    # 优先按 node_id，再按别名集合，在统一提及中定位当前目标节点。
     def _find_best_target_mention(
         self,
         mentions: Sequence[MentionItem],
@@ -475,10 +490,12 @@ class EvidenceParser:
             if len(self.normalizer.normalize_graph_mention(alias)) > 0
         }
 
+        # 先走最强的 node_id 命中，避免别名碰撞。
         for mention in mentions:
             if mention.node_id is not None and mention.node_id == action.target_node_id:
                 return mention
 
+        # 再按归一化别名做宽松匹配，兼容患者自然表达和 exam candidate 名称。
         for mention in mentions:
             normalized_name = self.normalizer.normalize_graph_mention(mention.normalized_name or mention.name)
             if normalized_name in target_aliases:
@@ -486,6 +503,7 @@ class EvidenceParser:
 
         return None
 
+    # 汇总目标节点本名、归一化别名和 exam candidate 名称，供目标命中判断复用。
     def _candidate_target_aliases(self, target_name: str, action: MctsAction | None = None) -> list[str]:
         normalized_name = self.normalizer.normalize_graph_mention(target_name)
         aliases = set([target_name, normalized_name])
@@ -504,6 +522,7 @@ class EvidenceParser:
 
         return [alias for alias in aliases if len(str(alias).strip()) > 0]
 
+    # 兼容不同 prompt 的极性表述，统一压成 present / absent / unclear。
     def _coerce_mention_polarity(self, value: object) -> str:
         normalized = str(value or "").strip().lower()
         if normalized in {"present", "exist", "positive", "true", "yes"}:
@@ -514,7 +533,7 @@ class EvidenceParser:
             return "unclear"
         return "present"
 
-
+    # 将 exam_context 的直接短答映射成 availability 结果，避免无意义调用 LLM。
     def _build_direct_reply_exam_context_result(
         self,
         *,
@@ -556,6 +575,7 @@ class EvidenceParser:
             },
         )
 
+    # 把 exam_context prompt 的结构化返回规整成运行时结果对象。
     def _coerce_exam_context_payload(
         self,
         payload: dict,
@@ -580,12 +600,14 @@ class EvidenceParser:
                 message=f"Exam context interpretation 返回了非法 availability：{availability or '空'}",
             )
 
+        # 检查名先统一做归一化，便于后续 candidate match 和 follow-up 策略复用。
         mentioned_tests = [
             self.normalizer.normalize_exam_name(str(item))
             for item in payload.get("mentioned_tests", [])
             if len(str(item).strip()) > 0
         ]
         mentioned_results: list[ExamMentionedResult] = []
+        # 再把每条结果压成 test_name + result_direction 的轻量对象。
         for item in payload.get("mentioned_results", []):
             if not isinstance(item, dict):
                 continue
@@ -634,8 +656,6 @@ class EvidenceParser:
     ) -> List[SlotUpdate]:
         updates: List[SlotUpdate] = []
 
-        # exam_context 不是所有回答都能回填成图谱证据；
-        # 只有 availability 明确且结果可映射时，才往 slots 写结构化更新。
         # 只有“做过检查”且给出了可解析结果时，才尝试把回答映射回具体证据节点。
         if exam_result.availability != "done" or len(exam_result.mentioned_results) == 0:
             return updates
@@ -893,6 +913,7 @@ class EvidenceParser:
         candidate_label = str(candidate.get("label") or "").strip()
         normalized_candidate = self._normalize_exam_text(candidate_name)
 
+        # 逐条结果寻找能命中当前候选节点的检查家族。
         for result in exam_result.mentioned_results:
             normalized_text = self._normalize_exam_text(f"{result.test_name} {result.raw_text}")
             result_direction = result.normalized_result
@@ -906,6 +927,7 @@ class EvidenceParser:
             if not family_match:
                 continue
 
+            # 一旦命中候选家族，就把方向压成状态机可消费的 true / false。
             if result_direction == "negative":
                 return "false", "clear", result.raw_text
 
@@ -929,11 +951,13 @@ class EvidenceParser:
         ):
             return True
 
+        # 影像类优先按胸片 / CT / 磨玻璃这类共享关键词族匹配。
         if exam_kind == "imaging" or candidate_label == "ImagingFinding":
             return any(keyword in normalized_candidate for keyword in ("ct", "影像", "磨玻璃", "胸片")) and any(
                 keyword in normalized_text for keyword in ("ct", "影像", "磨玻璃", "胸片")
             )
 
+        # 病原学节点更依赖 PCR / 核酸 / 痰检 / 灌洗等家族词共现。
         if exam_kind == "pathogen" or candidate_label == "Pathogen" or (
             exam_kind == "general"
             and any(keyword in normalized_candidate for keyword in ("pcr", "核酸", "病原", "肺孢子", "痰", "灌洗", "bal"))
@@ -942,6 +966,7 @@ class EvidenceParser:
                 keyword in normalized_text for keyword in ("pcr", "核酸", "病原", "肺孢子", "痰", "灌洗", "bal", "阳性", "检出")
             )
 
+        # 化验类再走少量阈值 / 家族规则，兼容“CD4 很低”“BDG 升高”这类表达。
         if exam_kind in {"lab", "general"}:
             lab_family_rules = (
                 (("cd4", "t淋巴"), ("cd4", "t淋巴", "很低", "偏低", "小于", "不到")),
@@ -1091,6 +1116,7 @@ class EvidenceParser:
         _ = patient_text
         return False
 
+    # 兼容历史 selected / none_salient 表达，统一成当前 A1 决策枚举。
     def _coerce_selection_decision(self, value: object, *, has_key_features: bool) -> str:
         if isinstance(value, bool):
             return "selected" if value else "none_salient"

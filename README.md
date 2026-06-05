@@ -32,6 +32,7 @@
 - 论文实验与测试章节草稿：[thesis_experiment_and_test_section_draft.md](/Users/loki/Workspace/GraduationDesign/docs/thesis_experiment_and_test_section_draft.md)
 - 虚拟病人与离线回放：[simulator/README.md](/Users/loki/Workspace/GraduationDesign/simulator/README.md)
 - 图谱驱动虚拟病人详细方案：[virtual_patient_generation_scheme.md](/Users/loki/Workspace/GraduationDesign/docs/virtual_patient_generation_scheme.md)
+- 虚拟病人构建过程说明：[virtual_patient_construction_process.md](/Users/loki/Workspace/GraduationDesign/docs/virtual_patient_construction_process.md)
 - 前端演示界面：[frontend/README.md](/Users/loki/Workspace/GraduationDesign/frontend/README.md)
 - 第二阶段测试：[tests/README.md](/Users/loki/Workspace/GraduationDesign/tests/README.md)
 

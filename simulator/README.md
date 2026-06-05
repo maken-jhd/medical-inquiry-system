@@ -40,6 +40,7 @@ simulator/
 更详细的逐函数调用链、调试索引和旧新模块映射见：
 
 - [simulator_runtime_call_chain_guide.md](/Users/loki/Workspace/GraduationDesign/docs/simulator_runtime_call_chain_guide.md)
+- [virtual_patient_construction_process.md](/Users/loki/Workspace/GraduationDesign/docs/virtual_patient_construction_process.md)
 
 ## 稳定入口
 

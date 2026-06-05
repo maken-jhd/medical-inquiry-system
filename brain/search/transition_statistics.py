@@ -145,12 +145,15 @@ class TransitionStatistics:
     smoothing_alpha: float = 0.5
     min_total_count: int = 3
 
+    # 判断 verify 分支统计表是否已经积累到至少一条全局样本。
     def has_verify_statistics(self) -> bool:
         return sum(self.verify_global.values()) > 0
 
+    # 判断 exam_context 相关统计表是否已经积累到至少一条全局样本。
     def has_exam_statistics(self) -> bool:
         return sum(self.exam_availability_global.values()) > 0
 
+    # 读取某个疾病-证据节点对应的 family 标签，供动作上下文回填使用。
     def lookup_evidence_families(self, disease_id: str | None, node_id: str | None) -> tuple[str, ...]:
         normalized_disease_id = str(disease_id or "").strip()
         normalized_node_id = str(node_id or "").strip()
@@ -166,6 +169,7 @@ class TransitionStatistics:
         evidence_family: str | None,
         question_type: str | None,
     ) -> ConditionalBranchDistribution:
+        # 先把查询键规整到统计表统一使用的 disease / family / question_type 口径。
         normalized_disease_id = str(disease_id or "").strip()
         normalized_family = str(evidence_family or "").strip()
         normalized_question_type = normalize_question_type_hint(
@@ -173,6 +177,7 @@ class TransitionStatistics:
             "",
             "",
         )
+        # 然后按最细粒度到全局逐层 backoff，找到当前最可靠的 verify 分布。
         return self._query_distribution(
             outcomes=VERIFY_OUTCOMES,
             levels=[
@@ -213,6 +218,7 @@ class TransitionStatistics:
         disease_id: str | None,
         exam_kind: str | None,
     ) -> ConditionalBranchDistribution:
+        # exam availability 只看 disease 和 exam_kind 两类条件，不再区分 family。
         normalized_disease_id = str(disease_id or "").strip()
         normalized_exam_kind = normalize_exam_kind(str(exam_kind or "").strip())
         return self._query_distribution(
@@ -241,12 +247,14 @@ class TransitionStatistics:
             ],
         )
 
+    # 查询“检查做完之后结果如何”的条件分布，供 exam_context 第二阶段使用。
     def query_exam_result_distribution(
         self,
         *,
         disease_id: str | None,
         test_type: str | None,
     ) -> ConditionalBranchDistribution:
+        # exam result 侧按 disease + test_type 查询，test_type 口径和 exam_kind 保持一致。
         normalized_disease_id = str(disease_id or "").strip()
         normalized_test_type = normalize_exam_kind(str(test_type or "").strip())
         return self._query_distribution(
@@ -275,6 +283,7 @@ class TransitionStatistics:
             ],
         )
 
+    # 记录一条普通 verify 观测，并同步更新多层 backoff 桶。
     def record_verify_observation(
         self,
         *,
@@ -283,6 +292,7 @@ class TransitionStatistics:
         question_type: str | None,
         outcome: str,
     ) -> None:
+        # verify 观测会同时回填全局、按 question_type、按 family、按 disease 的多层统计桶。
         normalized_outcome = normalize_verify_outcome(outcome)
         normalized_disease_id = str(disease_id or "").strip()
         normalized_family = str(evidence_family or "").strip() or default_family_for_question_type(question_type)
@@ -306,6 +316,7 @@ class TransitionStatistics:
                 normalized_outcome,
             )
 
+    # 记录一条 exam availability 观测，用于 done / not_done / unclear 分流。
     def record_exam_availability_observation(
         self,
         *,
@@ -313,6 +324,7 @@ class TransitionStatistics:
         exam_kind: str | None,
         outcome: str,
     ) -> None:
+        # availability 只记录做过 / 没做 / 不清楚三类结果，用于 exam_context 第一层分流。
         normalized_outcome = normalize_exam_availability(outcome)
         normalized_disease_id = str(disease_id or "").strip()
         normalized_exam_kind = normalize_exam_kind(str(exam_kind or "").strip())
@@ -326,6 +338,7 @@ class TransitionStatistics:
                 normalized_outcome,
             )
 
+    # 记录一条 exam result 观测，用于 positive / negative / unclear 结果分布。
     def record_exam_result_observation(
         self,
         *,
@@ -333,6 +346,7 @@ class TransitionStatistics:
         test_type: str | None,
         outcome: str,
     ) -> None:
+        # exam result 只在已经 done 的前提下记录，统计 positive / negative / unclear 的结果走向。
         normalized_outcome = normalize_exam_result(outcome)
         normalized_disease_id = str(disease_id or "").strip()
         normalized_test_type = normalize_exam_kind(str(test_type or "").strip())
@@ -346,12 +360,14 @@ class TransitionStatistics:
                 normalized_outcome,
             )
 
+    # 在多层条件桶里挑选当前最可靠的分布，并在样本不足时平滑回退。
     def _query_distribution(
         self,
         *,
         outcomes: Sequence[str],
         levels: Sequence[tuple[str, Counter[str] | None, tuple[str, ...]]],
     ) -> ConditionalBranchDistribution:
+        # 若细粒度桶样本量不够，就继续向上回退；同时保留最后一个可用桶做平滑兜底。
         fallback_level = "global"
         fallback_key = ("global",)
         fallback_counter = Counter()
@@ -361,6 +377,7 @@ class TransitionStatistics:
                 continue
             total = sum(counter.values())
             if total >= max(int(self.min_total_count), 1):
+                # 一旦命中满足最小样本量的桶，就直接返回该层的平滑分布。
                 return ConditionalBranchDistribution(
                     probabilities=_smoothed_distribution(counter, outcomes, self.smoothing_alpha),
                     total_count=float(total),
@@ -372,6 +389,7 @@ class TransitionStatistics:
             fallback_key = key
             fallback_counter = counter
 
+        # 所有层级都不够“像样”时，仍然用最后一个可用桶做平滑，避免返回空分布。
         return ConditionalBranchDistribution(
             probabilities=_smoothed_distribution(fallback_counter, outcomes, self.smoothing_alpha),
             total_count=float(sum(fallback_counter.values())),
@@ -380,6 +398,7 @@ class TransitionStatistics:
             metadata={"smoothing_alpha": self.smoothing_alpha},
         )
 
+    # 给某个 Counter 或“键 -> Counter”存储结构统一加一条观测。
     def _bump_counter(
         self,
         store: dict[Any, Counter[str]] | Counter[str],
@@ -398,9 +417,11 @@ class TransitionStatistics:
 class TransitionStatisticsBuilder:
     """从图谱病例与 replay 输出构建统计版转移频数表。"""
 
+    # 保存离线统计构建所需的路径解析与平滑配置。
     def __init__(self, config: TransitionStatisticsConfig | None = None) -> None:
         self.config = config or TransitionStatisticsConfig()
 
+    # 构建一份完整的 TransitionStatistics，并按来源依次加载 catalog、cases 和 replay。
     def build(self) -> TransitionStatistics:
         stats = TransitionStatistics(
             smoothing_alpha=float(self.config.smoothing_alpha),
@@ -414,6 +435,7 @@ class TransitionStatisticsBuilder:
                 "replay_record_count": 0,
             },
         )
+        # 先解析显式路径或 auto glob 命中的最新产物，并把来源记录进 metadata 便于调试。
         graph_case_paths = self._resolve_paths(self.config.graph_case_paths, self.config.graph_case_glob)
         replay_result_paths = self._resolve_paths(self.config.replay_result_paths, self.config.replay_result_glob)
         evidence_catalog_paths = self._resolve_paths(
@@ -424,15 +446,19 @@ class TransitionStatisticsBuilder:
         stats.source_metadata["replay_result_paths"] = [str(path) for path in replay_result_paths]
         stats.source_metadata["evidence_catalog_paths"] = [str(path) for path in evidence_catalog_paths]
 
+        # catalog 先提供 disease-node -> families 映射，后续 cases / replay 可直接复用。
         for path in evidence_catalog_paths:
             self._load_evidence_catalog(path, stats)
+        # graph cases 提供“真值层”的 verify / exam 观测。
         for path in graph_case_paths:
             self._load_graph_cases(path, stats)
+        # replay 结果再补“实际对话回放”视角下的观测分布。
         for path in replay_result_paths:
             self._load_replay_results(path, stats)
 
         return stats
 
+    # 优先使用显式路径；若未指定且 source_mode=auto，则自动抓取 glob 命中的最新文件。
     def _resolve_paths(self, explicit_paths: Sequence[str], auto_glob: str) -> tuple[Path, ...]:
         expanded_explicit_paths = self._expand_explicit_paths(explicit_paths)
         if len(expanded_explicit_paths) > 0:
@@ -448,6 +474,7 @@ class TransitionStatisticsBuilder:
         latest = max(matches, key=lambda path: path.stat().st_mtime)
         return (latest,)
 
+    # 将用户给的文件或目录路径展开成真实可读取的统计输入文件列表。
     def _expand_explicit_paths(self, explicit_paths: Sequence[str]) -> tuple[Path, ...]:
         resolved: list[Path] = []
         for raw_path in explicit_paths:
@@ -469,6 +496,7 @@ class TransitionStatisticsBuilder:
         deduped = sorted({item.resolve() for item in resolved})
         return tuple(deduped)
 
+    # 从 evidence family catalog 读取 disease-node -> families 的静态映射。
     def _load_evidence_catalog(self, path: Path, stats: TransitionStatistics) -> None:
         payload = self._load_json(path)
         if not isinstance(payload, dict):
@@ -495,6 +523,7 @@ class TransitionStatisticsBuilder:
                     continue
                 stats.evidence_families_by_disease_and_node[(disease_id, evidence_id)] = families
 
+    # 逐条消费图谱生成病例，提炼出 verify 和 exam 的真值观测。
     def _load_graph_cases(self, path: Path, stats: TransitionStatistics) -> None:
         for record in self._iter_json_records(path):
             if not isinstance(record, dict):
@@ -504,6 +533,7 @@ class TransitionStatisticsBuilder:
                 int(stats.source_metadata.get("graph_case_record_count", 0)) + 1
             )
 
+    # 逐条消费 replay 结果，把真实问答轨迹转成统计观测。
     def _load_replay_results(self, path: Path, stats: TransitionStatistics) -> None:
         for record in self._iter_json_records(path):
             if not isinstance(record, dict):
@@ -513,11 +543,13 @@ class TransitionStatisticsBuilder:
                 int(stats.source_metadata.get("replay_record_count", 0)) + 1
             )
 
+    # 将一条 graph case 真值病例压成 verify / exam 的离线统计观测。
     def _consume_graph_case(self, record: dict[str, Any], stats: TransitionStatistics) -> None:
         metadata = record.get("metadata")
         metadata = metadata if isinstance(metadata, dict) else {}
         disease_id = str(metadata.get("disease_id") or "").strip()
         case_id = str(record.get("case_id") or "").strip()
+        # 先记住 case_id -> disease_id 映射，后面 replay 结果会靠它回溯疾病上下文。
         if len(case_id) > 0 and len(disease_id) > 0:
             stats.case_disease_map[case_id] = disease_id
 
@@ -525,6 +557,7 @@ class TransitionStatisticsBuilder:
         slot_truth_map = slot_truth_map if isinstance(slot_truth_map, dict) else {}
         exam_outcomes_by_kind: dict[str, list[str]] = {kind: [] for kind in EXAM_KINDS if kind != "general"}
 
+        # 每个 truth slot 同时贡献 verify 统计；若它属于 lab / imaging / pathogen，再顺手积累 exam 真值。
         for slot_id, raw_slot in slot_truth_map.items():
             if not isinstance(raw_slot, dict):
                 continue
@@ -552,6 +585,7 @@ class TransitionStatisticsBuilder:
                 exam_outcomes_by_kind[question_type].append(verify_outcome)
 
         all_exam_outcomes: list[str] = []
+        # 对每类 exam 先估 availability，再把多个 slot 真值压成一个粗粒度 result outcome。
         for exam_kind, outcomes in exam_outcomes_by_kind.items():
             availability = "done" if len(outcomes) > 0 else "not_done"
             stats.record_exam_availability_observation(
@@ -568,6 +602,7 @@ class TransitionStatisticsBuilder:
                 )
                 all_exam_outcomes.extend(outcomes)
 
+        # general exam_context 作为所有具体高成本检查的总入口，也要补一份聚合统计。
         general_availability = "done" if len(all_exam_outcomes) > 0 else "not_done"
         stats.record_exam_availability_observation(
             disease_id=disease_id,
@@ -581,6 +616,7 @@ class TransitionStatisticsBuilder:
                 outcome=collapse_exam_result_outcomes(all_exam_outcomes),
             )
 
+    # 消费单条 replay 记录，并将其中每一轮问答继续拆成统计观测。
     def _consume_replay_result(self, record: dict[str, Any], stats: TransitionStatistics) -> None:
         case_id = str(record.get("case_id") or "").strip()
         disease_id = stats.case_disease_map.get(case_id, "")
@@ -593,6 +629,7 @@ class TransitionStatisticsBuilder:
                 continue
             self._consume_replay_turn(turn, disease_id, stats)
 
+    # 将单轮 replay turn 解释成 verify 或 exam_context 的统计观测。
     def _consume_replay_turn(
         self,
         turn: dict[str, Any],
@@ -606,6 +643,7 @@ class TransitionStatisticsBuilder:
             str(turn.get("asked_action_acquisition_mode") or "").strip(),
             str(turn.get("asked_target_node_label") or "").strip(),
         )
+        # exam_context 动作先记录做没做，再在 done 时补具体结果和 reveal 出来的 verify 证据。
         if is_exam_context_action(question_node_id, action_group, question_type):
             exam_kind = normalize_exam_kind(question_node_id.split("::")[-1] if "::" in question_node_id else "general")
             availability = infer_replay_exam_availability(turn)
@@ -641,6 +679,7 @@ class TransitionStatisticsBuilder:
                         outcome=result_outcome,
                     )
 
+            # 若这次 exam_context 顺带 reveal 了具体槽位，也把它记回普通 verify 分布。
             revealed_slot_id = str(turn.get("revealed_slot_id") or "").strip()
             if len(revealed_slot_id) > 0:
                 families = tuple(_normalize_family_list(turn.get("revealed_slot_families")))
@@ -664,6 +703,7 @@ class TransitionStatisticsBuilder:
                     )
             return
 
+        # 普通 verify 动作直接按 question_type + family 记一条观测。
         verify_outcome = infer_replay_verify_outcome(turn)
         revealed_slot_id = str(turn.get("revealed_slot_id") or "").strip()
         evidence_node_id = revealed_slot_id or question_node_id
@@ -680,6 +720,7 @@ class TransitionStatisticsBuilder:
                 outcome=verify_outcome,
             )
 
+    # 兼容读取 jsonl、cases.json、单对象 json 等多种统计输入格式。
     def _iter_json_records(self, path: Path) -> Iterable[dict[str, Any] | Any]:
         if path.suffix == ".jsonl":
             with path.open("r", encoding="utf-8") as handle:
@@ -703,11 +744,13 @@ class TransitionStatisticsBuilder:
                 return
             yield payload
 
+    # 读取单个 JSON 文件，供 catalog / cases / replay loader 复用。
     def _load_json(self, path: Path) -> Any:
         with path.open("r", encoding="utf-8") as handle:
             return json.load(handle)
 
 
+# 将当前候选疾病列表压成归一化 belief weights，供 statistical mixture 直接消费。
 def build_normalized_hypothesis_belief(
     candidates: Sequence[HypothesisScore | HypothesisCandidate] | None,
     *,
@@ -718,6 +761,7 @@ def build_normalized_hypothesis_belief(
     if candidates is None or len(candidates) == 0:
         return []
 
+    # 先按 disease_id 聚合重复候选，只保留同一疾病里分数最高的那条。
     aggregated: dict[str, tuple[float, str, dict[str, Any]]] = {}
     for item in candidates:
         disease_id = str(getattr(item, "node_id", "") or "").strip()
@@ -738,6 +782,7 @@ def build_normalized_hypothesis_belief(
     if len(aggregated) == 0:
         return []
 
+    # 再只取 top-k，并把正分数归一化为可用于 mixture 的 belief weight。
     top_items = sorted(
         aggregated.items(),
         key=lambda pair: (-pair[1][0], pair[0]),
@@ -763,6 +808,7 @@ def build_normalized_hypothesis_belief(
     return belief_weights
 
 
+# 从动作对象里统一抽取 transition 统计查询所需的上下文字段。
 def infer_action_context(
     action: MctsAction,
     *,
@@ -774,6 +820,7 @@ def infer_action_context(
     metadata = dict(action.metadata or {})
     acquisition_mode = str(metadata.get("acquisition_mode") or "").strip()
     evidence_cost = str(metadata.get("evidence_cost") or "").strip()
+    # 先根据 action metadata、采集模式和节点标签统一规范 question_type。
     question_type = normalize_question_type_hint(
         str(metadata.get("question_type_hint") or "").strip(),
         acquisition_mode,
@@ -781,6 +828,7 @@ def infer_action_context(
     )
     branch_schema = "verify"
     exam_kind = normalize_exam_kind(str(metadata.get("exam_kind") or "").strip())
+    # exam_kind 可能来自显式 metadata，也可能要从 candidate kind 或 question_type 反推。
     if exam_kind == "general" and not str(action.target_node_id or "").startswith("__exam_context__::general"):
         exam_kind = normalize_exam_kind(str(metadata.get("candidate_exam_kind") or "").strip())
     if exam_kind == "general" and question_type in {"lab", "imaging", "pathogen"}:
@@ -788,12 +836,14 @@ def infer_action_context(
     if len(exam_kind) == 0:
         exam_kind = infer_exam_kind(acquisition_mode, question_type, str(action.target_node_label or ""))
 
+    # collect_exam_context 动作不走普通 verify 三分支，而是切到专门的 exam_context schema。
     if is_exam_context_action(action.target_node_id, action.action_type, question_type):
         branch_schema = "exam_context"
         if str(action.target_node_id or "").startswith("__exam_context__::"):
             exam_kind = normalize_exam_kind(str(action.target_node_id).split("::")[-1])
         question_type = "exam_context"
 
+    # family 优先吃动作自带 metadata，其次再回查统计表中的 disease-node family 映射。
     evidence_families = _extract_families_from_action_metadata(metadata)
     if len(evidence_families) == 0 and statistics is not None:
         evidence_families = statistics.lookup_evidence_families(
@@ -803,6 +853,7 @@ def infer_action_context(
     if len(evidence_families) == 0:
         evidence_families = (default_family_for_question_type(question_type),)
 
+    # exam_context 需要继续细分到 test_type；普通 verify 只有 lab / imaging / pathogen 才映射 test_type。
     if branch_schema == "exam_context":
         test_type = normalize_exam_kind(str(metadata.get("test_type") or "").strip())
         if len(test_type) == 0:
@@ -827,6 +878,7 @@ def infer_action_context(
     )
 
 
+# 将 question_type_hint、采集模式和节点标签统一规整成统计表使用的 question_type。
 def normalize_question_type_hint(question_type_hint: str, acquisition_mode: str, label: str) -> str:
     normalized_hint = str(question_type_hint or "").strip()
     normalized_mode = str(acquisition_mode or "").strip()
@@ -851,6 +903,7 @@ def normalize_question_type_hint(question_type_hint: str, acquisition_mode: str,
     return normalized_hint or "symptom"
 
 
+# 规范化 exam_kind，只允许进入 general / lab / imaging / pathogen 这几类。
 def normalize_exam_kind(exam_kind: str) -> str:
     normalized = str(exam_kind or "").strip()
     if normalized in EXAM_KINDS:
@@ -858,6 +911,7 @@ def normalize_exam_kind(exam_kind: str) -> str:
     return ""
 
 
+# 当显式 exam_kind 缺失时，根据 acquisition_mode / question_type / label 反推检查类型。
 def infer_exam_kind(acquisition_mode: str, question_type: str, label: str) -> str:
     normalized_mode = str(acquisition_mode or "").strip()
     normalized_question_type = str(question_type or "").strip()
@@ -871,11 +925,13 @@ def infer_exam_kind(acquisition_mode: str, question_type: str, label: str) -> st
     return ""
 
 
+# 为缺少 family 标签的动作按 question_type 提供一个最保守的默认 family。
 def default_family_for_question_type(question_type: str | None) -> str:
     normalized_question_type = normalize_question_type_hint(str(question_type or ""), "", "")
     return DEFAULT_FAMILY_BY_QUESTION_TYPE.get(normalized_question_type, "general_symptom")
 
 
+# 将各种 verify 侧 outcome 表述统一压成 present / absent / unclear。
 def normalize_verify_outcome(outcome: str) -> str:
     normalized = str(outcome or "").strip()
     if normalized in {"present", "positive", "done_positive"}:
@@ -885,6 +941,7 @@ def normalize_verify_outcome(outcome: str) -> str:
     return "unclear"
 
 
+# 将 exam availability 侧 outcome 表述统一压成 done / not_done / unclear。
 def normalize_exam_availability(outcome: str) -> str:
     normalized = str(outcome or "").strip()
     if normalized in {"done", "present"}:
@@ -894,6 +951,7 @@ def normalize_exam_availability(outcome: str) -> str:
     return "unclear"
 
 
+# 将 exam result 侧 outcome 表述统一压成 positive / negative / unclear。
 def normalize_exam_result(outcome: str) -> str:
     normalized = str(outcome or "").strip()
     if normalized in {"positive", "present", "done_positive"}:
@@ -903,6 +961,7 @@ def normalize_exam_result(outcome: str) -> str:
     return "unclear"
 
 
+# 规范化写入 Counter 的 outcome 文本，避免多套枚举混入同一个桶。
 def normalize_counter_outcome(outcome: str | None) -> str:
     normalized = str(outcome or "").strip()
     if normalized in VERIFY_OUTCOMES or normalized in EXAM_AVAILABILITY_OUTCOMES or normalized in EXAM_RESULT_OUTCOMES:
@@ -912,6 +971,7 @@ def normalize_counter_outcome(outcome: str | None) -> str:
     return "unclear"
 
 
+# 从 graph case 的 slot truth 真值粗略推断出 verify 结果方向。
 def infer_slot_truth_outcome(value: Any) -> str:
     if isinstance(value, bool):
         return "present" if value else "absent"
@@ -927,6 +987,7 @@ def infer_slot_truth_outcome(value: Any) -> str:
     return "unclear"
 
 
+# 将同一类检查下多个 verify 结果折叠成一个粗粒度 exam result outcome。
 def collapse_exam_result_outcomes(outcomes: Sequence[str]) -> str:
     normalized_outcomes = [normalize_verify_outcome(item) for item in outcomes]
     if any(item == "present" for item in normalized_outcomes):
@@ -936,6 +997,7 @@ def collapse_exam_result_outcomes(outcomes: Sequence[str]) -> str:
     return "unclear"
 
 
+# 从 replay turn 中推断普通 verify 问题最终拿到的是 present / absent / unclear。
 def infer_replay_verify_outcome(turn: dict[str, Any]) -> str:
     revealed_positive = turn.get("revealed_slot_positive")
     if revealed_positive is True:
@@ -948,6 +1010,7 @@ def infer_replay_verify_outcome(turn: dict[str, Any]) -> str:
     return "unclear"
 
 
+# 从 replay turn 中推断某类检查是否做过。
 def infer_replay_exam_availability(turn: dict[str, Any]) -> str:
     revealed_slot_id = str(turn.get("revealed_slot_id") or "").strip()
     if len(revealed_slot_id) > 0:
@@ -960,6 +1023,7 @@ def infer_replay_exam_availability(turn: dict[str, Any]) -> str:
     return "done"
 
 
+# 从 replay turn 中推断“做过检查后结果偏阳性还是偏阴性”。
 def infer_replay_exam_result(turn: dict[str, Any]) -> str:
     revealed_positive = turn.get("revealed_slot_positive")
     if revealed_positive is True:
@@ -969,6 +1033,7 @@ def infer_replay_exam_result(turn: dict[str, Any]) -> str:
     return "unclear"
 
 
+# 判断一个动作是否属于 collect_exam_context 这类专门的检查上下文动作。
 def is_exam_context_action(target_node_id: str | None, action_type: str | None, question_type: str | None) -> bool:
     normalized_target = str(target_node_id or "").strip()
     normalized_action_type = str(action_type or "").strip()
@@ -980,7 +1045,9 @@ def is_exam_context_action(target_node_id: str | None, action_type: str | None, 
     )
 
 
+# 从动作 metadata 中提取 evidence family，兼容多种历史字段名。
 def _extract_families_from_action_metadata(metadata: dict[str, Any]) -> tuple[str, ...]:
+    # 先吃显式 family 字段；只有都没有时才尝试从 evidence_tags 反推。
     for key in ("evidence_families", "families", "evidence_family", "family"):
         normalized = tuple(_normalize_family_list(metadata.get(key)))
         if len(normalized) > 0:
@@ -991,6 +1058,7 @@ def _extract_families_from_action_metadata(metadata: dict[str, Any]) -> tuple[st
     return ()
 
 
+# 将字符串或序列形式的 family 输入规整成去重后的字符串列表。
 def _normalize_family_list(value: Any) -> list[str]:
     if isinstance(value, str):
         normalized = value.strip()
@@ -1006,12 +1074,14 @@ def _normalize_family_list(value: Any) -> list[str]:
     return deduped
 
 
+# 将 evidence_tags 映射回统计可消费的 family 标签，并滤掉纯控制型 tag。
 def _normalize_evidence_tag_families(value: Any) -> list[str]:
     deduped: list[str] = []
     for tag in _normalize_family_list(value):
         normalized_tag = str(tag or "").strip()
         if len(normalized_tag) == 0 or normalized_tag.startswith("type:"):
             continue
+        # exam_context / recommended 这类流程控制标签不进入统计 family。
         if normalized_tag in {"exam_context", "recommended"}:
             continue
         family = EVIDENCE_TAG_TO_FAMILY.get(normalized_tag, normalized_tag)
@@ -1021,11 +1091,13 @@ def _normalize_evidence_tag_families(value: Any) -> list[str]:
     return deduped
 
 
+# 对任意计数桶做加性平滑，保证所有 outcome 都能返回合法概率。
 def _smoothed_distribution(counter: Counter[str], outcomes: Sequence[str], alpha: float) -> dict[str, float]:
     safe_alpha = max(float(alpha), 1e-6)
     total = float(sum(counter.values()))
     denominator = total + safe_alpha * len(outcomes)
     if denominator <= 0.0:
+        # 完全没有样本时退回均匀分布，避免上游拿到全零概率。
         uniform = 1.0 / max(len(outcomes), 1)
         return {str(outcome): uniform for outcome in outcomes}
     return {
