@@ -18,7 +18,6 @@
 - 搜索图谱链路：`knowledge_graph/README.md`
 - 搜索图谱本体：`docs/search_kg_label_guide.md`
 - 前端演示：`frontend/README.md`
-- 第二阶段记录：`docs/phase2_changelog.md`、`docs/phase2_execution_checklist.md`
 
 ## 仓库级约定
 
@@ -30,7 +29,7 @@
 - 不依赖或清理用户未明确要求的大型本地产物，例如 `HIV/`、`HIV_cleaned/`、`test_outputs/`。
 - `.gitignore` 默认忽略 `*.sh`；新增 shell 脚本前先确认是否需要显式放行。
 - 默认使用 `python -m pytest`，不要直接运行 `pytest`。
-- 完成相对独立的实现工作后，除非用户明确限制范围，同步更新相关 README 和 `docs/phase2_changelog.md`。
+- 完成相对独立的实现工作后，除非用户明确限制范围，同步更新相关 README 与运行链路文档。
 
 ## 常用命令
 

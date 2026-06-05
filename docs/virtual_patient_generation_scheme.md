@@ -1149,4 +1149,3 @@ conda run --no-capture-output -n GraduationDesign python scripts/run_batch_repla
 
 - [simulator/README.md](/Users/loki/Workspace/GraduationDesign/simulator/README.md)
 - [README.md](/Users/loki/Workspace/GraduationDesign/README.md)
-- [phase2_changelog.md](/Users/loki/Workspace/GraduationDesign/docs/phase2_changelog.md)

@@ -126,9 +126,6 @@
   - [brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
   - [simulator/README.md](/Users/loki/Workspace/GraduationDesign/simulator/README.md)
 
-- 开发清单：
-  - [docs/phase2_execution_checklist.md](/Users/loki/Workspace/GraduationDesign/docs/phase2_execution_checklist.md)
-
 ## 后续建议补充的测试方向
 
 后续建议按下面顺序继续扩展：

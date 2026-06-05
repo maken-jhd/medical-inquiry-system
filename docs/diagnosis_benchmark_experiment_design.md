@@ -201,8 +201,6 @@
 - [ ] `LLM + 文本 RAG`
   - 当前建议：
     - 本轮不直接插入当前内部消融主线
-    - 如需开始实现，开发清单见：
-      - [external_llm_baseline_development_checklist.md](/Users/loki/Workspace/GraduationDesign/docs/external_llm_baseline_development_checklist.md)
 
 ## 3. 当前推荐的论文主叙事
 

@@ -27,7 +27,6 @@
 - 第二阶段问诊大脑：[brain/README.md](/Users/loki/Workspace/GraduationDesign/brain/README.md)
 - 第二阶段问诊大脑详细运行链路指南（当前按 `turn_interpreter -> A1 / A2 / A3 -> verifier-only acceptance -> repair` 口径说明，且已细化到 `pending action / A2 刷新 / verifier guard / repair 分流` 级别）：[brain_runtime_call_chain_guide.md](/Users/loki/Workspace/GraduationDesign/docs/brain_runtime_call_chain_guide.md)
 - 第二阶段虚拟病人与回放详细运行链路指南：[simulator_runtime_call_chain_guide.md](/Users/loki/Workspace/GraduationDesign/docs/simulator_runtime_call_chain_guide.md)
-- Med-MCTS 论文实现与当前系统实现对照、启发参数来源与后续优化方向：[med_mcts_vs_current_system.md](/Users/loki/Workspace/GraduationDesign/docs/med_mcts_vs_current_system.md)
 - 诊断系统 benchmark 可执行实验设计：[diagnosis_benchmark_experiment_design.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_benchmark_experiment_design.md)
 - 论文实验与测试章节草稿：[thesis_experiment_and_test_section_draft.md](/Users/loki/Workspace/GraduationDesign/docs/thesis_experiment_and_test_section_draft.md)
 - 虚拟病人与离线回放：[simulator/README.md](/Users/loki/Workspace/GraduationDesign/simulator/README.md)
@@ -539,12 +538,7 @@ streamlit run frontend/app.py --server.port 8514
 - [tests/test_generate_cases.py](/Users/loki/Workspace/GraduationDesign/tests/test_generate_cases.py)
 - [tests/test_graph_case_generator.py](/Users/loki/Workspace/GraduationDesign/tests/test_graph_case_generator.py)
 - [tests/test_benchmark.py](/Users/loki/Workspace/GraduationDesign/tests/test_benchmark.py)
-- [phase2_execution_checklist.md](/Users/loki/Workspace/GraduationDesign/docs/phase2_execution_checklist.md)：第二阶段与虚拟病人开发清单
-- [diagnosis_algorithm_batch_execution_checklist.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_algorithm_batch_execution_checklist.md)：按三批节奏推进当前诊断算法的可执行开发清单，重点围绕 `top3_hypothesis_hit / top1_final_answer_hit`
 - [diagnosis_system_todolist.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_system_todolist.md)：当前诊断系统待完善点与后续迭代顺序
-- [external_llm_baseline_development_checklist.md](/Users/loki/Workspace/GraduationDesign/docs/external_llm_baseline_development_checklist.md)：外部 `纯 LLM / LLM + 文本 RAG` baseline 的开发清单，补充了 replay summary schema 对齐、`target_node_id` 约定与 runner 启动配置注意事项
-- [med_mcts_vs_current_system.md](/Users/loki/Workspace/GraduationDesign/docs/med_mcts_vs_current_system.md)：整理论文实现与当前动态问诊实现的差异、启发式参数来源及后续优化方向
-- [phase2_changelog.md](/Users/loki/Workspace/GraduationDesign/docs/phase2_changelog.md)：第二阶段实现历程、问题改进与论文写作素材整理
 - [virtual_patient_generation_scheme.md](/Users/loki/Workspace/GraduationDesign/docs/virtual_patient_generation_scheme.md)：图谱驱动虚拟病人详细方案、病例类型规则、骨架字段与论文写作素材整理
 - [scripts/run_brain_demo.py](/Users/loki/Workspace/GraduationDesign/scripts/run_brain_demo.py)：最小命令行问诊演示入口
 - [scripts/diagnose_smoke10_failures.py](/Users/loki/Workspace/GraduationDesign/scripts/diagnose_smoke10_failures.py)：对指定 replay 输出目录做 `med_extractor / A1` payload 审计，并生成 JSON / Markdown 诊断报告
@@ -573,9 +567,6 @@ streamlit run frontend/app.py --server.port 8514
 - [simulator/README.md](/Users/loki/Workspace/GraduationDesign/simulator/README.md) 说明虚拟病人与离线回放目录结构与文件职责
 - [frontend/README.md](/Users/loki/Workspace/GraduationDesign/frontend/README.md) 说明 Streamlit 前端启动、回放模式、实时模式与配置方式
 - [tests/README.md](/Users/loki/Workspace/GraduationDesign/tests/README.md) 说明第二阶段测试组织方式与当前覆盖范围
-- [med_mcts_vs_current_system.md](/Users/loki/Workspace/GraduationDesign/docs/med_mcts_vs_current_system.md) 记录论文实现与当前系统实现的关键差异，并整理启发式参数的来源与下一步优化方向
-- [phase2_changelog.md](/Users/loki/Workspace/GraduationDesign/docs/phase2_changelog.md) 重点记录第二阶段各轮改进分别解决了什么问题，适合作为论文写作材料
-- [diagnosis_algorithm_batch_execution_checklist.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_algorithm_batch_execution_checklist.md) 适合当前这轮诊断算法改造时直接按批次执行、验收和回放
 - [diagnosis_system_todolist.md](/Users/loki/Workspace/GraduationDesign/docs/diagnosis_system_todolist.md) 记录当前诊断系统仍待完善的点，适合作为后续实现顺序与回归目标清单
 
 ## 当前环境
